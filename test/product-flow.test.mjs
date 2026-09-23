@@ -83,6 +83,28 @@ test('on-demand files preserve turn boundaries and exclude failed changes from a
   for (const target of ['/project-other/a.txt', '../a.txt', '.env', 'javascript:alert(1)', '/private/a.txt']) assert.equal(projectPath(target, '/project'), null);
 });
 
+test('live execution displays public activity and retains manual collapse, tool nodes and composer drafts', async t => {
+  const { $, document, settle, events, thread, input, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  input('prompt', '保留这个草稿');
+  const items = [
+    { id: 'u', type: 'userMessage', text: '检查', turnId: 'live' },
+    { id: 's', type: 'activitySummary', title: '工作摘要', text: '核对文件后运行验证', turnId: 'live' },
+    { id: 'p', type: 'activityPlan', title: '任务计划', steps: [{ step: '读取文件', status: 'completed' }, { step: '验证', status: 'inProgress' }], turnId: 'live' },
+    { id: 'tool', type: 'mcpToolCall', title: '测试工具', text: '', progress: ['已完成 1/2'], status: 'inProgress', turnId: 'live' },
+  ];
+  events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'live', latestTurnId: 'live', items });
+  const group = document.querySelector('.execution-group'), tool = group.querySelector('.activity-details');
+  assert.equal(group.open, true); assert.match(group.textContent, /核对文件后运行验证/); assert.match(group.textContent, /已完成 1\/2/);
+  assert.equal(group.querySelectorAll('.activity-steps li').length, 2);
+  group.open = false; tool.open = true;
+  items[3] = { ...items[3], text: '结果', status: 'completed', progress: ['已完成 1/2', '已完成 2/2'], durationMs: 2500 };
+  events.emit('thread', { ...thread, revision: 3, busy: false, turnId: null, latestTurnId: 'live', completion: 'completed', items });
+  assert.equal(document.querySelector('.execution-group'), group); assert.equal(group.open, false);
+  assert.equal(group.querySelector('.activity-details'), tool); assert.equal(tool.open, true); assert.match(group.firstElementChild.textContent, /已结束/);
+  assert.equal($('prompt').value, '保留这个草稿'); assert.equal(requests.some(request => request.route === '/api/send'), false);
+});
+
 test('historical file attachments hide transport paths, open in the editor and do not pollute resend text', async t => {
   const { $, document, settle, events, thread, requests } = await page(t);
   document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');

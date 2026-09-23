@@ -54,6 +54,7 @@ const assets = new Map([
   ['/query-history.js', ['query-history.js', 'text/javascript; charset=utf-8']],
   ['/product-ui.js', ['product-ui.js', 'text/javascript; charset=utf-8']],
   ['/task-results.js', ['task-results.js', 'text/javascript; charset=utf-8']],
+  ['/execution-view.js', ['execution-view.js', 'text/javascript; charset=utf-8']],
   ['/message-timing.js', ['message-timing.js', 'text/javascript; charset=utf-8']],
   ['/sql-query.js', ['sql-query.js', 'text/javascript; charset=utf-8']],
   ['/sql-parameters.js', ['sql-parameters.js', 'text/javascript; charset=utf-8']],

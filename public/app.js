@@ -12,6 +12,7 @@ import { renderMessageTimes, turnDuration } from './message-timing.js';
 import { createSqlQuery, sqlFileFromRunnerLink } from './sql-query.js';
 import { createProductUI, createGitSubmit } from './product-ui.js';
 import { createBottomPanel } from './editor-window.js';
+import { renderActivity, activityTitle, activityFailed, executionTypes } from './execution-view.js';
 
 const $ = id => document.getElementById(id);
 bindMarkdownTableCopy(document, { notify: toast });
@@ -413,7 +414,6 @@ async function newThread(preserveDraft = true) {
   notice(null); hideSidebar(); render(); renderHistory(); $('prompt').focus();
 }
 
-const statusLabel = status => ({ inProgress: '进行中', completed: '已完成', failed: '失败', declined: '已拒绝', approved: '已批准', denied: '已拒绝' })[status] || status || '';
 function render(forceScroll = false) {
   const t = selected();
   const area = $('scrollArea');
@@ -433,7 +433,8 @@ function render(forceScroll = false) {
       let el = elements.get(item.id);
       if (!el) { el = document.createElement('article'); elements.set(item.id, el); $('messages').append(el); }
       if (groups.has(item.id)) { workbench.renderAgentGroup(el, groups.get(item.id)); continue; }
-      const signature = JSON.stringify(item);
+      const turnStatus = t.turnTimings?.find(turn => turn.id === item.turnId)?.status || (item.turnId === t.latestTurnId ? t.busy ? 'inProgress' : t.completion : null);
+      const signature = JSON.stringify(['userMessage', 'agentMessage', 'plan'].includes(item.type) ? item : [item, turnStatus]);
       if (el.dataset.signature === signature) continue;
       el.dataset.signature = signature;
       if (item.type === 'userMessage') {
@@ -479,13 +480,11 @@ function render(forceScroll = false) {
           link.addEventListener('click', event => { event.preventDefault(); openProjectLink(sqlPath); });
         }
       } else {
-        const open = el.querySelector('details')?.open || false;
-        el.className = 'tool';
-        el.innerHTML = `<details${open ? ' open' : ''}><summary><span class="tool-title">${esc(item.title)}</span><span>${esc(statusLabel(item.status))}</span></summary><pre>${esc(item.text || '暂无输出')}${item.exitCode != null ? `\n退出码：${esc(item.exitCode)}` : ''}</pre></details>`;
+        renderActivity(el, { ...item, turnStatus });
       }
       if (item.type === 'fileChange' && state.workbenchFeatures) {
-        const view = document.createElement('button'); view.className = 'text-button'; view.textContent = '查看差异 / 回退';
-        view.onclick = () => workbench.show('git', { changes: (item.changes || []).map(change => ({ ...change, itemId: item.id, status: item.status })) }); el.append(view);
+        const view = el.querySelector('.activity-diff') || document.createElement('button'); view.className = 'text-button activity-diff'; view.textContent = '查看差异 / 回退';
+        view.onclick = () => workbench.show('git', { changes: (item.changes || []).map(change => ({ ...change, itemId: item.id, status: item.status })) }); if (!view.parentNode) el.append(view);
       }
     }
   }
@@ -506,17 +505,19 @@ function organizeExecution(thread) {
   const groups = new Map(); let turn = 'history';
   for (const item of thread?.items || []) {
     if (item.type === 'userMessage') turn = item.id;
-    if (!['commandExecution', 'mcpToolCall', 'webSearch', 'dynamicToolCall'].includes(item.type)) continue;
+    if (!executionTypes.has(item.type)) continue;
     const key = item.turnId || turn; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(item);
   }
   for (const [key, group] of executionContainers) if (!groups.has(key)) { group.remove(); executionContainers.delete(key); }
   for (const [key, items] of groups) {
     const first = elements.get(items[0].id); if (!first) continue;
     let group = executionContainers.get(key);
-    if (!group) { group = document.createElement('details'); group.className = 'execution-group'; group.append(document.createElement('summary')); first.before(group); executionContainers.set(key, group); }
-    const failures = items.filter(item => ['failed', 'declined', 'denied'].includes(item.status) || Number(item.exitCode) > 0).length;
-    const active = items.some(item => item.status === 'inProgress');
-    group.firstElementChild.textContent = `执行过程 · ${items.length} 项${active ? ' · 进行中' : ' · 已结束'}${failures ? ` · ${failures} 项需查看` : ''}`;
+    if (!group) { group = document.createElement('details'); group.className = 'execution-group'; group.open = !!thread.busy && key === thread.turnId; group.append(document.createElement('summary')); first.before(group); executionContainers.set(key, group); }
+    const failures = items.filter(activityFailed).length;
+    const active = !!thread.busy && key === thread.turnId;
+    const running = active ? items.findLast(item => item.status === 'inProgress') : null;
+    const stateLabel = active ? `进行中${running ? ` · ${activityTitle(running)}` : ''}` : key === thread.latestTurnId && thread.completion === 'interrupted' ? '已中断' : '已结束';
+    group.firstElementChild.textContent = `执行过程 · ${items.length} 项 · ${stateLabel}${failures ? ` · ${failures} 项需查看` : ''}`;
     group.classList.toggle('has-failures', !!failures);
     for (const item of items) { const element = elements.get(item.id); if (element && element.parentNode !== group) group.append(element); }
   }
