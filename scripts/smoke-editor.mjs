@@ -1,0 +1,28 @@
+// Real local HTTP editor test. Only writes its own temporary fixture; no model turn.
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, readFile, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+const index = process.argv.indexOf('--url');
+const base = (index >= 0 && process.argv[index + 1]) || 'http://127.0.0.1:4318';
+const page = await fetch(base), cookie = page.headers.get('set-cookie')?.split(';')[0];
+assert.ok(cookie);
+const html = await page.text();
+for (const id of ['fileEditorText', 'editorDragHandle', 'editorMaximize', 'editorHighlight', 'editorLanguage', 'editorResizese']) assert.ok(html.includes(`id="${id}"`));
+for (const asset of ['file-editor.js', 'editor-window.js', 'code-highlight.js']) assert.equal((await fetch(`${base}/${asset}`)).status, 200);
+const boot = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'codex-editor-smoke-')));
+const filename = path.join(cwd, 'manual-edit.txt');
+await writeFile(filename, '\uFEFFtemporary fixture\r\n');
+const route = `/api/project/file?cwd=${encodeURIComponent(cwd)}&path=manual-edit.txt`;
+const response = await fetch(`${base}${route}`, { headers: { cookie } }); assert.equal(response.status, 200);
+const original = await response.json(); assert.equal(original.bom, true); assert.equal(original.newline, 'CRLF');
+const headers = { cookie, Origin: base, 'Content-Type': 'application/json', 'X-Codex-CSRF': boot.csrf };
+const saved = await fetch(`${base}/api/project/save`, { method: 'POST', headers, body: JSON.stringify({ cwd, path: 'manual-edit.txt', version: original.version, content: 'manually edited fixture\n' }) });
+assert.equal(saved.status, 200);
+const updated = await saved.json();
+assert.equal(await readFile(filename, 'utf8'), '\uFEFFmanually edited fixture\r\n');
+await writeFile(filename, 'external edit fixture');
+const conflict = await fetch(`${base}/api/project/save`, { method: 'POST', headers, body: JSON.stringify({ cwd, path: 'manual-edit.txt', version: updated.version, content: 'must not overwrite external edit' }) });
+assert.equal(conflict.status, 409); assert.equal(await readFile(filename, 'utf8'), 'external edit fixture');
+console.log(JSON.stringify({ ok: true, editorAsset: true, read: true, save: true, bomAndCRLFPreserved: true, externalConflictBlocked: true, modelTurns: 0, onlyTemporaryFixtureModified: true }));

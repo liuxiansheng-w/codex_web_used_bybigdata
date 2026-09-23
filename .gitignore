@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.*
+*.log
+.DS_Store
+test-results/
+.local/
+output/
+.playwright-cli/
+coverage/
+__pycache__/
+*.py[cod]
+*.pem
+*.key
+*.p12
+*.pfx

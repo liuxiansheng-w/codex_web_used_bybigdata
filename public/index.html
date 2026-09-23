@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta id="themeColor" name="theme-color" content="#090c12">
+  <title>柠檬</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a href="#prompt" class="skip-link">跳到输入框</a>
+  <div class="app" id="appShell">
+    <aside class="sidebar" id="sidebar" aria-label="项目与文件导航">
+      <div class="brand"><img src="/favicon.svg" alt="" width="32" height="32"><div>柠檬</div><button id="closeSidebar" class="icon-button" aria-label="收起侧栏" title="收起侧栏"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button></div>
+      <button id="workbenchButton" class="workspace-tools-button">项目工具 <span>搜索 · 变更 · 成果</span></button>
+      <div class="projects-heading"><span>项目</span><div><button id="addProjectButton" type="button" class="icon-button" aria-label="新增项目" title="新增项目：选择本机文件夹">＋</button><button id="collapseProjects" type="button" class="icon-button" aria-label="展开或收起项目列表" aria-controls="projectList" aria-expanded="true" title="展开或收起项目列表">−</button></div></div>
+      <nav id="projectList" class="project-list" aria-label="本机项目"></nav>
+      <section id="filesPanel" class="sidebar-panel" aria-label="项目文件">
+        <label class="search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="fileSearch" placeholder="筛选已加载的文件" aria-label="筛选已加载的项目文件"></label>
+        <div class="history-heading"><span>项目文件</span><div><button id="collapseFiles" type="button" class="icon-button" title="收起全部目录" aria-label="收起全部目录"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h12v12M4 8h12v12H4Zm3 6h6"/></svg></button><button id="refreshFiles" type="button" class="icon-button" title="刷新文件树" aria-label="刷新文件树"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6"/></svg></button></div></div>
+        <div class="file-tree-scroll"><ul id="projectFileTree" class="file-tree" aria-label="项目文件树"></ul></div>
+        <p class="file-tree-help">点文件名编辑 · 点「＋」加入对话<br>隐藏项、依赖、符号链接及排除目录不显示</p>
+      </section>
+      <button id="modelSwitchButton" class="sidebar-model-button" type="button" aria-haspopup="dialog" title="切换模型服务"><span class="model-switch-symbol" aria-hidden="true">✦</span><span><small>模型服务</small><strong>Codex</strong></span><span aria-hidden="true">⌃</span></button>
+      <div class="sidebar-bottom"><span class="account-avatar"><img src="/favicon.svg" alt="" width="23" height="23"></span><div><strong id="accountName">本机助手</strong><small id="accountStatus">正在连接</small></div><button id="settingsButton" class="icon-button" aria-label="设置" title="设置：草稿、通知与连接"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button></div>
+      <div id="sidebarResizeHandle" class="sidebar-resize-handle" role="separator" tabindex="0" aria-label="调整左侧栏宽度" aria-controls="sidebar workSurface" aria-orientation="vertical" title="左右拖动调整侧栏宽度 · 双击重置 · 左右方向键微调"></div>
+    </aside>
+    <button id="scrim" class="scrim" aria-label="关闭侧栏" hidden></button>
+    <div id="workSurface" class="work-surface">
+    <div id="workspacePanes" class="workspace-panes">
+    <section id="fileEditor" class="editor-pane" aria-label="文件编辑器" hidden>
+      <header id="editorDragHandle" class="editor-header" tabindex="-1" aria-label="编辑器标签栏">
+        <div class="editor-tabs-bar"><strong id="editorFilename" class="sr-only">打开项目文件</strong><span id="editorDirty" class="sr-only" hidden>未保存</span><div id="editorTabs" class="editor-tabs" role="tablist" aria-label="已打开的文件"></div><span id="editorTabCount" class="sr-only">0 个文件</span></div>
+        <div class="editor-window-actions"><button id="editorLayoutToggle" type="button" class="text-button" title="切换为浮动窗口">浮动窗口</button><button id="editorResetWindow" type="button" class="icon-button" aria-label="重置平铺比例" title="重置平铺比例">↺</button><button id="editorMaximize" type="button" class="icon-button" aria-label="最大化窗口" aria-pressed="false" title="最大化窗口" hidden>□</button><button id="editorClose" type="button" class="icon-button" aria-label="关闭编辑器，返回对话" title="关闭编辑器，返回对话">×</button></div>
+      </header>
+      <div class="editor-commandbar"><div id="sqlTools" class="sql-tools" hidden></div><button id="editorAIToggle" type="button" class="text-button" aria-pressed="true" hidden>✦ AI 续写</button><button id="editorSave" type="button" class="text-button" title="保存当前文件 · ⌘ / Ctrl + S" disabled>保存</button><button id="editorFindToggle" type="button" class="text-button" title="查找 / 替换 · ⌘ / Ctrl + F">查找</button><div id="editorMarkdownModes" class="editor-markdown-modes" role="group" aria-label="Markdown 显示模式" hidden><button id="editorMarkdownPreview" type="button" aria-pressed="true" title="预览当前内容，包括未保存的修改">预览</button><button id="editorMarkdownSource" type="button" aria-pressed="false" title="编辑 Markdown 源码">源码</button></div><button id="editorMoreToggle" type="button" class="text-button" aria-expanded="false" aria-controls="editorAdvanced">更多 ⋯</button></div>
+      <div id="editorAdvanced" class="editor-advanced-toolbar" hidden><div id="editorPath" class="editor-path"></div><button id="editorExplain" type="button">解释选区</button><button id="editorModify" type="button">修改选区</button><button id="editorAttach" type="button" disabled>文件加入对话</button><button id="editorSelection" type="button">选区加入对话</button><button id="editorFormatCode" type="button">格式化</button><button id="editorCheckCode" type="button">静态检查</button><button id="editorComplete" type="button">补全</button><button id="editorHistory" type="button" hidden>修改历史 / 回退</button><button id="editorPreview" type="button">预览 / 下载</button><label>SQL 方言<select id="sqlDialect"><option value="sql">标准 SQL</option><option value="hive">Hive</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="spark">Spark</option><option value="transactsql">T-SQL</option><option value="sqlite">SQLite</option></select></label><button id="editorReload" type="button" disabled>重新载入</button><button id="editorSaveAll" type="button" title="⌘ / Ctrl + Shift + S" disabled>全部保存</button><button id="editorMinimize" type="button" title="保留文件标签和草稿">收起编辑器</button></div>
+      <div id="editorFindBar" class="editor-find" hidden role="search" aria-label="在当前文件中查找"><input id="editorFind" aria-label="查找文本" aria-describedby="editorFindCount" placeholder="查找（区分大小写）" autocomplete="off" spellcheck="false"><span id="editorFindCount" class="editor-find-count" role="status" aria-live="polite"></span><button id="editorFindPrevious" type="button" aria-label="上一个匹配" title="上一个 · Shift + Enter">↑</button><button id="editorFindNext" type="button" aria-label="下一个匹配" title="下一个 · Enter">↓</button><input id="editorReplace" aria-label="替换文本" placeholder="替换为"><button id="editorReplaceAll" type="button">替换全部…</button><button id="editorFindClose" type="button" aria-label="关闭查找" title="关闭查找 · Esc">×</button></div>
+      <div id="editorCompletionList" class="editor-completion-list" hidden></div><div id="editorDiagnostics" class="editor-diagnostics" hidden></div><p id="editorToolStatus" class="editor-tool-status" role="status"></p>
+      <p id="fileEditorError" class="editor-error" role="alert" hidden></p>
+      <div id="fileConflict" class="editor-conflict" hidden><span id="fileConflictText">磁盘有新代码，未保存编辑已保留。</span><button id="viewLatestFile" type="button" class="text-button">查看最新代码</button><button id="compareFileVersions" type="button" class="text-button">对照磁盘版本</button></div>
+      <div id="editorBuffers" class="editor-buffers"><div id="editorEmptyPanel" class="editor-code"><pre id="editorLineNumbers" class="editor-line-numbers" aria-hidden="true">1</pre><div class="editor-source"><pre id="editorHighlight" class="editor-highlight" aria-hidden="true"></pre><textarea id="fileEditorText" class="editor-input" aria-label="编辑文件内容" aria-describedby="editorHelp" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" maxlength="1048576" readonly></textarea></div></div></div>
+      <div id="sqlResultsDivider" class="sql-results-divider" role="separator" aria-label="调整查询结果高度" aria-controls="sqlResults" aria-orientation="horizontal" tabindex="0" title="上下拖动调整结果高度 · 双击重置 · 上下方向键微调" hidden></div>
+      <section id="sqlResults" class="sql-results" aria-label="SQL 查询结果" hidden></section>
+      <div class="editor-statusbar"><span id="editorStatus" role="status">尚未打开文件</span><button id="undoFileSync" type="button" class="text-button" title="撤销最近一次自动合并；合并后有新编辑时不可用" hidden>撤销合并</button><span id="editorAIStatus" class="editor-ai-status" role="status" aria-live="polite"></span><span id="editorCursor">行 1，列 1</span><select id="editorLanguage" aria-label="代码高亮语言"><option value="auto">自动识别</option><option value="sql">SQL</option><option value="python">Python</option><option value="text">纯文本</option></select><span id="editorLanguageStatus">纯文本</span><span id="editorFormat">UTF-8</span></div>
+      <p id="editorHelp" class="editor-help sr-only">⌘ / Ctrl + S 保存当前文件 · 加 Shift 全部保存 · Ctrl + PageUp / PageDown 切换标签<br>SQL 输入停顿后 AI 续写 · Tab 采纳提示 · Esc 忽略 · ⌥ / Alt + \ 手动续写；无提示时 Tab 增加缩进 · Shift + Tab 减少缩进（支持选中多行，Python 四空格，其他两空格） · ⌘ / Ctrl + / 切换行注释 · Esc 后按 Tab 移出编辑区 · 刷新前请保存所有文件</p>
+      <span id="editorResizen" class="editor-resize" data-edge="n" aria-hidden="true"></span><span id="editorResizee" class="editor-resize" data-edge="e" aria-hidden="true"></span><span id="editorResizes" class="editor-resize" data-edge="s" aria-hidden="true"></span><span id="editorResizew" class="editor-resize" data-edge="w" aria-hidden="true"></span><span id="editorResizene" class="editor-resize" data-edge="ne" aria-hidden="true"></span><span id="editorResizenw" class="editor-resize" data-edge="nw" aria-hidden="true"></span><span id="editorResizese" class="editor-resize" data-edge="se" aria-hidden="true"></span><span id="editorResizesw" class="editor-resize" data-edge="sw" aria-hidden="true"></span>
+    </section>
+    <div id="editorDivider" class="editor-divider" role="separator" tabindex="0" aria-label="调整编辑器与对话区域的比例" aria-controls="fileEditor mainPanel" aria-orientation="vertical" aria-valuemin="20" aria-valuemax="80" aria-valuenow="56" hidden></div>
+    <main id="mainPanel">
+      <header class="topbar">
+        <div class="breadcrumb"><button id="menuButton" class="icon-button" aria-label="展开侧栏" title="展开侧栏"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button><span class="workspace-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v12H3Z"/></svg></span><span id="breadcrumbWorkspace">dw_job</span></div>
+        <div class="topbar-actions"><div class="connection" id="connection" role="status"><span class="status-dot"></span><span id="connectionText">连接中</span><button id="reconnect" hidden>重新连接</button></div><span class="topbar-divider"></span><button id="appearanceToggle" type="button" class="appearance-toggle" aria-label="切换界面外观" aria-expanded="false" aria-controls="appearancePanel" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg><span>辉光</span></button><label class="appearance-picker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg><select id="appearanceSelect" aria-label="界面风格"><option value="aurora">极光</option><option value="cobalt">深空</option><option value="rose">绯霞</option><option value="graphite">曜石</option><option value="neon">辉光</option><option value="classic">经典</option></select></label><button id="themeToggle" type="button" class="theme-toggle" aria-label="浅色主题" aria-pressed="false" title="切换柔和浅色"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg><span>浅色</span></button><button id="shortcutsButton" class="icon-button" aria-label="键盘快捷键" title="键盘快捷键"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h.1m4 0h.1m4 0h.1m4 0h.1M6 12h.1m4 0h.1m4 0h.1m4 0h.1M7 16h10"/></svg></button></div>
+      </header>
+      <div class="conversation-heading"><button id="chatHistoryButton" type="button" class="icon-button" aria-label="返回会话列表" title="返回会话列表" aria-controls="historyPanel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6M8 12h13"/></svg></button><strong id="chatHistoryTitle" class="chat-history-title" hidden>聊天</strong><button id="parentThreadBack" type="button" class="text-button parent-thread-back" hidden>← 返回主任务</button><button id="conversationTitleButton" type="button" class="conversation-title" title="查看对话名称、重命名和更多操作"><span>当前对话</span><strong id="threadTitle">新对话</strong></button><span id="currentThreadStatus" class="thread-status" role="status">未开始</span><button id="chatSearchButton" type="button" class="icon-button" aria-label="搜索会话" title="搜索会话 · ⌘ / Ctrl + /"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button id="newThread" type="button" class="icon-button" aria-label="新建对话" title="新建对话 · ⌘ / Ctrl + K"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+      <section id="historyPanel" class="chat-history-panel" aria-label="会话列表" hidden>
+        <label class="search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="search" placeholder="搜索会话标题" aria-label="搜索会话标题"><kbd>⌘ /</kbd></label>
+        <div class="chat-history-filters"><select id="threadSearchScope" aria-label="会话搜索范围"><option value="title">标题</option><option value="content">会话内容</option></select>
+        <label class="archive-toggle"><input id="archivedThreads" type="checkbox">显示归档会话</label></div>
+        <p id="threadSearchInfo" class="history-search-info"></p>
+        <p id="historyError" class="field-error" role="alert" hidden></p>
+      <section class="session-activity" aria-labelledby="activityHeading"><div class="history-heading"><span id="activityHeading">进行中的会话</span><span id="activityCount">0</span></div><div id="activeThreadList" class="active-thread-list"></div><p id="activityEmpty" class="activity-empty">暂无已同步的运行任务</p></section>
+        <div class="history-heading"><span>最近对话</span><button id="refreshThreads" class="icon-button" aria-label="刷新会话列表" title="刷新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6"/></svg></button></div>
+        <nav id="threadList" class="thread-list" aria-label="最近对话"><p class="list-empty">正在读取会话…</p></nav>
+        <button id="loadMore" class="text-button" hidden>加载更多会话</button>
+      </section>
+
+      <div class="conversation-actions"><button id="quickSearch" type="button" class="text-button">项目搜索</button><button id="quickGit" type="button" class="text-button">变更与审查</button><button id="quickArtifacts" type="button" class="text-button">本轮成果</button><button id="quickAgents" type="button" class="text-button" hidden>AI 子任务</button><button id="quickTerminal" type="button" class="text-button">命令</button></div>
+      <div class="scroll-area" id="scrollArea">
+        <section id="welcome" class="welcome">
+          <img src="/favicon.svg" alt="" width="38" height="38">
+          <h1>今天，一起完成什么？</h1>
+          <p>描述任务，或通过下方「＋」添加文件、目标与工具。</p>
+          <div class="starter-prompts" aria-label="快速开始"><button type="button" data-prompt="请先只读浏览当前项目，说明主要目录、技术结构和关键入口，不修改文件。">浏览项目</button><span>·</span><button type="button" data-prompt="我想排查一个问题。请先询问我错误信息和复现步骤，再分析可能原因。">排查问题</button><span>·</span><button type="button" data-prompt="我准备开发一个新功能。请先和我确认预期效果、输入输出和涉及的文件，再开始实施。">开发功能</button></div>
+        </section>
+        <div id="conversationLoading" class="conversation-loading" role="status" hidden><span class="pulse"></span>正在读取对话…</div>
+        <section id="messages" class="messages" aria-label="对话内容" hidden></section>
+        <div id="runStatus" class="run-status" role="status" hidden><span class="pulse"></span><span id="runStatusText">柠檬正在处理…</span></div>
+        <button id="scrollBottom" class="scroll-bottom" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-5-5 5 5 5-5"/></svg>回到最新消息</button>
+      </div>
+      <div class="composer-area">
+        <div id="notice" class="notice" role="alert" hidden><span id="noticeText"></span><button id="dismissNotice" aria-label="关闭提示">×</button></div>
+        <section id="requests" class="requests" aria-label="等待你的回复"><div id="approvalToolbar" class="approval-toolbar" hidden><div><strong id="approvalCount"></strong><small id="approvalProgress" role="status">仅本次已列出的命令与文件修改</small></div><button id="approveAll" type="button" class="primary-button">全部允许一次</button></div></section>
+        <section id="messageQueue" class="message-queue" aria-label="待发送消息"></section>
+        <div id="goalBanner" class="goal-banner" hidden><button type="button" id="editGoal"><span>目标</span><strong id="goalSummary"></strong><small id="goalStatus"></small></button><button type="button" id="pauseGoal" class="text-button">暂停</button></div>
+        <div id="draftChoice" class="draft-choice" hidden><span>未发送内容目前只保留在本页。是否在此浏览器保存草稿？</span><button id="enableDraftRecovery" type="button" class="text-button">开启本机恢复</button><button id="keepDraftTemporary" type="button" class="text-button">仅本页</button></div>
+        <div id="draftRecovery" class="draft-choice" hidden><span id="draftRecoveryText"></span><button id="recoverDraftsNow" type="button" class="text-button">恢复草稿</button><button id="dismissDraftRecovery" type="button" class="text-button">稍后</button></div>
+        <form id="composer" class="composer">
+          <div class="drop-overlay" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 6-6a3 3 0 0 1 4 4L9 19a5 5 0 0 1-7-7l9-9m-3 9 6-6"/></svg><strong>释放文件，添加到这条消息</strong><span>支持文档、代码与图片 · 每个文件不超过 10 MB</span></div>
+          <label for="prompt" class="sr-only">输入消息</label>
+          <div id="contextChips" class="context-chips" aria-label="本条消息的附件与工具"></div>
+          <p id="fullAccessNotice" class="full-access-notice" role="status" hidden>完全访问权限：发送后可访问网络和本机文件，不再逐次请求批准。</p>
+          <textarea id="prompt" rows="2" placeholder="给柠檬一个任务，或拖入文件…" maxlength="100000" aria-describedby="composerHelp"></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-tools">
+              <div class="add-control">
+                <button id="addButton" type="button" class="tool-button icon-only" title="添加文件、目标、计划和工具" aria-label="添加文件、目标、计划和工具" aria-expanded="false" aria-controls="addMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+                <div id="addMenu" class="add-menu" role="region" aria-label="添加到对话" hidden>
+                  <div class="tool-menu-head"><strong>工具与上下文</strong><button type="button" id="closeTools" class="text-button">完成</button></div>
+                  <div class="quick-actions">
+                    <button type="button" id="attachFiles" class="menu-row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v12H3Z"/></svg><span><strong>文件与目录</strong><small>上传或引用本机路径</small></span></button>
+                    <button type="button" id="addGoal" class="menu-row"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="m12 12 8-8"/></svg><span><strong>持续目标</strong><small>设定并追踪任务目标</small></span></button>
+                    <button type="button" id="drawButton" class="menu-row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 3-7 5-6 3 3-6 6-5 4Zm8-1c8-7 0 5 6 3l3-2"/></svg><span><strong>绘制草图</strong><small>把布局与想法画出来</small></span></button>
+                    <button type="button" id="togglePlan" class="menu-row" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6m-6 3h6M8 14a7 7 0 1 1 8 0l-1 3H9Z"/></svg><span><strong>计划模式</strong><small id="planMenuText">开启计划模式</small></span><span id="planCheck" hidden>✓</span></button>
+                  </div>
+                  <div class="capability-header"><div class="catalog-tabs" role="tablist" aria-label="工具类别"><button type="button" id="pluginsTab" role="tab" aria-selected="true" aria-controls="pluginsPanel">插件</button><button type="button" id="skillsTab" role="tab" aria-selected="false" aria-controls="skillsPanel" tabindex="-1">技能</button></div><button type="button" id="refreshCapabilities" class="text-button">刷新列表</button></div>
+                  <label class="capability-search-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="capabilitySearch" class="capability-search" placeholder="搜索插件与技能…" aria-label="搜索插件或技能"></label>
+                  <div class="catalog-results"><div id="pluginsPanel" role="tabpanel" aria-labelledby="pluginsTab"><div id="pluginMenu"><p class="menu-empty">打开菜单后加载本机插件…</p></div></div><div id="skillsPanel" role="tabpanel" aria-labelledby="skillsTab" hidden><div id="skillMenu"></div></div></div>
+                  <p id="capabilityError" class="menu-empty" role="alert" hidden></p>
+                  <div class="tool-menu-foot"><span>可连续选择多个工具</span><button type="button" id="recordSkill" class="text-button">录制技能 ↗</button></div>
+                </div>
+              </div>
+              <div class="permission-control">
+                <input id="mode" type="hidden" value="workspace-write">
+                <button id="permissionButton" type="button" class="permission-button" aria-expanded="false" aria-controls="permissionMenu"><svg id="permissionIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 4 8 9 8 9s8-5 8-9V6Z"/></svg><span id="permissionLabel">请求批准</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></button>
+                <div id="permissionMenu" class="permission-menu" hidden><div class="permission-heading"><span>如何批准柠檬的操作？</span><a href="https://learn.chatgpt.com/docs/sandboxing" target="_blank" rel="noopener noreferrer">了解更多 ↗</a></div><div id="permissionOptions" role="menu" aria-label="审批权限模式"></div><p class="permission-footnote">从下一条消息开始生效 · 不更改全局配置</p></div>
+              </div>
+            </div>
+            <div class="composer-options">
+              <select id="followupBehavior" aria-label="执行中发送方式" hidden><option value="steer">立即追加</option><option value="queue">排队下一条</option></select>
+              <label class="select-wrap model-select"><span class="sr-only">选择模型</span><span class="model-led" aria-hidden="true"></span><select id="model"><option value="">默认模型</option></select></label>
+              <label class="select-wrap effort-select"><span class="sr-only">推理强度</span><select id="effort" title="推理强度"><option value="">默认强度</option></select></label>
+              <button id="stopButton" type="button" class="stop-button" hidden><span aria-hidden="true">■</span> 停止</button>
+              <button id="sendButton" type="submit" class="send-button" aria-label="发送消息" title="发送消息 · Enter" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+            </div>
+          </div>
+        </form>
+        <div class="composer-footer">
+          <button id="draftStatus" type="button" class="draft-status" title="打开草稿保存设置">草稿仅保留在本页</button>
+          <span id="tokenUsage" title="运行时报告的 token 用量"></span>
+          <button id="accountQuota" type="button" class="account-quota" title="正在连接账户" aria-label="正在连接账户" data-level="unknown"><i aria-hidden="true"></i><span>额度 …</span></button>
+          <span id="composerHelp"><kbd>↵</kbd> 发送 <span>·</span> <kbd>⇧ ↵</kbd> 换行</span>
+        </div>
+      </div>
+    </main>
+    </div>
+    </div>
+  </div>
+  <section id="appearancePanel" class="appearance-panel" role="dialog" aria-modal="false" aria-labelledby="appearanceHeading" hidden>
+    <header class="appearance-panel-heading"><div><span class="appearance-eyebrow">MAKE IT YOURS</span><h2 id="appearanceHeading">你的工作台，你的风格</h2></div><button id="appearanceClose" class="icon-button" type="button" aria-label="关闭外观面板">×</button></header>
+    <div class="appearance-mode-row"><span>明暗</span><div class="appearance-modes" role="group" aria-label="界面明暗"><button type="button" data-color-mode="dark" aria-pressed="true">深色</button><button type="button" data-color-mode="light" aria-pressed="false">浅色</button></div></div>
+    <div class="appearance-gallery" role="group" aria-label="选择界面风格">
+      <button type="button" class="appearance-card" data-appearance-choice="aurora" aria-label="极光风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="aurora" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>极光</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>紫青流光 · 通透层次</small>
+      </button>
+      <button type="button" class="appearance-card" data-appearance-choice="cobalt" aria-label="深空风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="cobalt" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>深空</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>电光蓝 · 星图网格</small>
+      </button>
+      <button type="button" class="appearance-card" data-appearance-choice="rose" aria-label="绯霞风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="rose" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>绯霞</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>玫紫光晕 · 柔和悬浮</small>
+      </button>
+      <button type="button" class="appearance-card" data-appearance-choice="graphite" aria-label="曜石风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="graphite" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>曜石</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>冷银金属 · 纯粹质感</small>
+      </button>
+      <button type="button" class="appearance-card" data-appearance-choice="neon" aria-label="辉光风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="neon" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>辉光</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>冰蓝银灰 · 当前风格</small>
+      </button>
+      <button type="button" class="appearance-card" data-appearance-choice="classic" aria-label="经典风格" aria-pressed="false">
+        <span class="skin-preview" data-preview="classic" aria-hidden="true"><i class="preview-rail"></i><i class="preview-title"></i><i class="preview-message"></i><i class="preview-code"></i><i class="preview-compose"></i></span>
+        <span class="appearance-card-heading"><strong>经典</strong><span class="appearance-check" aria-hidden="true">✓</span></span><small>原始界面 · 熟悉布局</small>
+      </button>
+    </div>
+    <p id="appearanceStatus" class="appearance-status" role="status"></p>
+  </section>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="threadActionsDialog"><div class="dialog-heading"><h2>会话操作</h2><button id="closeThreadActions" type="button" class="icon-button" aria-label="关闭会话操作">×</button></div><label>会话名称<input id="threadRename" maxlength="200"></label><div class="action-grid"><button data-thread-action="rename">重命名</button><button data-thread-action="pin">置顶 / 取消置顶（本浏览器）</button><button data-thread-action="fork">从此会话创建分支</button><button data-thread-action="archive">归档</button><button data-thread-action="unarchive">恢复归档</button><button data-thread-action="compact">整理上下文</button></div><p id="threadActionError" class="field-error" role="alert"></p></dialog>
+  <dialog id="unsavedDialog" aria-labelledby="unsavedTitle"><div class="dialog-heading"><h2 id="unsavedTitle">文件有未保存的修改</h2></div><p><strong id="unsavedFilename"></strong> 的编辑尚未写入磁盘。保存后继续，还是放弃这些编辑？</p><div class="dialog-actions"><button id="discardFileChanges" type="button" class="secondary-button">放弃编辑</button><button id="cancelFileChange" type="button" class="secondary-button" autofocus>继续编辑</button><button id="saveBeforeLeave" type="button" class="primary-button">保存并继续</button></div></dialog>
+  <dialog id="fileConflictDialog" aria-labelledby="fileConflictTitle"><div class="dialog-heading"><h2 id="fileConflictTitle">文件版本对照</h2></div><p id="fileConflictDescription">左侧是未保存草稿，右侧是刚读取的磁盘代码。</p><div class="version-columns"><label>我的编辑<textarea id="localFileVersion" readonly spellcheck="false" wrap="off" aria-label="我的未保存版本"></textarea></label><label>磁盘版本<textarea id="diskFileVersion" readonly spellcheck="false" wrap="off" aria-label="磁盘上的版本"></textarea></label></div><div class="dialog-actions"><button id="loadDiskVersion" type="button" class="secondary-button">载入磁盘版本…</button><button id="keepLocalVersion" type="button" class="primary-button">保留编辑，返回</button></div></dialog>
+  <dialog id="referenceVersionDialog" aria-labelledby="referenceVersionTitle"><div class="dialog-heading"><h2 id="referenceVersionTitle">选择发给 AI 的版本</h2></div><p id="referenceVersionPath"></p><p>这个文件有未保存的编辑。请选择本条消息使用的内容。</p><div class="version-choices"><button id="referenceSnapshot" type="button" class="primary-button">发送未保存快照<span>保留磁盘文件，发送当前编辑内容的副本</span></button><button id="referenceSave" type="button" class="secondary-button">保存并引用<span>先写入原文件，再引用磁盘版本</span></button><button id="referenceDisk" type="button" class="secondary-button">引用磁盘版本<span>不包含当前未保存的编辑</span></button></div><div class="dialog-actions"><button id="referenceCancel" type="button" class="secondary-button" autofocus>取消</button></div></dialog>
+  <dialog id="attachmentDialog"><div class="dialog-heading"><h2>添加文件和文件夹</h2><button type="button" class="icon-button" data-close="attachmentDialog" aria-label="关闭附件窗口">×</button></div><p>上传文件，或直接引用本机文件和文件夹。</p><div class="attachment-actions"><button type="button" id="chooseFiles" class="secondary-button">选择文件 / 图片</button><button type="button" id="chooseFolder" class="secondary-button">上传文件夹</button></div><input id="filePicker" type="file" multiple hidden><input id="folderPicker" type="file" webkitdirectory multiple hidden><form id="referenceForm"><label for="referencePath">本机文件或文件夹路径</label><input id="referencePath" placeholder="/Users/你的名字/project/src" required><p class="field-hint">引用目录不会复制文件；上传每个文件最多 10 MB，每条消息最多 30 项。</p><div class="dialog-actions"><button type="submit" class="primary-button">添加引用</button></div></form><p id="uploadStatus" class="field-hint" role="status"></p><p id="uploadError" class="field-error" role="alert" hidden></p></dialog>
+  <dialog id="goalDialog"><form id="goalForm"><div class="dialog-heading"><h2>设置目标</h2><button type="button" class="icon-button" data-close="goalDialog" aria-label="关闭目标窗口">×</button></div><p>柠檬会在当前对话中持续跟进这个目标。可随时暂停或移除。</p><label for="goalObjective">目标内容</label><textarea id="goalObjective" rows="4" maxlength="4000" required placeholder="例如：完成登录模块，并让相关测试通过"></textarea><label for="goalBudget">Token 预算（可选）</label><input id="goalBudget" type="number" min="1" step="1" placeholder="留空使用默认限制"><p class="field-hint" id="goalHint">新对话的目标将在发送第一条消息时生效。</p><div class="dialog-actions"><button type="button" id="clearGoal" class="secondary-button">移除目标</button><button type="submit" class="primary-button">保存目标</button></div><p id="goalError" class="field-error" role="alert" hidden></p></form></dialog>
+  <dialog id="drawingDialog"><div class="dialog-heading"><h2>绘制草图</h2><button type="button" class="icon-button" data-close="drawingDialog" aria-label="关闭绘图窗口">×</button></div><p>画出布局或想法，作为图片发给柠檬。也可以通过文件按钮上传现成草图。</p><div class="drawing-tools"><label for="penColor">颜色</label><input id="penColor" type="color" value="#24392f"><label for="penSize">粗细</label><input id="penSize" type="range" min="1" max="16" value="4"><button type="button" id="undoDrawing" class="text-button">撤销</button><button type="button" id="clearDrawing" class="text-button">清空</button></div><canvas id="drawingCanvas" width="960" height="540" aria-label="草图画布，使用鼠标或触屏绘制；也可上传现成图片"></canvas><div class="dialog-actions"><button type="button" class="secondary-button" data-close="drawingDialog">取消</button><button type="button" id="attachDrawing" class="primary-button">添加到消息</button></div><p id="drawingError" class="field-error" role="alert" hidden></p></dialog>
+  <dialog id="recordingDialog"><div class="dialog-heading"><h2>录制技能</h2><button type="button" class="icon-button" data-close="recordingDialog" aria-label="关闭录制说明">×</button></div><p>技能录制依赖本机桌面客户端，当前页面暂不支持。</p><p>你可以在本机桌面客户端录制；已保存并被本机助手发现的技能会出现在「本机技能」里。</p><div class="dialog-actions"><button type="button" class="primary-button" data-close="recordingDialog">知道了</button></div></dialog>
+  <dialog id="fullAccessDialog" aria-labelledby="fullAccessHeading" aria-describedby="fullAccessExplanation"><form id="fullAccessForm"><div class="dialog-heading"><h2 id="fullAccessHeading">启用完全访问权限？</h2><button type="button" id="closeFullAccess" class="icon-button" aria-label="取消完全访问权限">×</button></div><p id="fullAccessExplanation">柠檬将能运行命令、访问网络，并修改当前操作系统账户可访问的文件，不再逐次向你请求批准。这可能导致数据泄露或不可恢复的文件修改。</p><p>只对本页当前会话生效；新建、切换会话或刷新页面后需要重新选择。已有组织策略仍然生效。</p><label class="risk-confirm"><input type="checkbox" id="fullAccessAcknowledged" required><span>我了解风险，并授权本页当前会话使用完全访问权限。</span></label><div class="dialog-actions"><button type="button" id="cancelFullAccess" class="secondary-button" autofocus>保持当前权限</button><button type="submit" id="confirmFullAccess" class="danger-button" disabled>启用完全访问权限</button></div></form></dialog>
+
+  <dialog id="shortcutsDialog" aria-labelledby="shortcutsTitle"><div class="dialog-heading"><h2 id="shortcutsTitle">快捷操作</h2><button type="button" class="icon-button" data-close="shortcutsDialog" aria-label="关闭快捷键">×</button></div><dl class="shortcut-list"><div><dt>新建对话</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索会话（编辑器外）</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>/</kbd></dd></div><div><dt>聚焦输入框</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送消息</dt><dd><kbd>Enter</kbd></dd></div><div><dt>输入换行</dt><dd><kbd>Shift</kbd> <kbd>Enter</kbd></dd></div><div><dt>编辑器增加 / 减少缩进</dt><dd><kbd>Tab</kbd> / <kbd>Shift</kbd> <kbd>Tab</kbd></dd></div><div><dt>切换 SQL / Python 行注释</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>/</kbd></dd></div><div><dt>移出编辑区</dt><dd><kbd>Esc</kbd> 后按 <kbd>Tab</kbd></dd></div></dl><p>编辑快捷键只修改当前草稿，支持选中多行。Tab 优先采纳补全；Esc 先关闭补全，再按一次可退出编辑焦点。图片可粘贴，文件可拖入输入区。</p></dialog>
+  <dialog id="projectPicker" class="project-picker" aria-labelledby="projectPickerTitle">
+    <header class="project-picker-heading"><div><h2 id="projectPickerTitle">新增项目</h2><p>选择这台电脑上的文件夹，不上传或复制项目文件。</p></div><button id="closeProjectPicker" type="button" class="icon-button" aria-label="关闭新增项目">×</button></header>
+    <form id="projectLocationForm" class="project-location"><button id="projectUp" type="button" class="secondary-button" title="上一级文件夹" aria-label="上一级文件夹">↑</button><label class="sr-only" for="projectLocation">本机文件夹绝对路径</label><input id="projectLocation" placeholder="/Users/你的名字/Desktop" autocomplete="off" spellcheck="false" required><button id="projectBrowse" class="secondary-button" type="submit">前往</button></form>
+    <p id="projectPickerError" class="field-error" role="alert"></p><div class="project-folders-scroll"><div id="projectFolders" class="project-folders"></div><p id="projectFoldersEmpty" class="field-hint" hidden>没有可显示的子文件夹，仍可选择当前文件夹。</p><button id="projectMore" type="button" class="text-button" hidden>继续加载</button></div>
+    <p id="projectPickerHint" class="field-hint"></p><footer class="project-picker-footer"><div><small>将添加此文件夹</small><strong id="projectChosenPath"></strong></div><div><button id="cancelProjectPicker" type="button" class="secondary-button">取消</button><button id="chooseProject" type="button" class="primary-button" disabled>添加并打开项目</button></div></footer>
+  </dialog>
+  <div id="editorTabMenu" class="editor-tab-menu" role="dialog" aria-label="文件标签操作" hidden>
+    <label class="sr-only" for="editorTabMenuPath">文件完整路径</label><input id="editorTabMenuPath" class="editor-tab-menu-path" readonly spellcheck="false">
+    <div role="menu" aria-label="文件标签操作"><button type="button" role="menuitem" data-tab-action="name">复制文件名</button><button type="button" role="menuitem" data-tab-action="relative">复制相对路径</button><button type="button" role="menuitem" data-tab-action="absolute">复制完整路径</button><button type="button" role="menuitem" data-tab-action="reveal">在左侧目录中定位</button></div>
+    <p id="editorTabMenuStatus" class="editor-tab-menu-status" role="status"></p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "codex-web-shell",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local browser workspace for Codex App Server",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "build:markdown": "node scripts/build-markdown.mjs"
+  },
+  "dependencies": {
+    "@astral-sh/ruff-wasm-nodejs": "0.16.8",
+    "@vscode/markdown-it-katex": "1.1.2",
+    "diff": "9.0.0",
+    "dompurify": "3.3.3",
+    "highlight.js": "11.12.0",
+    "markdown-it": "15.0.2",
+    "markdown-it-footnote": "4.0.0",
+    "mermaid": "12.0.0",
+    "pdfjs-dist": "6.3.289",
+    "sql-formatter": "15.8.2",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "jsdom": "29.1.1"
+  }
+}
