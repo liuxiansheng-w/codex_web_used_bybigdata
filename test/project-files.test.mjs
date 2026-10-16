@@ -29,6 +29,35 @@ test('project tree lists only direct visible entries, folders first, without tra
   assert.ok(nested.entries.some(entry => entry.path === 'src/示例 图.png'));
 });
 
+test('hidden display exposes ordinary configuration folders and editable files while retaining exclusions', async () => {
+  const cwd = await fixture(), files = new ProjectFiles(), context = new ContextStore();
+  await mkdir(path.join(cwd, '.github', 'workflows'), { recursive: true });
+  await writeFile(path.join(cwd, '.github/workflows/build.yml'), 'name: build\n');
+  await writeFile(path.join(cwd, '.gitignore'), 'output/\n');
+  for (const name of ['.local', '.ssh', '.vscode']) {
+    await mkdir(path.join(cwd, name)); await writeFile(path.join(cwd, name, 'private.txt'), 'synthetic excluded fixture');
+  }
+  const visible = (await files.list({ cwd })).entries.map(entry => entry.name);
+  assert.ok(!visible.includes('.github')); assert.ok(!visible.includes('.gitignore'));
+  const shown = (await files.list({ cwd, showHidden: true })).entries.map(entry => entry.name);
+  assert.deepEqual(shown.filter(name => name.startsWith('.')).sort(), ['.github', '.gitignore']);
+  assert.deepEqual((await files.list({ cwd, path: '.github/workflows', showHidden: true })).entries.map(entry => entry.path), ['.github/workflows/build.yml']);
+  for (const relative of ['.gitignore', '.github/workflows/build.yml']) {
+    const original = await files.read({ cwd, path: relative });
+    const saved = await files.save({ cwd, path: relative, version: original.version, content: original.content + '# edited\n' });
+    assert.match(saved.content, /# edited\n$/);
+    assert.equal((await files.attach(context, { cwd, path: relative })).projectPath, relative);
+  }
+  for (const relative of ['.env', '.git', '.local/private.txt', '.ssh/private.txt', '.vscode/private.txt', 'AIdata', '待删除', 'node_modules', 'link-inside/sample.txt', '../escape']) {
+    await assert.rejects(files.list({ cwd, path: relative, showHidden: true }));
+    await assert.rejects(files.read({ cwd, path: relative }));
+    await assert.rejects(files.resolve(cwd, relative, { allowHidden: true, allowExportPreview: true }));
+  }
+  await mkdir(path.join(cwd, 'AIdata/.nested'));
+  await writeFile(path.join(cwd, 'AIdata/.nested/report.xlsx'), 'synthetic fixture');
+  await assert.rejects(files.resolve(cwd, 'AIdata/.nested/report.xlsx', { allowHidden: true, allowExportPreview: true }), { status: 403 });
+});
+
 test('project tree denies traversal, hidden paths, excluded roots, symlinks, invalid offsets and missing entries', async () => {
   const cwd = await fixture(), files = new ProjectFiles(), context = new ContextStore();
   for (const relative of ['../', '../README.md', '/etc', 'src/../README.md', 'src//sample.txt', '.env', '.git', 'node_modules', 'AIdata', '待删除', 'link-inside/sample.txt', 'link-outside', 'src\\sample.txt', 'bad\0path']) {

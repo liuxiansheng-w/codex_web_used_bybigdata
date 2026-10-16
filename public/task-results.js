@@ -27,6 +27,94 @@ export function taskResult(thread) {
   return { changes, artifacts: [...artifacts.values()].slice(0, 50) };
 }
 
+function diffCounts(diff) {
+  let added = 0, removed = 0, hunk = false, known = false;
+  for (const line of String(diff || '').split('\n')) {
+    if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)) { hunk = known = true; continue; }
+    if (/^(diff --git |\*\*\* )/.test(line)) { hunk = false; continue; }
+    if (hunk && line.startsWith('+')) added++;
+    if (hunk && line.startsWith('-')) removed++;
+  }
+  return { added, removed, known };
+}
+
+// Only confirmed changes from this turn, never the whole dirty Git workspace.
+export function completedChangeSummaries(thread) {
+  const turns = new Map(); let key = 'history';
+  for (const item of thread?.items || []) {
+    key = item.turnId || (item.type === 'userMessage' ? item.id : key);
+    if (!turns.has(key)) turns.set(key, { key, cwd: thread.cwd, itemIds: [], changes: [], files: new Map(), seen: new Set() });
+    const turn = turns.get(key); turn.itemIds.push(item.id);
+    if (item.type !== 'fileChange' || item.status !== 'completed' || turn.seen.has(item.id)) continue;
+    turn.seen.add(item.id);
+    for (const raw of item.changes || []) {
+      const path = projectPath(raw.path, thread.cwd); if (!path) continue;
+      const movePath = raw.movePath ? projectPath(raw.movePath, thread.cwd) : null;
+      if (raw.movePath && !movePath) continue;
+      const change = { ...raw, path, ...(movePath ? { movePath } : {}), itemId: item.id, status: item.status };
+      const destination = movePath || path, file = turn.files.get(path) || turn.files.get(destination) || { path: destination, originalPath: path, added: 0, removed: 0, known: true, edits: 0 };
+      if (movePath) turn.files.delete(path);
+      Object.assign(file, { path: destination, kind: raw.kind || 'update' });
+      const counts = diffCounts(raw.diff); file.added += counts.added; file.removed += counts.removed; file.known &&= counts.known; file.edits++;
+      turn.files.set(destination, file); turn.changes.push(change);
+    }
+  }
+  const latest = [...turns.keys()].at(-1);
+  return [...turns.values()].filter(turn => {
+    if (thread.busy && turn.key === (thread.turnId || latest)) return false;
+    const status = thread.turnTimings?.find(timing => timing.id === turn.key)?.status || (turn.key === thread.latestTurnId || (!thread.latestTurnId && turn.key === latest) ? thread.completion : null);
+    return ['completed', 'interrupted', 'failed'].includes(status) && turn.files.size;
+  }).map(({ seen, ...turn }) => ({ ...turn, files: [...turn.files.values()] }));
+}
+
+export function createChangeSummary({ onOpen, onReview, onError = () => {} }) {
+  const node = (tag, cls, parent) => { const el = document.createElement(tag); el.className = cls; parent?.append(el); return el; };
+  const el = node('section', 'change-summary'), header = node('header', 'change-summary-heading', el);
+  const heading = node('div', 'change-summary-heading-text', header), title = node('strong', '', heading), total = node('span', 'change-counts', heading);
+  const review = node('button', 'text-button change-summary-review', header); review.type = 'button'; review.textContent = '审查'; review.title = '查看本轮差异，可预览并撤销单次改动';
+  const list = node('ul', 'change-summary-files', el), hint = node('p', 'change-summary-hint', el), feedback = node('p', 'change-summary-feedback', el); feedback.hidden = true; feedback.setAttribute('role', 'status');
+  const rows = new Map(); let current, signature;
+  const setText = (target, text) => { if (target.textContent !== text) target.textContent = text; };
+  function setCounts(target, known, added, removed, unknown) {
+    if (!known) { setText(target, unknown); return; }
+    if (!target.querySelector('.change-count-added')) { target.replaceChildren(node('span', 'change-count-added'), document.createTextNode(' '), node('span', 'change-count-removed')); }
+    setText(target.firstElementChild, `+${added}`); setText(target.lastElementChild, `−${removed}`);
+  }
+  async function act(button, fn) {
+    button.disabled = true; feedback.hidden = true;
+    try { await fn(); } catch (error) { feedback.textContent = error.message; feedback.hidden = false; onError(error.message); }
+    finally { button.disabled = false; }
+  }
+  review.addEventListener('click', () => act(review, () => onReview(current)));
+  function update(summary) {
+    current = summary; const next = JSON.stringify(summary); if (next === signature) return; signature = next;
+    el.dataset.turnId = summary.key; el.setAttribute('aria-label', '本轮文件修改');
+    setText(title, `已编辑 ${summary.files.length} 个文件`);
+    const known = summary.files.every(file => file.known);
+    setCounts(total, known, summary.files.reduce((n, file) => n + file.added, 0), summary.files.reduce((n, file) => n + file.removed, 0), '部分行数未提供');
+    total.title = '本轮各次修改的累计增删行数';
+    const paths = new Set(summary.files.map(file => file.path));
+    for (const [path, row] of rows) if (!paths.has(path)) { row.el.remove(); rows.delete(path); }
+    let cursor = list.firstChild;
+    for (const file of summary.files) {
+      let row = rows.get(file.path);
+      if (!row) {
+        const item = node('li', 'change-summary-file'), open = node('button', 'text-button change-summary-path', item), kind = node('span', 'change-summary-kind', item), counts = node('span', 'change-counts', item);
+        open.type = 'button'; row = { el: item, open, kind, counts, file }; rows.set(file.path, row);
+        open.addEventListener('click', () => act(open, () => row.file.kind === 'delete' ? onReview({ ...current, changes: current.changes.filter(change => change.path === row.file.path || change.movePath === row.file.path) }) : onOpen(row.file, current)));
+      }
+      row.file = file;
+      setText(row.open, file.path); row.open.title = file.originalPath !== file.path ? `${file.originalPath} → ${file.path}` : file.path;
+      setText(row.kind, file.kind === 'delete' ? '已删除' : file.originalPath !== file.path ? '已重命名' : file.kind === 'add' ? '新增' : '');
+      setCounts(row.counts, file.known, file.added, file.removed, '行数未提供');
+      row.counts.title = '本轮各次修改的累计增删行数';
+      if (row.el !== cursor) list.insertBefore(row.el, cursor); cursor = row.el.nextSibling;
+    }
+    setText(hint, '本轮已确认的文件修改 · 增删行数按各次修改累计');
+  }
+  return { el, update };
+}
+
 export const agentLabels = { pendingInit: '准备中', running: '运行中', waiting: '需要确认', completed: '已完成', interrupted: '已停止', errored: '执行失败', shutdown: '已关闭', notFound: '不可用', unknown: '未同步' };
 export const isAgentItem = item => ['collabAgentToolCall', 'subAgentActivity'].includes(item.type);
 export function agentSummary(agents) {

@@ -24,8 +24,8 @@ async function page(t) {
 
 test('sidebar project actions target the chosen project without switching and dismiss safely', async t => {
   const { $, document, window } = await page(t);
-  const opened = [], selected = [];
-  const registry = createProjectList({ api: async () => { throw new Error('Menu must not fetch files'); }, onSelect: cwd => selected.push(cwd), onGit: cwd => opened.push(cwd), getContext: () => ({ cwd: '/one' }), notice: assert.fail });
+  const opened = [], selected = [], pulls = [];
+  const registry = createProjectList({ api: async () => { throw new Error('Menu must not fetch files'); }, onSelect: cwd => selected.push(cwd), onGit: (cwd, action) => action === 'pull' ? pulls.push(cwd) : opened.push(cwd), getContext: () => ({ cwd: '/one' }), notice: assert.fail });
   registry.remember('/one'); registry.remember('/two');
   const trigger = document.querySelector('.project-more[data-cwd="/two"]'), popup = document.getElementById('projectActionsPopup');
   assert.equal(document.querySelectorAll('.project-more').length, 2);
@@ -34,6 +34,7 @@ test('sidebar project actions target the chosen project without switching and di
   assert.equal(document.activeElement, popup.firstChild);
   popup.firstChild.click(); assert.deepEqual(opened, ['/two']); assert.deepEqual(selected, []);
   assert.equal(document.activeElement, trigger); assert.equal(popup.hidden, true);
+  trigger.click(); [...popup.children].find(button => button.textContent.includes('拉取')).click(); assert.deepEqual(pulls, ['/two']); assert.deepEqual(selected, []);
   trigger.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   popup.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   assert.equal(popup.hidden, true); assert.equal(document.activeElement, trigger);

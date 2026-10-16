@@ -5,7 +5,15 @@ const icons = {
 };
 
 export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasAttachment, notice }) {
-  let cwd = '', generation = 0, blocked = false, pending = false;
+  let cwd = '', generation = 0, blocked = false, pending = false, showHidden = true;
+  const hiddenToggle = $('showHiddenFiles');
+  const visibilityKey = root => `lemon:showHiddenFiles:${encodeURIComponent(root)}`;
+  function readVisibility(root) { try { return document.defaultView.localStorage.getItem(visibilityKey(root)) !== 'false'; } catch { return true; } }
+  function updateVisibilityButton() {
+    if (!hiddenToggle) return;
+    hiddenToggle.setAttribute('aria-pressed', String(showHidden));
+    hiddenToggle.title = showHidden ? '隐藏文件已显示，点击隐藏' : '显示隐藏文件'; hiddenToggle.disabled = !cwd;
+  }
   let activePath = null, revealRevision = 0, revealPromise = Promise.resolve(false), revealError = '';
   const fileRows = new Map();
   let searchTimer, searchRevision = 0, searchResult = null, searchLoading = false, searchError = '', searchController, searchPage = 0;
@@ -19,7 +27,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     const hits = new Map((searchResult?.results || []).map(hit => [hit.path, hit]));
     try {
       do {
-        const result = await api(`/api/project/search?cwd=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&filenames=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, undefined, { signal: controller.signal });
+        const result = await api(`/api/project/search?cwd=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&filenames=1&showHidden=${Number(showHidden)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, undefined, { signal: controller.signal });
         if (revision !== searchRevision || root !== cwd) return;
         for (const hit of result.results) hits.set(hit.path, hit);
         searchResult = { ...result, results: [...hits.values()] }; cursor = result.nextCursor;
@@ -59,7 +67,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
   }
 
   function renderEntry(entry, parent, searching = false) {
-    const item = document.createElement('li'); item.className = 'file-tree-item';
+    const item = document.createElement('li'); item.className = 'file-tree-item'; item.classList.toggle('is-hidden-file', entry.path.split('/').some(part => part.startsWith('.')));
     const row = document.createElement('div'); row.className = 'file-tree-row';
     const main = document.createElement('button'); main.type = 'button'; main.className = 'file-main'; main.title = entry.path;
     // Icon markup is a fixed application constant; filenames only use textContent.
@@ -115,6 +123,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
   }
 
   function render() {
+    updateVisibilityButton();
     rowControls.length = 0; fileRows.clear(); $('projectFileTree').replaceChildren();
     if (!cwd) { note($('projectFileTree'), '选择项目后显示文件'); return; }
     const query = $('fileSearch').value.trim().toLowerCase();
@@ -149,7 +158,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     directories.set(relative, data); render();
     data.promise = (async () => {
       try {
-        const result = await api(`/api/project/files?cwd=${encodeURIComponent(requestedCwd)}&path=${encodeURIComponent(relative)}&offset=${offset}`);
+        const result = await api(`/api/project/files?cwd=${encodeURIComponent(requestedCwd)}&path=${encodeURIComponent(relative)}&offset=${offset}&showHidden=${Number(showHidden)}`);
         if (expected !== generation) return;
         data.entries = [...new Map([...data.entries, ...result.entries].map(entry => [entry.path, entry])).values()];
         data.nextOffset = result.nextOffset; data.limited = result.limited;
@@ -169,6 +178,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     activePath = next; revealError = ''; const revision = ++revealRevision, root = cwd;
     for (const [path, { row, main }] of fileRows) { row.classList.toggle('is-active-file', path === next); main.setAttribute('aria-current', String(path === next)); }
     if (!next) return Promise.resolve(false);
+    if (!showHidden && next.split('/').some(part => part.startsWith('.'))) { render(); return Promise.resolve(false); }
     resetSearch();
     const current = () => root === cwd && revision === revealRevision;
     revealPromise = (async () => {
@@ -212,11 +222,19 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
   }
 
   $('fileSearch').addEventListener('input', () => { revealRevision++; revealError = ''; searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = !!$('fileSearch').value.trim(); searchError = ''; render(); searchTimer = setTimeout(searchProject, 280); });
-  $('refreshFiles').addEventListener('click', () => { generation++; revealRevision++; revealError = ''; directories.clear(); expanded.clear(); if ($('fileSearch').value.trim()) { void searchProject(); return load(); } return activePath ? setActive({ cwd, path: activePath }, { force: true }) : load(); });
+  $('refreshFiles').addEventListener('click', () => { generation++; revealRevision++; revealError = ''; directories.clear(); expanded.clear(); if ($('fileSearch').value.trim()) { void searchProject(); return load(); } return activePath && (showHidden || !activePath.split('/').some(part => part.startsWith('.'))) ? setActive({ cwd, path: activePath }, { force: true }) : load(); });
   $('collapseFiles').addEventListener('click', () => { revealRevision++; revealError = ''; expanded.clear(); searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = false; $('fileSearch').value = ''; render(); });
+  hiddenToggle?.addEventListener('click', () => {
+    showHidden = !showHidden;
+    try { document.defaultView.localStorage.setItem(visibilityKey(cwd), String(showHidden)); } catch {}
+    generation++; revealRevision++; revealError = ''; directories.clear(); expanded.clear(); searchController?.abort(); clearTimeout(searchTimer); searchRevision++;
+    if ($('fileSearch').value.trim()) { void searchProject(); return; }
+    if (activePath && (showHidden || !activePath.split('/').some(part => part.startsWith('.')))) void setActive({ cwd, path: activePath }, { force: true });
+    else void load();
+  });
   render();
   return {
-    setProject(value) { if (value === cwd) return; cwd = value; generation++; revealRevision++; activePath = null; revealError = ''; directories.clear(); expanded.clear(); searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = false; $('fileSearch').value = ''; render(); load(); },
+    setProject(value) { if (value === cwd) return; cwd = value; showHidden = readVisibility(cwd); generation++; revealRevision++; activePath = null; revealError = ''; directories.clear(); expanded.clear(); searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = false; $('fileSearch').value = ''; render(); load(); },
     setActive,
     setBusy(value) { blocked = value; syncSelection(); },
   };

@@ -5,11 +5,11 @@ import { JSDOM } from 'jsdom';
 import { createFileTree } from '../public/file-tree.js';
 const entry = (path, kind = 'file') => ({ path, name: path.split('/').at(-1), kind });
 async function setup(t, respond) {
-  const dom = new JSDOM(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'), { pretendToBeVisual: true });
+  const dom = new JSDOM(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'), { pretendToBeVisual: true, url: 'http://localhost/' });
   const previous = globalThis.document; globalThis.document = dom.window.document;
   t.after(() => { dom.window.close(); globalThis.document = previous; });
   const calls = [], tree = createFileTree({ api: async route => {
-    const url = new URL(route, 'http://localhost'), request = { cwd: url.searchParams.get('cwd'), path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset')) };
+    const url = new URL(route, 'http://localhost'), request = { cwd: url.searchParams.get('cwd'), path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset')), showHidden: url.searchParams.get('showHidden') === '1', query: url.searchParams.get('query') };
     calls.push(request); return respond(request);
   }, onOpen() {}, onAttach() {}, hasAttachment: () => false, notice: text => assert.fail(text) });
   const $ = id => document.getElementById(id), current = () => document.querySelector('.file-main[aria-current=true]')?.dataset.filePath;
@@ -39,6 +39,41 @@ test('active file reveal pages only its ancestors and preserves editor focus, se
   await tree.setActive({ cwd: '/project', path: file }); assert.equal($('fileSearch').value, 'not this file');
   await tree.setActive({ cwd: '/project', path: file }, {force: true}); assert.equal($('fileSearch').value, '');
   assert.equal(calls.length, count, 'revealing cached paths must not refetch every directory');
+});
+
+test('hidden visibility remembers each project and preserves drafts and active hidden files across refresh', async t => {
+  const { tree, $, until, window, current } = await setup(t, async ({ path, showHidden }) => ({ entries: path === '.github' ? [entry('.github/config.yml')] : [entry('visible.txt'), ...(showHidden ? [entry('.github', 'folder'), entry('.gitignore')] : [])], nextOffset: null }));
+  tree.setProject('/one'); await tree.setActive({ cwd: '/one', path: '.github/config.yml' });
+  assert.equal(current(), '.github/config.yml'); assert.equal($('showHiddenFiles').getAttribute('aria-pressed'), 'true');
+  $('prompt').value = 'keep draft'; const prompt = $('prompt');
+  $('showHiddenFiles').click(); await until(() => $('projectFileTree').textContent.includes('visible.txt'));
+  assert.equal(document.querySelector('[data-file-path=".github"]'), null); assert.equal(current(), undefined);
+  $('refreshFiles').click(); await until(() => $('projectFileTree').textContent.includes('visible.txt'));
+  assert.doesNotMatch($('projectFileTree').textContent, /定位文件失败/);
+  $('showHiddenFiles').click(); await until(() => current() === '.github/config.yml');
+  assert.equal($('prompt'), prompt); assert.equal(prompt.value, 'keep draft');
+  $('showHiddenFiles').click();
+  tree.setProject('/two'); await until(() => $('projectFileTree').textContent.includes('.gitignore'));
+  assert.equal($('showHiddenFiles').getAttribute('aria-pressed'), 'true');
+  tree.setProject('/one'); await until(() => $('projectFileTree').textContent.includes('visible.txt'));
+  assert.equal($('showHiddenFiles').getAttribute('aria-pressed'), 'false');
+  assert.equal(window.localStorage.getItem('lemon:showHiddenFiles:%2Fone'), 'false');
+});
+
+test('changing hidden visibility invalidates in-flight directory and filename search responses', async t => {
+  let releaseList, releaseSearch;
+  const { tree, $, until, window, calls } = await setup(t, async ({ showHidden, query }) => {
+    if (query) return showHidden ? new Promise(resolve => { releaseSearch = () => resolve({ results: [{ path: '.old-match' }], complete: true }); }) : { results: [{ path: 'visible-match' }], complete: true };
+    return showHidden ? new Promise(resolve => { releaseList = () => resolve({ entries: [entry('.old')], nextOffset: null }); }) : { entries: [entry('visible.txt')], nextOffset: null };
+  });
+  tree.setProject('/one'); await until(() => releaseList); $('showHiddenFiles').click();
+  await until(() => $('projectFileTree').textContent.includes('visible.txt')); releaseList(); await new Promise(setImmediate);
+  assert.doesNotMatch($('projectFileTree').textContent, /\.old/);
+  $('fileSearch').value = 'match'; $('fileSearch').dispatchEvent(new window.Event('input')); $('showHiddenFiles').click(); await until(() => releaseSearch);
+  $('showHiddenFiles').click(); await until(() => $('projectFileTree').textContent.includes('visible-match'));
+  releaseSearch(); await new Promise(setImmediate);
+  assert.doesNotMatch($('projectFileTree').textContent, /old-match/);
+  assert.equal($('fileSearch').value, 'match'); assert.equal(calls.filter(call => call.query).at(-1).showHidden, false);
 });
 
 test('late directory responses cannot reselect an old file or leak across projects', async t => {

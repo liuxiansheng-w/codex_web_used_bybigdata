@@ -1,6 +1,26 @@
+import { createImageAttachment } from './interactions.js';
+
 export const executionTypes = new Set(['commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageView', 'activitySummary', 'activityPlan']);
 export const statusLabel = status => ({ pending: '待执行', inProgress: '进行中', completed: '已完成', failed: '失败', interrupted: '已中断', declined: '已拒绝', approved: '已批准', denied: '已拒绝' })[status] || status || '';
 export const activityFailed = item => ['failed', 'declined', 'denied'].includes(item.status) || (typeof item.exitCode === 'number' && item.exitCode !== 0);
+
+// Group only adjacent activity. A reply, file change or subtask stays at its
+// original position and starts a new segment, even within the same turn.
+export function executionLayout(items) {
+  const blocks = []; let turn = 'history', preceding = 'start', section = null;
+  for (const item of items) {
+    turn = item.turnId || (item.type === 'userMessage' ? item.id : turn);
+    if (executionTypes.has(item.type)) {
+      if (!section || section.turnId !== turn) {
+        section = { key: JSON.stringify([turn, preceding]), turnId: turn, items: [] };
+        blocks.push(section);
+      }
+      section.items.push(item);
+    } else { section = null; blocks.push({ item }); }
+    preceding = item.id;
+  }
+  return blocks;
+}
 
 export function activityTitle(item) {
   if (item.type !== 'commandExecution') return item.title || '执行记录';
@@ -33,6 +53,9 @@ export function renderActivity(element, item) {
     } else {
       view.hint = node('div', 'activity-hint', element);
       view.progress = node('div', 'activity-progress', element);
+      view.surface = node('div', 'activity-surface', element);
+      view.images = node('div', 'activity-images', element);
+      view.imageHint = node('div', 'activity-image-hint', element);
       view.meta = node('div', 'activity-meta', details);
       view.command = node('pre', 'activity-command', details);
       view.outputLabel = node('div', 'activity-output-label', details);
@@ -59,6 +82,16 @@ export function renderActivity(element, item) {
     return;
   }
   const command = item.type === 'commandExecution' ? item.title || item.command || '' : '';
+  const attachments = item.attachments || [];
+  update(view.surface, item.surface ? `${item.surface.label} · ${item.surface.kind === 'browser' ? '浏览器操作' : '电脑操作'}` : ''); view.surface.hidden = !item.surface;
+  const imageSignature = JSON.stringify(attachments);
+  if (view.imageSignature !== imageSignature) {
+    view.images.replaceChildren(...attachments.map(attachment => createImageAttachment(attachment, { document })));
+    view.imageSignature = imageSignature;
+  }
+  view.images.hidden = !attachments.length;
+  update(view.imageHint, attachments.length ? `此步骤返回的图片 · 点击放大${item.omittedImages ? ` · 另有 ${item.omittedImages} 张未展示` : ''}` : '');
+  view.imageHint.hidden = !attachments.length;
   update(view.hint, command); view.hint.title = command; view.hint.hidden = !command;
   update(view.command, command); view.command.hidden = !command;
   update(view.meta, [item.cwd && `目录：${item.cwd}`, item.exitCode != null && `退出码：${item.exitCode}`].filter(Boolean).join(' · ')); view.meta.hidden = !view.meta.textContent;

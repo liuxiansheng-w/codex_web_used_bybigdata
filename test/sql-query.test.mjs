@@ -115,6 +115,8 @@ test('runner retains all returned rows, reports errors and prevents overlapping 
   await assert.rejects(runner.execute({ sql: 'SELECT 4' }), /已有查询/);
   const sent = JSON.parse(calls[0].options.body); assert.equal(sent.sql, '--lzy\nSELECT ${value}'); assert.equal(sent.params.value, 3); assert.equal(sent.engine, 'aliyun');
   assert.equal(calls[0].options.redirect, 'error');
+  assert.equal(sent.timeoutSeconds, 0);
+  assert.equal(calls[0].options.signal, undefined, 'SQL waits for completion without an elapsed-time abort');
   finish(new Response(JSON.stringify({ ok: true, rows: Array.from({ length: 10001 }, (_, value) => ({ value })), columns: ['value'], durationMs: 850, executedSql: '--lzy\nSELECT 3', ossUrl: 'javascript:bad()' })));
   const result = await query;
   assert.equal(result.rows.length, 10001); assert.equal(result.rowCount, 10001); assert.equal(result.truncated, false); assert.equal(result.downloadUrl, null); assert.equal(result.durationMs, 850);
@@ -453,6 +455,25 @@ test('business dates use yesterday in local calendar time across month, leap-yea
   for (const date of ['20230229', '20260431', '00000101', 'partial']) assert.equal(calendarDate(date), '');
 });
 
+test('question marks in quoted column names are not query parameters or rewritten SQL', async t => {
+  const { $, select, files, requests } = await ui(t);
+  const aliases = Array.from({ length: 8 }, (_, i) => `1 AS \`指标${i + 1}(失败原因?)\``).join(',\n');
+  const sql = "SELECT '${bdp.system.bizdate}' AS dt, SPLIT_PART(url, '?', 1) AS page,\n" + aliases;
+  assert.deepEqual(extractParams(sql), ['bdp.system.bizdate']);
+  const params = { 'bdp.system.bizdate': '20261012' };
+  assert.deepEqual(prepareQuery({ sql, params }).params, params);
+  assert.equal(substituteParams(sql, params), sql.replace('${bdp.system.bizdate}', '20261012'));
+  const quoted = "SELECT 1 AS `a' ? -- /* @x :y`, 2 AS `a``?b`, ? AS n, :region AS r";
+  assert.deepEqual(extractParams(quoted), ['param1', 'region']);
+  assert.equal(substituteParams(quoted, { param1: 3, region: 4 }), quoted.replace('? AS n', '3 AS n').replace(':region AS r', '4 AS r'));
+  files[1].content = sql; select(1); $('sqlRun').click();
+  assert.deepEqual([...$('sqlParamsFields').querySelectorAll('input[name]')].map(input => input.name), ['bdp.system.bizdate']);
+  assert.equal($('sqlParamsFields').querySelector('input').value, yesterdayBusinessDate());
+  assert.equal($('sql-business-calendar').hidden, true);
+  assert.equal(requests.filter(r => r.route === '/api/sql/query').length, 0);
+  $('sqlParamsCancel').click();
+});
+
 test('bizdate defaults to yesterday, supports typing and calendar selection, and submits only the named YYYYMMDD parameter', async t => {
   const { $, select, files, requests, finish, settle } = await ui(t);
   files[1].content = "SELECT '${bdp.system.bizdate}' AS dt, '${region}' AS region";
@@ -460,7 +481,12 @@ test('bizdate defaults to yesterday, supports typing and calendar selection, and
   select(1); $('sqlRun').click();
   const date = $('sqlParamsFields').querySelector('[name="bdp.system.bizdate"]'), picker = $('sql-business-calendar');
   assert.equal(date.value, yesterdayBusinessDate()); assert.equal(date.type, 'text');
+  assert.equal(document.activeElement, date);
+  assert.equal(picker.hidden, true); assert.equal(date.getAttribute('aria-expanded'), 'false');
+  assert.equal(requests.filter(r => r.route === '/api/sql/query').length, 0);
+  date.click();
   assert.equal(picker.hidden, false); assert.equal(date.getAttribute('aria-expanded'), 'true');
+  assert.equal(date.value, yesterdayBusinessDate());
   assert.equal($('sqlParamsFields').querySelector('.sql-date-trigger'), null);
   assert.equal($('sqlParamsFields').querySelector('[name=region]').value, 'north');
   date.value = '20240229'; date.dispatchEvent(new window.Event('input'));
@@ -516,7 +542,8 @@ test('business-date dropdown handles keyboard navigation, outside dismissal, mon
   assert.equal(date.value, '20250117'); date.click(); picker.querySelector('[data-date-shortcut=yesterday]').click();
   assert.equal(date.value, yesterdayBusinessDate()); assert.equal(picker.hidden, true);
   date.click(); $('sqlParamsFields').querySelector('[name=region]').focus(); assert.equal(picker.hidden, true);
-  date.focus(); assert.equal(picker.hidden, false);
+  date.focus(); assert.equal(picker.hidden, true);
+  date.click(); assert.equal(picker.hidden, false);
   $('sqlParamsTitle').dispatchEvent(new window.Event('pointerdown', { bubbles: true })); assert.equal(picker.hidden, true);
   date.click(); key(date, 'Enter'); assert.equal(picker.hidden, true);
   assert.equal(requests.filter(r => r.route === '/api/sql/query').length, 0);

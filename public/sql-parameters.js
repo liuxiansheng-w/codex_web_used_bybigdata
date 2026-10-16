@@ -37,7 +37,7 @@ export function addBusinessDatePicker(input) {
   const dateAt = (year, month, day) => { const date = new Date(0); date.setHours(12, 0, 0, 0); date.setFullYear(year, month, day); return date; };
   const parse = value => { const [y, m, d] = value.split('-').map(Number); return dateAt(y, m - 1, d); };
   const iso = date => `${String(date.getFullYear()).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  let opened = false, suppressFocus = false, listeners, view = 'days', cursor = parse(calendarDate(input.value) || calendarDate(yesterdayBusinessDate()));
+  let opened = false, listeners, view = 'days', cursor = parse(calendarDate(input.value) || calendarDate(yesterdayBusinessDate()));
   let year = cursor.getFullYear(), month = cursor.getMonth();
   const yearStart = () => Math.min(9988, Math.max(1, Math.floor(year / 12) * 12));
   function position() {
@@ -102,10 +102,10 @@ export function addBusinessDatePicker(input) {
     opened = false; listeners?.abort(); input.setAttribute('aria-expanded', 'false');
     if (floating && picker.matches(':popover-open')) picker.hidePopover();
     picker.hidden = true;
-    if (returnFocus) { suppressFocus = true; input.focus({ preventScroll: true }); suppressFocus = false; }
+    if (returnFocus) input.focus({ preventScroll: true });
   }
   function open() {
-    if (opened || suppressFocus || !field.isConnected) return;
+    if (opened || !field.isConnected) return;
     cursor = parse(calendarDate(input.value) || calendarDate(yesterdayBusinessDate())); year = cursor.getFullYear(); month = cursor.getMonth(); view = 'days';
     opened = true; picker.hidden = false; render(); if (floating) picker.showPopover(); position(); input.setAttribute('aria-expanded', 'true');
     listeners = new win.AbortController(); const options = { signal: listeners.signal };
@@ -125,7 +125,9 @@ export function addBusinessDatePicker(input) {
     else year = Math.max(1, Math.min(9999, year + direction * (view === 'years' ? 12 : 1)));
     render();
   }
-  input.addEventListener('focus', open); input.addEventListener('click', open);
+  // Modal autofocus and keyboard focus keep the calendar collapsed; opening
+  // requires a click or ArrowDown so the prefilled date can be used directly.
+  input.addEventListener('click', open);
   input.addEventListener('input', () => {
     const value = calendarDate(input.value);
     if (value) { cursor = parse(value); year = cursor.getFullYear(); month = cursor.getMonth(); view = 'days'; }
@@ -216,6 +218,7 @@ export function extractParams(sql) {
   let i = 0;
   let inSingle = false;
   let inDouble = false;
+  let inBacktick = false;
   let inLineComment = false;
   let inBlockComment = false;
 
@@ -231,7 +234,7 @@ export function extractParams(sql) {
     const next = sql[i + 1] || "";
     const prev = sql[i - 1] || "";
 
-    if (!inSingle && !inDouble && !inBlockComment && char === "-" && next === "-") {
+    if (!inSingle && !inDouble && !inBacktick && !inBlockComment && char === "-" && next === "-") {
       inLineComment = true;
       i += 2;
       continue;
@@ -241,7 +244,7 @@ export function extractParams(sql) {
       i += 1;
       continue;
     }
-    if (!inSingle && !inDouble && char === "/" && next === "*") {
+    if (!inSingle && !inDouble && !inBacktick && char === "/" && next === "*") {
       inBlockComment = true;
       i += 2;
       continue;
@@ -275,17 +278,22 @@ export function extractParams(sql) {
       }
     }
 
-    if (!inDouble && char === "'" && prev !== "\\") {
+    if (!inSingle && !inDouble && char === '`' && prev !== "\\") {
+      inBacktick = !inBacktick;
+      i += 1;
+      continue;
+    }
+    if (!inBacktick && !inDouble && char === "'" && prev !== "\\") {
       inSingle = !inSingle;
       i += 1;
       continue;
     }
-    if (!inSingle && char === '"' && prev !== "\\") {
+    if (!inBacktick && !inSingle && char === '"' && prev !== "\\") {
       inDouble = !inDouble;
       i += 1;
       continue;
     }
-    if (!inSingle && !inDouble && char === "?") {
+    if (!inSingle && !inDouble && !inBacktick && char === "?") {
       questionIndex += 1;
       add(`param${questionIndex}`);
       i += 1;
@@ -294,6 +302,7 @@ export function extractParams(sql) {
     if (
       !inSingle &&
       !inDouble &&
+      !inBacktick &&
       (char === ":" || char === "@") &&
       isNameStart(next) &&
       !/[A-Za-z0-9_:@.]/.test(prev)
@@ -317,6 +326,7 @@ export function substituteParams(sql, params) {
   let questionIndex = 0;
   let inSingle = false;
   let inDouble = false;
+  let inBacktick = false;
   let inLineComment = false;
   let inBlockComment = false;
 
@@ -332,7 +342,7 @@ export function substituteParams(sql, params) {
     const next = sql[i + 1] || "";
     const prev = sql[i - 1] || "";
 
-    if (!inSingle && !inDouble && !inBlockComment && char === "-" && next === "-") {
+    if (!inSingle && !inDouble && !inBacktick && !inBlockComment && char === "-" && next === "-") {
       inLineComment = true;
       out += char + next;
       i += 2;
@@ -344,7 +354,7 @@ export function substituteParams(sql, params) {
       i += 1;
       continue;
     }
-    if (!inSingle && !inDouble && char === "/" && next === "*") {
+    if (!inSingle && !inDouble && !inBacktick && char === "/" && next === "*") {
       inBlockComment = true;
       out += char + next;
       i += 2;
@@ -387,19 +397,25 @@ export function substituteParams(sql, params) {
       }
     }
 
-    if (!inDouble && char === "'" && prev !== "\\") {
+    if (!inSingle && !inDouble && char === '`' && prev !== "\\") {
+      inBacktick = !inBacktick;
+      out += char;
+      i += 1;
+      continue;
+    }
+    if (!inBacktick && !inDouble && char === "'" && prev !== "\\") {
       inSingle = !inSingle;
       out += char;
       i += 1;
       continue;
     }
-    if (!inSingle && char === '"' && prev !== "\\") {
+    if (!inBacktick && !inSingle && char === '"' && prev !== "\\") {
       inDouble = !inDouble;
       out += char;
       i += 1;
       continue;
     }
-    if (!inSingle && !inDouble && char === "?") {
+    if (!inSingle && !inDouble && !inBacktick && char === "?") {
       questionIndex += 1;
       out += String(valueFor(`param${questionIndex}`) ?? "");
       i += 1;
@@ -408,6 +424,7 @@ export function substituteParams(sql, params) {
     if (
       !inSingle &&
       !inDouble &&
+      !inBacktick &&
       (char === ":" || char === "@") &&
       isNameStart(next) &&
       !/[A-Za-z0-9_:@.]/.test(prev)

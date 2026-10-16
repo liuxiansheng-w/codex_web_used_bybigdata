@@ -9,16 +9,19 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   let artifactViewer = null, lastArtifact = null, agentsTimer = null, agentGeneration = 0, restorePreview = null, reviewChanges = null;
   let agentsData = null, agentsPromise = null, agentsLast = 0, agentsError = '', agentsRevision = 0;
   let searchController, searchPage = 0, searchLoading = false;
+  let appApprovalData = null, appApprovalRead = 0, appApprovalWriting = false;
+  let memoryData = null, memoryRead = 0, memoryWriting = false, memoryFileRead = 0;
   const inlineGroups = new Map();
   const dialog = node('section'); dialog.hidden = true; dialog.setAttribute('role', 'region'); dialog.id = 'workbenchDialog'; dialog.className = 'workbench-dialog'; dialog.setAttribute('aria-labelledby', 'workbenchTitle');
   dialog.innerHTML = `
     <header class="workbench-head"><div><span class="eyebrow">项目工具</span><h2 id="workbenchTitle">项目工具</h2></div><div class="workbench-groups"><button id="showTaskTools" type="button">工具</button><button id="showSettingsTools" type="button">设置</button></div><button id="closeWorkbench" type="button" class="icon-button" aria-label="收起工具面板">×</button></header>
-    <div class="workbench-layout"><nav id="workbenchNav" role="tablist" aria-label="工作台功能"></nav><div class="workbench-main"><p id="workbenchProject" class="workbench-project"></p><p id="workbenchStatus" role="status" class="workbench-status"></p>
+    <div class="workbench-layout"><nav id="workbenchNav" role="tablist" aria-label="工作台功能"></nav><div class="workbench-main"><div class="workbench-project-row"><p id="workbenchProject" class="workbench-project"></p><button id="copyProjectPath" type="button" class="text-button">复制项目路径</button></div><p id="workbenchStatus" role="status" class="workbench-status"></p>
     <section data-panel="search"><h3>搜索与替换</h3><form id="projectSearchForm" class="workbench-form"><label>搜索内容<input id="projectSearchQuery" required maxlength="500" placeholder="查找代码，或定位文件…"></label><div class="inline-fields"><label><input id="searchFilenames" type="checkbox">仅文件名</label><label><input id="searchCase" type="checkbox">区分大小写</label><button class="primary-button">搜索项目</button></div></form><p class="field-hint">文件名搜索会分批遍历项目，结果可翻页；内容搜索若未完成会提示缩小范围。隐藏、依赖和项目忽略目录不参与搜索。</p><div id="projectSearchResults" class="workbench-results"></div><details><summary>替换搜索命中的文件</summary><p class="field-hint">替换区分大小写、按字面量匹配。先保存或关闭编辑器草稿；预览后需再次确认。</p><label>替换为<input id="projectReplaceText" maxlength="10000"></label><button id="projectReplacePreview" class="secondary-button" type="button">生成替换预览</button><div id="projectReplaceResults"></div><button id="projectReplaceApply" class="danger-button" type="button" hidden>确认应用这份预览</button></details></section>
     <section data-panel="files" hidden><h3>文件管理</h3><p class="field-hint">路径相对于当前项目。移动/重命名仅支持不超过 1 MB 的普通 UTF-8 文件；原文件保留在系统废纸篓。目录移动请使用本机文件管理器。</p><p id="manageSelection" class="selected-file">从左侧文件树选择文件，或输入路径。</p><details><summary>手工输入路径</summary><label>文件或目录路径<input id="managePath" placeholder="src/example.py"></label></details><label>新建文件或目录名称<input id="manageNewName" placeholder="例如 notes.md 或 reports"></label><p id="manageCreateParent" class="field-hint"></p><div class="action-grid"><button data-file="open">打开文件</button><button data-file="preview">预览 / 下载</button><button data-file="createFile">新建空文件</button><button data-file="createFolder">新建目录</button></div><label>移动 / 重命名为<input id="manageTarget" placeholder="src/new_name.py"></label><div class="action-grid"><button data-file="move">移动 / 重命名</button><button data-file="trash" class="danger-button">移到废纸篓</button></div></section>
     <section data-panel="git" hidden><h3>变更与代码审查</h3><div class="inline-fields"><button id="gitRefresh" class="secondary-button">刷新差异</button><span id="gitBranch"></span></div><section id="turnChanges" hidden aria-label="本轮记录的差异"></section><div id="gitFiles" class="git-files"></div><div id="gitFileDiff"></div><details><summary>完整工作区差异 / 手工操作</summary><pre id="gitStatus" class="workbench-output"></pre><details open><summary>未暂存差异</summary><pre id="gitUnstaged" class="workbench-output"></pre></details><details><summary>已暂存差异</summary><pre id="gitStaged" class="workbench-output"></pre></details><label>针对文件的 Git 操作<input id="gitPath" placeholder="项目内的文件相对路径"></label><div class="action-grid"><button data-git="stage">暂存此文件</button><button data-git="unstage">取消暂存</button></div></details><label>提交说明<input id="gitMessage" maxlength="1000"></label><button data-git="commit" class="secondary-button">提交已暂存修改…</button><p class="field-hint">写操作前校验刚查看的差异。提交不运行 Git hooks，不签名；按文件勾选提交与推送请使用顶部项目「⋯」菜单；PR 仍在本机客户端或终端完成。</p><hr><h4>原生代码审查</h4><label>审查范围<select id="reviewTarget"><option value="uncommittedChanges">未提交修改</option><option value="baseBranch">与基础分支比较</option><option value="commit">指定提交</option><option value="custom">自定义审查要求</option></select></label><input id="reviewValue" aria-label="分支、提交编号或审查要求" placeholder="按所选范围填写；未提交修改可留空"><button id="reviewStart" class="primary-button">在当前会话开始审查</button><p class="field-hint">原生 review/start，只读执行，会消耗模型额度；需要一个空闲会话。</p><label>行级反馈：文件:行号<input id="reviewLocation" placeholder="src/example.py:42"></label><label for="reviewComment">反馈意见</label><textarea id="reviewComment" rows="3" placeholder="针对该位置的修改意见"></textarea><button id="reviewFeedback" class="secondary-button">将行级反馈加入对话</button></section>
     <section data-panel="terminal" hidden></section>
-    <section data-panel="connections" hidden><h3>插件与 MCP 连接</h3><div class="inline-fields"><button id="connectionsRefresh" class="secondary-button">刷新状态</button><button id="connectionsReload" class="secondary-button">重新载入 MCP 配置…</button></div><div id="connectionsResults"></div><div class="native-card"><strong>安装 / 移除插件</strong><p>当前官方插件管理 API 仍为开发中接口，网页不调用。已安装的技能与插件仍可从输入框「＋」选择。</p><a class="secondary-button" href="codex://">打开本机桌面客户端 ↗</a></div></section>
+    <section data-panel="appApprovals" hidden><h3>电脑操作 · 应用授权</h3><p class="field-hint">查看官方客户端在本机保存的“始终允许”应用。会话授权、组织策略和 macOS 系统权限分别生效。</p><div class="inline-fields"><button id="appApprovalsRefresh" type="button" class="secondary-button">刷新授权列表</button><a class="text-button" href="codex://">打开官方客户端 ↗</a></div><p id="appApprovalsHint" role="status" class="field-hint"></p><div id="appApprovalsList" class="app-approvals-list"></div><p class="field-hint">撤销将在后续授权检查中生效；当前会话已获得的授权可能继续有效。</p></section>
+    <section data-panel="connections" hidden><h3>插件与 MCP 连接</h3><div class="inline-fields"><button id="connectionsRefresh" class="secondary-button">刷新状态</button><button id="connectionsReload" class="secondary-button">重新载入 MCP 配置…</button></div><div id="connectionsResults"></div><div class="native-card"><strong>安装 / 移除插件</strong><p>已安装的技能与插件可从输入框「＋」选择，网页支持连接状态、登录授权和表单交互；插件安装与移除请在官方客户端完成。</p><a class="secondary-button" href="codex://">打开本机桌面客户端 ↗</a></div></section>
     <section data-panel="artifacts" hidden><h3>本轮成果与相关文件</h3><div id="artifactList" class="artifact-list"></div><details><summary>按路径打开其他文件</summary><form id="artifactForm"><label>项目内的文件路径<input id="artifactPath" required placeholder="report.html / chart.png / result.pdf"></label><button class="primary-button">预览 / 下载</button></form></details><p class="field-hint">支持图片、PDF、Excel 工作表、Markdown、文本和静态 HTML 预览。Office 文档保留原文件下载；HTML 禁止脚本、联网和表单。</p><div id="artifactResults"></div></section>
     <section data-panel="projects" hidden><h3>项目与工作树</h3><form id="projectForm"><label>工作目录绝对路径<input id="projectRoot" required placeholder="/Users/…/project"></label><div class="inline-fields"><button class="primary-button">切换主项目</button><button id="projectRemember" class="secondary-button" type="button">保存到项目列表</button><button id="projectAttach" class="secondary-button" type="button">作为附加目录引用</button></div></form><p class="field-hint">一个会话只有一个主工作目录；附加目录按引用加入对话，不会自动扩展写权限。</p><div id="projectFavorites"></div><hr><h4>创建隔离工作树</h4><label>新分支<input id="worktreeBranch" placeholder="lemon/my-task"></label><label>新工作树绝对路径<input id="worktreeDestination" placeholder="/Users/…/my-task"></label><button id="worktreeCreate" class="secondary-button">确认创建工作树…</button><pre id="worktreeList" class="workbench-output"></pre></section>
     <section data-panel="schedules" hidden><h3>本机定时任务</h3><p class="field-hint">仅服务运行、电脑唤醒且 助手已连接时触发。任务固定只读、无网络，不自动继承完全访问。重启服务后需重新启用；不补跑每一次错过的时间。会消耗模型额度，内容保存于本机 .local/schedules.json。</p><form id="scheduleForm"><label>任务内容<textarea id="scheduleText" rows="4" required maxlength="10000"></textarea></label><label>运行间隔（分钟）<input id="scheduleMinutes" type="number" value="60" min="15" max="43200" required></label><button class="primary-button">确认创建定时任务…</button></form><div id="scheduleResults"></div></section>
@@ -26,9 +29,25 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     <section data-panel="native" hidden><h3>桌面客户端能力</h3><p>以下功能依赖本机桌面集成，当前网页暂不支持。点击入口不会自动授予录屏、麦克风或电脑控制权限。</p><div id="nativeCapabilities"></div><a class="primary-button" href="codex://">打开本机桌面客户端 ↗</a><p class="field-hint">若浏览器未唤起客户端，请手动打开本机桌面应用。</p><a href="https://learn.chatgpt.com/docs/overview" target="_blank" rel="noopener noreferrer">查看客户端说明 ↗</a></section>
     </div></div>`;
   $('workSurface').append(dialog);
+  const pathActions = node('div', null, 'inline-fields file-path-actions');
+  for (const [action, label] of [['relative', '复制相对路径'], ['absolute', '复制绝对路径']]) {
+    const control = node('button', label, 'secondary-button'); control.type = 'button'; control.dataset.copyFilePath = action; pathActions.append(control);
+  }
+  $('manageSelection').after(pathActions);
   const agentsPanel = node('section'); agentsPanel.dataset.panel = 'agents'; agentsPanel.hidden = true;
   agentsPanel.innerHTML = '<h3>子任务</h3><div class="agents-toolbar"><span id="agentsSummary" role="status"></span><button id="agentsRefresh" class="text-button">刷新状态</button><button id="agentsParent" class="text-button" hidden>返回主任务</button></div><p id="agentsNotice" class="agent-hint" role="status"></p><p id="agentsEmpty" class="field-hint" hidden></p><div id="agentResults"></div>';
   dialog.querySelector('.workbench-main').append(agentsPanel);
+  const memoryPanel = node('section'); memoryPanel.dataset.panel = 'memories'; memoryPanel.hidden = true;
+  memoryPanel.innerHTML = `<h3>跨会话记忆</h3><p class="field-hint">与这台 Mac 上的 Codex App 共用本机记忆。这里的开关影响本机 Codex，不是 ChatGPT 云端记忆。</p>
+    <form id="memorySettingsForm" class="memory-settings"><label class="memory-toggle"><input id="memoriesEnabled" type="checkbox"><span><strong>启用跨会话记忆</strong><small>让后续工作沿用已整理的偏好和经验。</small></span></label>
+    <label class="memory-toggle"><input id="memoriesUse" type="checkbox"><span><strong>使用已有记忆</strong><small>在后续对话中提供相关的已有记忆。</small></span></label>
+    <label class="memory-toggle"><input id="memoriesGenerate" type="checkbox"><span><strong>从聊天生成记忆</strong><small>允许运行时从符合条件的聊天中后台整理记忆。</small></span></label>
+    <label class="memory-toggle"><input id="memoriesExternal" type="checkbox"><span><strong>允许含工具或网页内容的聊天生成记忆</strong><small>关闭后，使用过 MCP、网页搜索或工具搜索的聊天不参与整理。</small></span></label>
+    <div class="inline-fields"><button id="memoriesSave" type="submit" class="primary-button">保存设置</button><button id="memoriesRefresh" type="button" class="secondary-button">刷新</button></div></form>
+    <p id="memoriesStatus" class="field-hint" role="status"></p><p class="field-hint">记忆在符合条件的聊天空闲后整理，不会立即生成。关闭使用或生成不删除已有记忆，也不会移除已经进入当前对话上下文的内容。</p>
+    <h4>查看本机记忆</h4><p id="memoriesFilesHint" class="field-hint"></p><div id="memoriesFiles" class="memory-files"></div>
+    <section id="memoriesPreview" hidden><div class="inline-fields"><strong id="memoriesPreviewTitle"></strong><button id="memoriesPreviewClose" type="button" class="text-button">收起</button></div><p id="memoriesPreviewHint" class="field-hint"></p><pre id="memoriesPreviewContent" class="workbench-output memory-content"></pre></section>`;
+  dialog.querySelector('.workbench-main').append(memoryPanel);
   const history = node('section'); history.className = 'file-history'; history.innerHTML = '<h4>文件保存历史</h4><form id="fileHistoryForm"><label>文件路径<input id="fileHistoryPath" required placeholder="选择当前文件，或输入项目内路径"></label><div class="inline-fields"><button class="secondary-button">查看历史</button><button id="fileHistoryCurrent" type="button" class="secondary-button">当前编辑文件</button></div></form><p class="field-hint">记录启用后通过网页保存的旧版本；每文件最多 20 份，总计最多 100 份 / 24 MB，保存在本机。AI 改动可从下方修改记录回退。</p><div id="fileHistoryResults"></div>';
   $('turnChanges').before(history);
   const gitPanel = dialog.querySelector('[data-panel="git"]'), reviewSections = new Map(), reviewNav = node('div', null, 'review-navigation');
@@ -67,7 +86,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     updateManagedSelection();
     $('projectReplaceApply').hidden = true; $('turnChanges').hidden = true;
     if (artifactUrl) { URL.revokeObjectURL(artifactUrl); artifactUrl = null; }
-    $('workbenchProject').textContent = context().cwd; status('');
+    renderProjectPath(); status('');
     if (!dialog.hidden) { if (tab === 'artifacts') renderArtifacts(); if (tab === 'projects') renderProjects(); if (tab === 'git') renderTurnChanges(); if (tab === 'agents') void pollAgents(); }
   }
   const status = (text, terminal = false) => { (terminal && $('terminalStatus') || $('workbenchStatus')).textContent = text || ''; };
@@ -76,7 +95,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   const run = (fn, terminal = false) => async event => { const control = event?.currentTarget; if (control?.dataset?.pending) { event.preventDefault(); return; } if (control) control.dataset.pending = 'true'; if (control?.tagName === 'BUTTON') control.disabled = true; status('', terminal); pendingActions++; const expected = terminal ? context().cwd : contextKey; try { return await fn(event); } catch (error) { if ((terminal ? context().cwd : contextKey) === expected) status(error.message, terminal); } finally { pendingActions--; if (control) delete control.dataset.pending; if (control?.tagName === 'BUTTON') control.disabled = false; } };
   const bind = (id, fn) => $(id).addEventListener('click', run(fn));
   const form = (id, fn) => $(id).addEventListener('submit', run(async event => { event.preventDefault(); await fn(); }));
-  const tabs = { search: '项目搜索', files: '文件管理', git: '变更与审查', agents: 'AI 子任务', terminal: '命令', artifacts: '文件预览', preferences: '常规与草稿', connections: '插件连接', projects: '项目管理', schedules: '定时任务', native: '帮助与客户端' };
+  const tabs = { search: '项目搜索', files: '文件管理', git: '变更与审查', agents: 'AI 子任务', terminal: '命令', artifacts: '文件预览', preferences: '常规与草稿', memories: '跨会话记忆', connections: '插件连接', appApprovals: '应用授权', projects: '项目管理', schedules: '定时任务', native: '帮助与客户端' };
   const taskTabs = new Set(['search', 'files', 'git', 'agents', 'terminal', 'artifacts']);
   for (const [id, title] of Object.entries(tabs)) { const el = button(title, () => show(id)); el.dataset.tab = id; el.id = `workbench-tab-${id}`; el.setAttribute('role', 'tab'); el.setAttribute('aria-controls', `workbench-${id}`); $('workbenchNav').append(el); }
   for (const panel of dialog.querySelectorAll('[data-panel]')) { panel.id = `workbench-${panel.dataset.panel}`; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `workbench-tab-${panel.dataset.panel}`); }
@@ -89,18 +108,18 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     bottomPanel.attachTerminal(terminalPanel); $('quickTerminal').textContent = '终端';
     bottomPanel.subscribe(() => { if (bottomPanel.visible('terminal')) void terminalConsole.refresh(); else terminalConsole.hide(); });
   }
-  for (const text of ['录制技能与操作回放', '原生电脑 / 浏览器控制', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
+  for (const text of ['录制技能与操作回放', '浏览器标签页工作区与页面批注', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
   async function show(id = tab, entry) {
     if (id === 'terminal' && bottomPanel) { contextChanged(); close(); bottomPanel.show('terminal'); $('terminalCommand').focus(); return; }
     searchController?.abort();
     contextChanged(); tab = id; sequence++; status(''); searchLoading = false;
     if (id === 'search') renderSearchResults();
-    if (id === 'git') reviewChanges = entry?.changes?.map(change => ({ ...change, path: projectPath(change.path, context().cwd) })).filter(change => change.path) || null; $('workbenchProject').textContent = context().cwd;
+    if (id === 'git') reviewChanges = entry?.changes?.map(change => ({ ...change, path: projectPath(change.path, context().cwd) })).filter(change => change.path) || null; renderProjectPath();
     if (id !== 'artifacts') disposeArtifact();
     dialog.classList.toggle('document-wide', id === 'artifacts'); dialog.classList.toggle('agents-view', id === 'agents');
     for (const panel of dialog.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== id;
     const task = taskTabs.has(id); $('workbenchTitle').textContent = task ? '项目工具' : '设置';
-    for (const el of $('workbenchNav').children) { el.hidden = taskTabs.has(el.dataset.tab) !== task; el.setAttribute('aria-selected', String(el.dataset.tab === id)); el.tabIndex = el.dataset.tab === id ? 0 : -1; }
+    for (const el of $('workbenchNav').children) { el.hidden = taskTabs.has(el.dataset.tab) !== task || el.dataset.tab === 'appApprovals' && !context().appApprovals || el.dataset.tab === 'memories' && !context().memorySettings; el.setAttribute('aria-selected', String(el.dataset.tab === id)); el.tabIndex = el.dataset.tab === id ? 0 : -1; }
     $('showTaskTools').setAttribute('aria-pressed', String(task)); $('showSettingsTools').setAttribute('aria-pressed', String(!task));
     if (entry?.path) $('managePath').value = entry.path;
     if (dialog.hidden) opener = document.activeElement;
@@ -116,6 +135,8 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     if (id === 'projects') renderProjects();
     if (id === 'preferences') { $('recoverDrafts').disabled = !editor.snapshots?.()?.length && !localStorage.getItem('codex-desk:editorDrafts'); $('clearSavedDrafts').disabled = !getDraftPreference() && !localStorage.getItem('codex-desk:editorDrafts'); $('persistDrafts').checked = getDraftPreference(); $('enterBehavior').value = localStorage.getItem('codex-desk:enterBehavior') || 'enter'; }
     if (id === 'connections') await run(loadConnections)();
+    if (id === 'appApprovals') await run(loadAppApprovals)();
+    if (id === 'memories') await run(loadMemories)();
     if (id === 'schedules') await run(loadSchedules)();
   }
   bind('closeWorkbench', close); bind('showTaskTools', () => show('search')); bind('showSettingsTools', () => show('preferences'));
@@ -167,9 +188,41 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     const result = await api('/api/project/replace-apply', { id: preview.id, confirmed: true }); status(`已保存：${result.saved.join('、') || '无'}${result.error ? `。${result.error}` : '。已打开的文件请重新载入。'}`); preview = null; $('projectReplaceApply').hidden = true; refreshFiles();
   });
   function managedParent() { return managedEntry?.kind === 'folder' ? managedEntry.path : $('managePath').value.trim().split('/').slice(0, -1).join('/'); }
+  function selectedRelativePath() {
+    if (managedEntry?.cwd && managedEntry.cwd !== context().cwd) return '';
+    const relative = managedEntry?.path || $('managePath').value.trim();
+    return relative && !/[\\\x00-\x1f\x7f]/.test(relative) && relative.split('/').every(part => part && part !== '.' && part !== '..') ? relative : '';
+  }
+  function renderProjectPath() {
+    const cwd = context().cwd || '';
+    $('workbenchProject').textContent = cwd; $('workbenchProject').title = cwd;
+    $('copyProjectPath').title = `复制项目绝对路径：${cwd}`;
+    $('copyProjectPath').disabled = !cwd || !!$('copyProjectPath').dataset.copyPending;
+  }
+  async function copyPath(control, text, label) {
+    if (!text || control.dataset.copyPending) return;
+    const expected = contextKey, revision = sequence;
+    control.dataset.copyPending = 'true'; control.disabled = true;
+    try {
+      await window.navigator.clipboard.writeText(text);
+      if (expected === contextKey && revision === sequence) status(`已复制${label}。`);
+    } catch {
+      if (expected === contextKey && revision === sequence) status(`剪贴板不可用，请手动复制${label}：${text}`);
+    } finally { delete control.dataset.copyPending; renderProjectPath(); updateManagedSelection(); }
+  }
+  $('copyProjectPath').addEventListener('click', event => { void copyPath(event.currentTarget, context().cwd, '项目绝对路径'); });
+  for (const control of pathActions.children) control.addEventListener('click', () => {
+    const relative = selectedRelativePath(); if (!relative) return;
+    const absolute = control.dataset.copyFilePath === 'absolute';
+    void copyPath(control, absolute ? `${context().cwd.replace(/\/+$/, '')}/${relative}` : relative, absolute ? '绝对路径' : '相对路径');
+  });
   function updateManagedSelection() {
     $('manageSelection').textContent = managedEntry?.path || ($('managePath').value.trim() ? `手工路径：${$('managePath').value.trim()}` : '从左侧文件树选择文件，或输入路径。');
     $('manageCreateParent').textContent = `新建位置：${managedParent() || '项目根目录'}`;
+    for (const control of pathActions.children) {
+      const relative = selectedRelativePath(); control.disabled = !relative || !!control.dataset.copyPending;
+      control.title = relative ? control.dataset.copyFilePath === 'relative' ? `相对于当前项目：${relative}` : `${context().cwd.replace(/\/+$/, '')}/${relative}` : '请先选择文件或目录，或输入项目内相对路径';
+    }
     for (const el of dialog.querySelectorAll('[data-file]')) el.disabled = managedEntry?.kind === 'folder' && ['open', 'preview', 'move', 'trash'].includes(el.dataset.file);
   }
   $('managePath').addEventListener('input', () => { managedEntry = null; updateManagedSelection(); });
@@ -379,6 +432,99 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     await api('/api/review', { threadId: thread.id, target: { type, ...(field ? { [field]: $('reviewValue').value } : {}) } }); close();
   });
   bind('reviewFeedback', () => { if (!$('reviewLocation').value.trim() || !$('reviewComment').value.trim()) throw new Error('请填写文件行号和反馈。'); onContext(`代码审查反馈\n位置：${$('reviewLocation').value}\n${$('reviewComment').value}`); close(); });
+  function paintAppApprovals(result) {
+    const list = $('appApprovalsList'); list.replaceChildren();
+    $('appApprovalsHint').textContent = result.error || (!result.initialized ? '尚未发现本机保存的永久授权记录。' : result.apps.length ? `已记住 ${result.apps.length} 个应用` : '没有已记住的应用授权。');
+    for (const app of result.apps || []) {
+      const row = node('div', null, 'native-card app-approval-row'), info = node('div', null, 'app-approval-info');
+      info.append(node('strong', app.name), node('small', app.appId), node('small', '始终允许'));
+      const revoke = button('撤销“始终允许”…', async () => {
+        if (appApprovalWriting || appApprovalData !== result || !list.contains(row)) return;
+        if (!confirm(`撤销 ${app.name}（${app.appId}）的“始终允许”？后续操作可能再次请求授权；当前会话已获得的授权可能继续有效。`)) return;
+        appApprovalWriting = true; pendingActions++; appApprovalRead++;
+        for (const control of list.querySelectorAll('button')) control.disabled = true;
+        $('appApprovalsRefresh').disabled = true; $('appApprovalsHint').textContent = '正在撤销此应用的永久授权…';
+        const expected = sequence;
+        try {
+          const updated = await api('/api/computer-use/approvals/revoke', { appId: app.appId, revision: result.revision, confirmed: true });
+          appApprovalData = updated;
+          if (expected === sequence && tab === 'appApprovals' && !dialog.hidden) { paintAppApprovals(updated); $('appApprovalsHint').textContent = `已撤销 ${app.name} 的“始终允许”。`; }
+        } catch (error) {
+          appApprovalData = null;
+          if (expected === sequence && tab === 'appApprovals' && !dialog.hidden) $('appApprovalsHint').textContent = `${error.message} 请刷新列表后再操作。`;
+        } finally { appApprovalWriting = false; pendingActions--; $('appApprovalsRefresh').disabled = false; }
+      });
+      revoke.disabled = !result.available || !result.revision; row.append(info, revoke); list.append(row);
+    }
+  }
+  async function loadAppApprovals() {
+    if (!context().appApprovals || appApprovalWriting) return;
+    const read = ++appApprovalRead, expected = sequence;
+    appApprovalData = null; $('appApprovalsList').replaceChildren(); $('appApprovalsHint').textContent = '正在读取本机应用授权…';
+    try {
+      const result = await api('/api/computer-use/approvals');
+      if (read !== appApprovalRead || expected !== sequence || tab !== 'appApprovals' || dialog.hidden) return;
+      appApprovalData = result.available ? result : null; paintAppApprovals(result);
+    } catch (error) { if (read === appApprovalRead && expected === sequence && tab === 'appApprovals' && !dialog.hidden) $('appApprovalsHint').textContent = `未能读取应用授权：${error.message}`; }
+  }
+  bind('appApprovalsRefresh', loadAppApprovals);
+  function memoryControls() {
+    const locked = !memoryData?.writable || memoryWriting;
+    $('memoriesEnabled').disabled = locked || memoryData?.managedEnabled != null;
+    $('memoriesUse').disabled = locked || !$('memoriesEnabled').checked;
+    $('memoriesGenerate').disabled = locked || !$('memoriesEnabled').checked;
+    $('memoriesExternal').disabled = locked || !$('memoriesEnabled').checked || !$('memoriesGenerate').checked;
+    $('memoriesSave').disabled = locked; $('memoriesRefresh').disabled = memoryWriting;
+  }
+  function paintMemories(result) {
+    memoryData = result;
+    for (const [id, field] of [['memoriesEnabled', 'enabled'], ['memoriesUse', 'use'], ['memoriesGenerate', 'generate'], ['memoriesExternal', 'allowExternal']]) $(id).checked = result.settings[field];
+    memoryControls();
+    $('memoriesStatus').textContent = `${result.settings.enabled ? '跨会话记忆已开启。' : '跨会话记忆已关闭。'}${result.runtimeEnabled != null && result.runtimeEnabled !== result.settings.enabled ? '当前运行时尚未载入此开关，请重新连接后核对。' : ''}${result.managedEnabled != null ? '总开关由组织策略管理。' : ''}${!result.writable ? '当前无法确认配置版本，请重新连接后刷新。' : ''}`;
+    $('memoriesFilesHint').textContent = result.filesError || (result.files?.length ? '由运行时生成，点击只读查看；每份最多预览 256 KB。' : '目前还没有可查看的记忆文件。开启后需等待运行时在后台整理。');
+    $('memoriesFiles').replaceChildren();
+    for (const file of result.files || []) {
+      const row = node('div', null, 'native-card memory-file'), info = node('div');
+      info.append(node('strong', file.label), node('small', `${Math.ceil(file.bytes / 1024)} KB · ${new Date(file.modifiedAt).toLocaleString()}`));
+      row.append(info, button('查看', () => { void showMemoryFile(file); })); $('memoriesFiles').append(row);
+    }
+  }
+  async function loadMemories() {
+    if (!context().memorySettings || memoryWriting) return;
+    const read = ++memoryRead, expected = sequence; memoryData = null; memoryControls();
+    memoryFileRead++; $('memoriesPreview').hidden = true; $('memoriesPreviewContent').textContent = ''; $('memoriesFiles').replaceChildren();
+    $('memoriesStatus').textContent = '正在读取本机记忆设置…'; $('memoriesFilesHint').textContent = '';
+    try {
+      const result = await api('/api/memories');
+      if (read === memoryRead && expected === sequence && tab === 'memories' && !dialog.hidden) paintMemories(result);
+    } catch (error) { if (read === memoryRead && expected === sequence && tab === 'memories' && !dialog.hidden) $('memoriesStatus').textContent = `未能读取记忆设置：${error.message}`; }
+  }
+  async function showMemoryFile(file) {
+    const read = ++memoryFileRead, expected = sequence;
+    $('memoriesPreview').hidden = false; $('memoriesPreviewTitle').textContent = file.label; $('memoriesPreviewHint').textContent = '正在读取…'; $('memoriesPreviewContent').textContent = '';
+    try {
+      const result = await api(`/api/memories/file?id=${encodeURIComponent(file.id)}`);
+      if (read !== memoryFileRead || expected !== sequence || tab !== 'memories' || dialog.hidden) return;
+      $('memoriesPreviewContent').textContent = result.content;
+      $('memoriesPreviewHint').textContent = result.truncated ? '内容较长，仅显示前 256 KB。' : '只读预览 · 内容由本机运行时整理';
+    } catch (error) { if (read === memoryFileRead && expected === sequence && tab === 'memories' && !dialog.hidden) $('memoriesPreviewHint').textContent = error.message; }
+  }
+  $('memorySettingsForm').addEventListener('submit', async event => {
+    event.preventDefault(); if (!memoryData?.writable || memoryWriting) return;
+    const revision = memoryData.revision, expected = sequence;
+    const settings = { enabled: $('memoriesEnabled').checked, use: $('memoriesUse').checked, generate: $('memoriesGenerate').checked, allowExternal: $('memoriesExternal').checked };
+    memoryWriting = true; pendingActions++; memoryRead++; memoryControls(); $('memoriesStatus').textContent = '正在保存记忆设置…';
+    try {
+      const updated = await api('/api/memories/settings', { revision, settings });
+      if (expected === sequence && tab === 'memories' && !dialog.hidden) { paintMemories(updated); $('memoriesStatus').textContent += ' 设置已保存，后续上下文构建会使用此配置。'; }
+    } catch (error) {
+      memoryData = null;
+      if (expected === sequence && tab === 'memories' && !dialog.hidden) $('memoriesStatus').textContent = `${error.message} 请刷新后再操作。`;
+    } finally { memoryWriting = false; pendingActions--; memoryControls(); }
+  });
+  for (const id of ['memoriesEnabled', 'memoriesGenerate']) $(id).addEventListener('change', memoryControls);
+  bind('memoriesRefresh', loadMemories);
+  bind('memoriesPreviewClose', () => { memoryFileRead++; $('memoriesPreview').hidden = true; $('memoriesPreviewContent').textContent = ''; });
   async function loadConnections() {
     const expected = sequence;
     const result = await api(`/api/connections${context().thread ? `?threadId=${encodeURIComponent(context().thread.id)}` : ''}`); if (expected !== sequence) return; $('connectionsResults').replaceChildren();

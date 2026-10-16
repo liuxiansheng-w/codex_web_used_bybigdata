@@ -1,3 +1,17 @@
+// Error pages are transport failures, not useful user-facing diagnostics.
+// Preserve ordinary service messages; never render or echo a gateway's HTML.
+export function readableNotice(message) {
+  const text = String(message || ''), prefix = text.slice(0, 2000);
+  const markup = prefix.search(/<!doctype\s+html|<(?:html|head|body|style)(?:\s|>)/i);
+  if (markup < 0) return text;
+  const code = prefix.slice(0, markup).match(/\b(?:HTTP\s*|(?:unexpected\s+)?status(?:\s+code)?\s*[:=]?\s*)([45]\d{2})\b/i)?.[1];
+  if (!code) return markup === 0 ? '服务返回了错误网页，未得到有效结果。请检查服务与网络后再试。' : text;
+  if (code === '403') return '请求被服务端拒绝（HTTP 403）。请检查网络/代理及服务访问权限，恢复后再手动继续未完成的任务。';
+  if (code === '401') return '服务身份验证未通过（HTTP 401）。请检查该服务的登录或授权后再试。';
+  if (code === '429') return '服务限制了本次请求（HTTP 429）。请查看限流或额度提示，稍后手动重试。';
+  return `服务请求失败（HTTP ${code}），返回了错误网页。请检查服务与网络后再试。`;
+}
+
 // Model keys never enter browser storage, URLs, drafts, or the chat composer.
 export function createModelSwitch({ button, api, onSwitch, canSwitch = () => true }) {
   const doc = button.ownerDocument;
@@ -365,10 +379,44 @@ export function positionPopover(anchor, popup, width = 380) {
 
 // Only describe observed state. A history summary without runtime data is not
 // evidence that a task has finished or is idle in another client.
+// Refresh metadata only. Never switch models, send prompts or reset drafts.
+export function createModelCatalogRefresh({ load, apply, onError = () => {}, available = () => true, now = Date.now, interval = 60_000 }) {
+  let lastAttempt = -Infinity, pending = null, revision = 0;
+  return {
+    markLoaded() { revision++; lastAttempt = now(); },
+    refresh() {
+      if (!available()) return Promise.resolve();
+      if (pending) return pending;
+      if (now() - lastAttempt < interval) return Promise.resolve();
+      lastAttempt = now(); const current = ++revision;
+      pending = Promise.resolve().then(load).then(data => {
+        if (current !== revision) return;
+        if (!Array.isArray(data.models)) throw new Error('模型列表格式无效。');
+        apply(data.models);
+      }).catch(error => { if (current === revision) onError(error); }).finally(() => { pending = null; });
+      return pending;
+    },
+  };
+}
+
+export function modelRetryLabel(thread) {
+  if (!thread?.busy || thread.runtimeStale) return '';
+  const retry = thread.modelRetry?.turnId === thread.turnId ? thread.modelRetry : null;
+  // Older running servers lack willRetry state. Recognize only their exact
+  // progress message until a safe backend reload is possible.
+  const message = retry?.message || (!Object.hasOwn(thread, 'modelRetry') ? thread.error : '');
+  const count = /^Reconnecting(?:\.\.\.|…)\s*(\d+)\/(\d+)\s*$/.exec(message || '');
+  return count ? `模型连接正在重试（${count[1]}/${count[2]}）` : retry ? '模型请求正在重试…' : '';
+}
+
 export function threadDisplayState(thread, live = true) {
   if (!thread) return { key: 'new', label: '未开始', rank: 0 };
   if (!live || thread.runtimeStale) return { key: 'unknown', label: '待核实', rank: thread.busy || thread.requests?.length ? 5 : 0 };
-  if (thread.requests?.length) return { key: 'waiting', label: thread.requests.some(request => request.method === 'item/tool/requestUserInput') ? '待回复' : '待确认', rank: 5 };
+  if (thread.requests?.length) {
+    const asyncOnly = thread.requests.every(request => ['item/tool/requestUserInput', 'item/agentMessage/answer'].includes(request.method) && request.params?.isBlocking === false);
+    return asyncOnly && thread.busy ? { key: 'running', label: '运行中 · 可回复', rank: 5 }
+      : { key: 'waiting', label: thread.requests.some(request => ['item/tool/requestUserInput', 'item/agentMessage/answer'].includes(request.method)) ? '待回复' : '待确认', rank: 5 };
+  }
   if (thread.busy) return { key: 'running', label: '运行中', rank: 4 };
   if (thread.error || thread.completion === 'failed') return { key: 'error', label: '需检查', rank: 3 };
   if (thread.queue?.length) return { key: 'queued', label: `${thread.queuePaused ? '队列暂停' : '排队'} · ${thread.queue.length}`, rank: 2 };
@@ -483,8 +531,8 @@ function imageViewer(doc) {
   imageViewers.set(doc, viewer); return viewer;
 }
 
-export function createImageAttachment(attachment, { compact = false } = {}) {
-  const doc = document, figure = doc.createElement('figure');
+export function createImageAttachment(attachment, { compact = false, document: doc = document } = {}) {
+  const figure = doc.createElement('figure');
   figure.className = `attachment-image${compact ? ' attachment-image-compact' : ''}`;
   const caption = doc.createElement('figcaption'); caption.textContent = attachment.name || '图片'; caption.hidden = compact;
   const error = doc.createElement('small'); error.className = 'attachment-image-error'; error.hidden = true;
@@ -500,6 +548,35 @@ export function createImageAttachment(attachment, { compact = false } = {}) {
   });
   button.append(img); button.addEventListener('click', () => imageViewer(doc).open(attachment, button));
   figure.append(button, caption, error); return figure;
+}
+
+const generatedImageViews = new WeakMap();
+export function renderGeneratedImage(element, item) {
+  let view = generatedImageViews.get(element);
+  if (!view) {
+    const doc = element.ownerDocument;
+    element.className = 'message agent generated-image';
+    const label = doc.createElement('div'); label.className = 'message-label';
+    const icon = doc.createElement('img'); icon.src = '/favicon.svg'; icon.alt = '';
+    label.append(icon, '柠檬 · 图片生成');
+    const status = doc.createElement('p'); status.className = 'generated-image-status'; status.setAttribute('role', 'status');
+    const image = doc.createElement('div'); image.className = 'generated-image-result';
+    element.replaceChildren(label, status, image);
+    view = { status, image, signature: null }; generatedImageViews.set(element, view);
+  }
+  const hasImage = localImageUrl(item.attachment?.previewUrl);
+  const ended = ['completed', 'failed', 'interrupted'].includes(item.turnStatus);
+  const text = item.status === 'failed' ? '图片生成失败' + (hasImage ? '，已返回的图片保留如下。' : '，未返回图片。')
+    : item.status === 'interrupted' ? '图片生成已停止。'
+    : item.status === 'completed' ? (hasImage ? '已生成 · 点击图片查看大图或下载' : '生成已结束，未返回可预览的图片。')
+    : ended ? (hasImage ? '已返回图片 · 点击查看大图或下载' : '本轮已结束，未返回图片。')
+    : item.status === 'inProgress' ? '正在生成图片…' : '图片生成状态待同步。';
+  if (view.status.textContent !== text) view.status.textContent = text;
+  const signature = JSON.stringify(item.attachment || null);
+  if (view.signature !== signature) {
+    view.image.replaceChildren(...(item.attachment ? [createImageAttachment(item.attachment)] : []));
+    view.signature = signature;
+  }
 }
 
 // Module overrides only affect presentation. Untouched modules follow the global

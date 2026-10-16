@@ -25,11 +25,24 @@ test('file name pagination is replayable, scoped to the query/project, and prese
   const options={cwd:'/project',query:'MATCH',filenames:true}, first=await tools.search(options);
   await assert.rejects(tools.search({...options,cwd:'/other',cursor:first.nextCursor}),{status:409});
   await assert.rejects(tools.search({...options,query:'different',cursor:first.nextCursor}),{status:409});
+  await assert.rejects(tools.search({...options,showHidden:true,cursor:first.nextCursor}),{status:409});
   const next=await tools.search({...options,cursor:first.nextCursor}), count=visits;
   assert.deepEqual(await tools.search({...options,cursor:first.nextCursor}),next);assert.equal(visits,count);
   const hits=[...first.results,...next.results];let cursor=next.nextCursor;
   while(cursor){const page=await tools.search({...options,cursor});hits.push(...page.results);cursor=page.nextCursor;}
   assert.equal(hits.length,651);assert.equal(new Set(hits.map(hit=>hit.path)).size,651);assert.equal(visits,651);
+});
+
+test('filename search follows hidden visibility without entering excluded folders', async t => {
+  const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'lemon-hidden-search-'))), tools = new FileTools(new ProjectFiles());
+  t.after(() => tools.close());
+  for (const name of ['.github', '.local', '.git', 'src']) {
+    await mkdir(path.join(cwd, name)); await writeFile(path.join(cwd, name, 'match.txt'), 'fixture');
+  }
+  await writeFile(path.join(cwd, '.match'), 'fixture');
+  await symlink(path.join(cwd, '.github'), path.join(cwd, 'alias'));
+  assert.deepEqual((await allNames(tools, { cwd, query: 'match' })).results.map(hit => hit.path), ['src/match.txt']);
+  assert.deepEqual((await allNames(tools, { cwd, query: 'match', showHidden: true })).results.map(hit => hit.path).sort(), ['.github/match.txt', '.match', 'src/match.txt']);
 });
 test('cancelled filename searches release their iterator and never return partial results as complete',async t=>{
   const controller=new AbortController();let closed=false;
@@ -49,4 +62,3 @@ test('filename search traverses a directory larger than the old 10000-entry ceil
   assert.equal(result.results.length,10005);assert.equal(result.skipped,0);
   assert.ok(result.results.every(hit=>hit.path.startsWith('many/match-')));assert.ok(result.results.some(hit=>hit.path==='many/match-10004.sql'));
 });
-

@@ -11,6 +11,8 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   let projects = [], busy = false, collapsed = false, sequence = 0, location = '', nextOffset = null, loading = false, choosing = false;
   const actions = document.createElement('div'); actions.id = 'projectActionsPopup'; actions.className = 'project-row-menu'; actions.hidden = true; actions.setAttribute('role', 'menu');
   const git = document.createElement('button'); git.type = 'button'; git.textContent = 'Git 提交与推送'; git.setAttribute('role', 'menuitem'); actions.append(git); document.body.append(actions);
+  const pull = document.createElement('button'); pull.type = 'button'; pull.textContent = '拉取远程更新…'; pull.setAttribute('role', 'menuitem'); actions.append(pull);
+  const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = '复制项目路径'; copy.setAttribute('role', 'menuitem'); actions.append(copy);
   let actionProject = null, actionTrigger = null;
   function closeActions(restoreFocus = false) {
     const trigger = actionTrigger; actions.hidden = true; actionProject = actionTrigger = null;
@@ -29,10 +31,24 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
     if (!cwd || busy) return;
     try { await onGit(cwd); } catch (error) { notice(error.message); }
   });
+  pull.addEventListener('click', async () => {
+    const cwd = actionProject; closeActions(true);
+    if (!cwd || busy) return;
+    try { await onGit(cwd, 'pull'); } catch (error) { notice(error.message); }
+  });
+  copy.addEventListener('click', async () => {
+    const cwd = actionProject, expected = getContext().cwd; closeActions(true);
+    if (!cwd) return;
+    try { await window.navigator.clipboard.writeText(cwd); if (getContext().cwd === expected) notice('已复制项目绝对路径。'); }
+    catch { if (getContext().cwd === expected) notice(`剪贴板不可用，请手动复制项目路径：${cwd}`); }
+  });
   actions.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); closeActions(true); }
     else if (event.key === 'Tab') closeActions(true);
-    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); git.focus(); }
+    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); const controls = [git, pull, copy], index = controls.indexOf(document.activeElement);
+      controls[event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : controls.length - 1)) % controls.length].focus();
+    }
   });
   document.addEventListener('click', event => { if (!actions.contains(event.target) && !actionTrigger?.contains(event.target)) closeActions(); });
   $('projectList').addEventListener('scroll', () => closeActions());

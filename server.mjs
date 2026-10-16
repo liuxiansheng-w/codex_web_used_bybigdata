@@ -14,11 +14,14 @@ import { Workbench } from './lib/workbench.mjs';
 import { GitSubmit } from './lib/git-submit.mjs';
 import { languageTools } from './lib/language-tools.mjs';
 import { SqlRunner } from './lib/sql-runner.mjs';
+import { sendSqlResponse } from './lib/sql-response.mjs';
 import { FileHistory } from './lib/file-history.mjs';
 import { SpreadsheetPreview } from './lib/spreadsheet-preview.mjs';
 import { Subagents } from './lib/subagents.mjs';
 import { createEventStream, prepareThread } from './lib/event-stream.mjs';
 import { ModelConnections, COSMOS_MODEL } from './lib/model-connections.mjs';
+import { AppApprovals } from './lib/app-approvals.mjs';
+import { Memories } from './lib/memories.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 export function defaultWorkspace(appRoot = root, explicit = process.env.WORKSPACE_CWD) {
@@ -40,6 +43,9 @@ const assets = new Map([
   ['/markdown-renderer.html', ['markdown-renderer.html', 'text/html; charset=utf-8']],
   ['/composer.js', ['composer.js', 'text/javascript; charset=utf-8']],
   ['/permissions.js', ['permissions.js', 'text/javascript; charset=utf-8']],
+  ['/mcp-app-approval.js', ['mcp-app-approval.js', 'text/javascript; charset=utf-8']],
+  ['/mcp-form-schema.js', ['mcp-form-schema.js', 'text/javascript; charset=utf-8']],
+  ['/mcp-form-fields.js', ['mcp-form-fields.js', 'text/javascript; charset=utf-8']],
   ['/permission-presets.js', ['permission-presets.js', 'text/javascript; charset=utf-8']],
   ['/interactions.js', ['interactions.js', 'text/javascript; charset=utf-8']],
   ['/file-tree.js', ['file-tree.js', 'text/javascript; charset=utf-8']],
@@ -84,7 +90,7 @@ async function readBody(req) {
   } catch { throw Object.assign(new Error('无效的 JSON。'), { status: 400 }); }
 }
 
-export function createApplication({ cwd = defaultWorkspace(), bridge = new CodexBridge({ cwd }), stateDir = path.join(root, '.local'), sqlRunner = new SqlRunner(), titleGenerator = bridge instanceof CodexBridge ? new TitleGenerator({ stateDir, executable: bridge.executable }) : null, sqlCompletion = bridge instanceof CodexBridge ? new SqlCompletion({ stateDir, executable: bridge.executable }) : null, modelConnections = new ModelConnections({ stateDir, ephemeral: !(bridge instanceof CodexBridge) }) } = {}) {
+export function createApplication({ cwd = defaultWorkspace(), bridge = new CodexBridge({ cwd }), stateDir = path.join(root, '.local'), readAsset = readFile, sqlRunner = new SqlRunner(), appApprovals = new AppApprovals(), memories = new Memories(bridge), titleGenerator = bridge instanceof CodexBridge ? new TitleGenerator({ stateDir, executable: bridge.executable }) : null, sqlCompletion = bridge instanceof CodexBridge ? new SqlCompletion({ stateDir, executable: bridge.executable }) : null, modelConnections = new ModelConnections({ stateDir, ephemeral: !(bridge instanceof CodexBridge) }) } = {}) {
   const workspace = new Workspace(bridge, cwd, { titleGenerator, modelConnections });
   const projectFiles = new ProjectFiles();
   const fileTools = new FileTools(projectFiles);
@@ -96,6 +102,15 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
   const csrf = randomBytes(32).toString('hex');
   const clients = new Set();
   let startupError = null;
+  const staticBytes = async filename => {
+    try { return await readAsset(filename); }
+    catch (error) {
+      const denied = ['EPERM', 'EACCES'].includes(error.code);
+      throw Object.assign(new Error(denied
+        ? '系统拒绝读取网页资源，请检查后台服务的文件访问权限。'
+        : '网页资源暂时无法读取，请检查服务文件是否完整。'), { status: 503 });
+    }
+  };
 
   workspace.on('thread', data => {
     if (!clients.size) return;
@@ -122,13 +137,16 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       if (await modelConnections.handle(req, res, url)) return;
       if (req.method === 'GET' && assets.has(url.pathname)) {
         const [name, contentType] = assets.get(url.pathname);
+        // Read before committing headers: a filesystem error must produce a
+        // complete HTTP response instead of a reset that the proxy turns into 502.
+        const bytes = await staticBytes(path.join(root, 'public', name));
         if (url.pathname === '/markdown-renderer.html') {
           res.setHeader('X-Frame-Options', 'SAMEORIGIN');
           res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'self'; connect-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'");
         }
         if (url.pathname === '/') res.setHeader('Set-Cookie', `codex_desk=${session}; HttpOnly; SameSite=Strict; Path=/`);
         res.writeHead(200, { 'Content-Type': contentType });
-        res.end(await readFile(path.join(root, 'public', name)));
+        res.end(bytes);
         return;
       }
       const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('codex_desk='))?.slice(11);
@@ -136,15 +154,15 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       const markdownAsset = url.pathname.match(/^\/vendor\/markdown\/(document|mermaid|chunk-[A-Z0-9]+)\.js$/);
       if (req.method === 'GET' && markdownAsset) {
         const filename = path.join(root, 'public/vendor/markdown', `${markdownAsset[1]}.js`);
-        check(existsSync(filename), '预览资源不存在。', 404);
-        const bytes = await readFile(filename);
+        const bytes = await staticBytes(filename);
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         res.end(bytes); return;
       }
       const pdfAsset = url.pathname.match(/^\/vendor\/pdfjs\/(build\/pdf(?:\.worker)?\.min\.mjs|(?:cmaps|standard_fonts|wasm|icc)\/[A-Za-z0-9_.-]+\.(?:bcmap|pfb|ttf|wasm|icc))$/);
       if (req.method === 'GET' && pdfAsset) {
-        const name = pdfAsset[1]; res.writeHead(200, { 'Content-Type': name.endsWith('.mjs') ? 'text/javascript; charset=utf-8' : name.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream' });
-        res.end(await readFile(path.join(root, 'node_modules/pdfjs-dist', name))); return;
+        const name = pdfAsset[1], bytes = await staticBytes(path.join(root, 'node_modules/pdfjs-dist', name));
+        res.writeHead(200, { 'Content-Type': name.endsWith('.mjs') ? 'text/javascript; charset=utf-8' : name.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream' });
+        res.end(bytes); return;
       }
       if (req.method === 'POST') {
         check(req.headers.origin === origin && sameSecret(req.headers['x-codex-csrf'], csrf), '请求校验失败，请刷新页面。', 403);
@@ -167,9 +185,13 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       if (url.pathname === '/api/bootstrap' && req.method === 'GET') {
         const data = bridge.ready ? await workspace.bootstrap() : { connected: false, cwd, models: [], error: startupError || '柠檬正在连接，请稍候或点击重新连接。' };
         const connections = await modelConnections.status().catch(error => ({ error: error.message }));
-        json({ ...data, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true }); return;
+        json({ ...data, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true, mcpAppApprovalPersistence: true, computerUseAppApprovals: true, questionInputs: true, memorySettings: true }); return;
       }
       if (url.pathname === '/api/model-connections' && req.method === 'GET') { json(await modelConnections.status()); return; }
+      if (url.pathname === '/api/models' && req.method === 'GET') {
+        check(bridge.ready, '模型服务暂未连接，请稍后刷新列表。', 503);
+        json({ models: await workspace.readModels() }); return;
+      }
       if (url.pathname === '/api/model-connections' && req.method === 'POST') {
         const body = await readBody(req), controller = new AbortController();
         const cancel = () => { if (!res.writableEnded) controller.abort(); };
@@ -186,10 +208,16 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         json(await workspace.bootstrap()); return;
       }
       // Browsing local filenames does not depend on the model connection.
+      if (url.pathname === '/api/computer-use/approvals' && req.method === 'GET') { json(await appApprovals.list()); return; }
+      if (url.pathname === '/api/computer-use/approvals/revoke' && req.method === 'POST') { json(await appApprovals.revoke(await readBody(req))); return; }
       if (url.pathname === '/api/sql/status' && req.method === 'GET') { json(await sqlRunner.status()); return; }
-      if (url.pathname === '/api/sql/query' && req.method === 'POST') { json(await sqlRunner.execute(await readBody(req))); return; }
+      if (url.pathname === '/api/sql/query' && req.method === 'POST') {
+        const body = await readBody(req);
+        await sendSqlResponse(res, () => sqlRunner.execute(body));
+        return;
+      }
       if (url.pathname === '/api/project/files' && req.method === 'GET') {
-        json(await projectFiles.list({ cwd: url.searchParams.get('cwd') || cwd, path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset') || 0) })); return;
+        json(await projectFiles.list({ cwd: url.searchParams.get('cwd') || cwd, path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset') || 0), showHidden: url.searchParams.get('showHidden') === '1' })); return;
       }
       if (url.pathname === '/api/project/attach' && req.method === 'POST') {
         json(await projectFiles.attach(workspace.context, await readBody(req))); return;
@@ -236,7 +264,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         if (url.pathname === '/api/project/search') {
           const controller = new AbortController(), cancel = () => { if (!res.writableEnded) controller.abort(); };
           res.once('close', cancel);
-          try { json(await fileTools.search({ ...query, filenames: query.filenames === '1', caseSensitive: query.caseSensitive === '1', signal: controller.signal })); }
+          try { json(await fileTools.search({ ...query, filenames: query.filenames === '1', caseSensitive: query.caseSensitive === '1', showHidden: query.showHidden === '1', signal: controller.signal })); }
           finally { res.off('close', cancel); }
           return;
         }
@@ -254,6 +282,9 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         json(await action()); return;
       }
       check(bridge.ready, startupError || '助手尚未连接，请点击重新连接。', 503);
+      if (url.pathname === '/api/memories' && req.method === 'GET') { json(await memories.status()); return; }
+      if (url.pathname === '/api/memories/file' && req.method === 'GET') { json(await memories.read({ id: url.searchParams.get('id') })); return; }
+      if (url.pathname === '/api/memories/settings' && req.method === 'POST') { json(await memories.update(await readBody(req))); return; }
       const agentsRoute = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9_-]+)\/agents(?:\/(interrupt))?$/);
       if (agentsRoute && req.method === 'GET' && !agentsRoute[2]) { json(await subagents.list(agentsRoute[1])); return; }
       if (agentsRoute && req.method === 'POST' && agentsRoute[2]) { json(await subagents.interrupt(agentsRoute[1], await readBody(req))); return; }
@@ -279,7 +310,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         if (url.pathname === '/api/connections/action') { json(await workbench.connectionAction(body)); return; }
         if (url.pathname === '/api/schedules/action') { json(await workbench.scheduleAction(body)); return; }
         if (url.pathname === '/api/interrupt') { json(await workspace.interrupt(body.threadId)); return; }
-        if (url.pathname === '/api/respond') { json(workspace.respond(body)); return; }
+        if (url.pathname === '/api/respond') { json(await workspace.respond(body)); return; }
         if (url.pathname === '/api/attachments/upload') { json(await workspace.context.upload(body)); return; }
         if (url.pathname === '/api/attachments/reference') { json(await workspace.context.reference(body)); return; }
         if (url.pathname === '/api/goal') { json(await workspace.setGoal(body)); return; }

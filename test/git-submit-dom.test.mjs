@@ -48,3 +48,28 @@ test('project menu opens Git dialog, safely previews, preserves failed drafts an
   failing = false; $('commit-push').click(); await wait(); await wait(); assert.equal($('message').value, ''); assert.match($('status').textContent, /本地已提交.*network failed/);
   $('push').click(); await wait(); assert.equal(calls.at(-1).action, 'push'); assert.equal(calls.at(-1).head, 'new12345'); assert.match($('status').textContent, /推送成功/);
 });
+
+test('pull shortcut confirms the chosen upstream, deduplicates clicks and preserves all drafts', async t => {
+  const dom = new JSDOM('<div class="breadcrumb"></div><textarea id="chat">unsent chat</textarea>', { url: 'http://localhost' });
+  const old = { window: globalThis.window, document: globalThis.document }; Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+  t.after(() => { Object.assign(globalThis, old); dom.window.close(); });
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  const state = { cwd: '/other', head: 'abc12345', version: 'v1', branch: 'main', tracking: 'origin/main', fetchUrl: '/fixture/remote.git', ahead: 0, behind: 0, files: [], pullAvailable: true, pullBlocked: '' };
+  const calls = [], confirmations = [], updated = []; let approved = false, finish, tabs = [];
+  dom.window.confirm = message => { confirmations.push(message); return approved; };
+  const control = createGitSubmit({ getContext: () => ({ cwd: '/active' }), getTabs: () => tabs, onPulled: cwd => updated.push(cwd), api: async (route, body) => {
+    if (!body) return structuredClone(state);
+    calls.push(body); return new Promise(resolve => { finish = resolve; });
+  } });
+  const $ = name => document.querySelector(`[data-ui="${name}"]`);
+  await control.show('/other'); $('message').value = 'keep commit note'; $('message').dispatchEvent(new window.Event('input'));
+  await control.show('/other', { action: 'pull' }); assert.equal(calls.length, 0); assert.match(confirmations[0], /\/other[\s\S]*origin\/main[\s\S]*remote.git/);
+  tabs = [{ cwd: '/other', path: 'note.txt', dirty: true }]; approved = true; $('pull').click(); await wait(); assert.equal(calls.length, 0); assert.match($('status').textContent, /未保存草稿/);
+  tabs = []; $('pull').click(); $('pull').click(); await wait(); assert.equal(calls.length, 1); assert.equal(control.busy, true);
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['action', 'confirmed', 'cwd', 'head', 'operationId', 'version']); assert.equal(calls[0].action, 'pull'); assert.equal(calls[0].cwd, '/other');
+  finish({ pulled: true, updated: true, head: 'new12345' }); await wait(); await wait();
+  assert.equal(control.busy, false); assert.deepEqual(updated, ['/other']); assert.match($('status').textContent, /拉取成功/);
+  assert.equal($('message').value, 'keep commit note'); assert.equal(document.getElementById('chat').value, 'unsent chat');
+  state.pullAvailable = false; await control.show('/other'); assert.equal($('pull').disabled, true); assert.match($('pull-hint').textContent, /尚未加载/);
+});

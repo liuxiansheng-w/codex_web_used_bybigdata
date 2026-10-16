@@ -1,18 +1,23 @@
 import { markdown, escapeHtml as esc, bindMarkdownTableCopy } from './markdown.js';
 import { createComposerTools } from './composer.js';
-import { createPermissionControl, createApprovalBatch } from './permissions.js';
-import { createDraftStore, positionPopover, createThemeControl, createAppearanceControl, createModuleThemeControls, threadDisplayState, createImageAttachment, createSidebarResize, userMessagePresentation, createFileAttachment, attachmentProjectEntry, createQuotaIndicator, applyThreadPatch, createModelSwitch } from './interactions.js';
+import { createPermissionControl, createApprovalBatch, createQuestionCard } from './permissions.js';
+import { createDraftStore, positionPopover, createThemeControl, createAppearanceControl, createModuleThemeControls, threadDisplayState, createImageAttachment, createSidebarResize, userMessagePresentation, createFileAttachment, attachmentProjectEntry, createQuotaIndicator, applyThreadPatch, createModelSwitch, readableNotice } from './interactions.js';
 import { createFileTree } from './file-tree.js';
 import { createFileEditor } from './file-editor.js';
 import { createEditorTools, createInlineCompletion } from './editor-tools.js';
 import { createWorkbench } from './workbench.js';
 import { createProjectList } from './project-list.js';
-import { taskResult, subtaskGroups } from './task-results.js';
+import { taskResult, subtaskGroups, completedChangeSummaries, createChangeSummary } from './task-results.js';
 import { renderMessageTimes, turnDuration } from './message-timing.js';
 import { createSqlQuery, sqlFileFromRunnerLink } from './sql-query.js';
 import { createProductUI, createGitSubmit } from './product-ui.js';
 import { createBottomPanel } from './editor-window.js';
-import { renderActivity, activityTitle, activityFailed, executionTypes } from './execution-view.js';
+import { renderActivity, activityTitle, activityFailed, executionLayout } from './execution-view.js';
+import { renderGeneratedImage, modelRetryLabel } from './interactions.js';
+import { createModelCatalogRefresh } from './interactions.js';
+import { computerUseApproval } from './mcp-app-approval.js';
+import { mcpFormMode, mcpFormSchema } from './mcp-form-schema.js';
+import { renderMcpFields } from './mcp-form-fields.js';
 
 const $ = id => document.getElementById(id);
 bindMarkdownTableCopy(document, { notify: toast });
@@ -24,6 +29,12 @@ const storage = {
   set(key, value) { try { localStorage.setItem(`codex-desk:${key}`, value); } catch {} },
 };
 const state = { connected: false, streaming: false, authReady: null, csrf: '', cwd: '', active: null, threads: new Map(), history: [], cursor: null, sending: false, selecting: false, loadSequence: 0, archived: false };
+const modelCatalogRefresh = createModelCatalogRefresh({
+  load: () => api('/api/models', undefined, { signal: AbortSignal.timeout(20_000) }),
+  available: () => state.connected && !document.hidden && modelService() === 'codex',
+  apply: models => { state.modelCatalog = models; $('model').title = ''; renderModelConnection(); inlineCompletion?.sync(); },
+  onError: () => { $('model').title = '模型列表刷新失败，已保留当前列表和选择；稍后会再次刷新。'; },
+});
 const requestCards = new Map();
 const approvalBatch = createApprovalBatch({ api, getThread: selected, isConnected: () => state.connected && state.streaming, onChange: () => renderRequests(selected()?.requests || []), onComplete: toast });
 const approvalToolbar = $('approvalToolbar');
@@ -37,7 +48,7 @@ const modelSwitch = createModelSwitch({ button: $('modelSwitchButton'), api,
     toast(`已切换到 ${value.active === 'cosmos' ? 'Cosmos 自有模型' : 'Codex'}，请在新对话中使用。`);
   },
 });
-const elements = new Map(), executionContainers = new Map();
+const elements = new Map(), executionContainers = new Map(), changeSummaries = new Map();
 let persistenceTimer, recoverySnapshots = [], attachingVersion = false, draftWriteFailed = false, recoveryDismissed = false;
 const drafts = createDraftStore({ storage: localStorage, onError: message => { draftWriteFailed = true; notice(message); } });
 try { if (storage.get('persistDrafts') === 'true') { const saved = JSON.parse(storage.get('editorDrafts') || '[]'); if (Array.isArray(saved)) recoverySnapshots = saved.filter(file => typeof file.cwd === 'string' && typeof file.path === 'string' && typeof file.content === 'string' && typeof file.baseline === 'string' && typeof file.version === 'string').slice(0, 30); } } catch {}
@@ -48,7 +59,7 @@ let sqlQuery, inlineCompletion, productUI;
 let renderedThread = null;
 let stream, reconnectTimer, recoveringStream;
 let reconnectAttempts = 0;
-const composerTools = createComposerTools({ api, notice, getContext: () => ({ cwd: state.cwd, thread: selected() }), onChange: () => updateControls() });
+const composerTools = createComposerTools({ api, notice, getContext: () => ({ cwd: state.cwd, thread: selected() }), onChange: () => updateControls(), onDraftChange: () => saveDraft() });
 const permissionControl = createPermissionControl({ onChange: updateControls, notice });
 const attachProjectFile = async entry => {
   if (attachingVersion) return;
@@ -83,10 +94,10 @@ fileTree = createFileTree({
   onManage: entry => workbench.show('files', entry),
   onSearch: query => workbench.show('search', { query, filenames: true }),
 });
-projectList = createProjectList({ api, onSelect: switchProject, onGit: cwd => gitSubmit.show(cwd), getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, notice });
+projectList = createProjectList({ api, onSelect: switchProject, onGit: (cwd, action) => gitSubmit.show(cwd, { action }), getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, notice });
 const workbench = createWorkbench({
   bottomPanel,
-  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), features: state.workbenchFeatures, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
+  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), features: state.workbenchFeatures, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
   onContext: addContext, onThread: id => selectThread(id, true), onProject: cwd => switchProject(cwd, true), projects: projectList, refreshFiles: () => $('refreshFiles').click(),
   getDraftPreference: () => storage.get('persistDrafts') === 'true',
   setDraftPreference, clearDrafts: clearSavedDrafts, restoreDrafts,
@@ -97,9 +108,17 @@ inlineCompletion = createInlineCompletion({ editor: fileEditor, api, getConfig: 
 createEditorTools({ editor: fileEditor, api, notice, completion: inlineCompletion, onContext: addContext, onPreview: entry => workbench.previewArtifact(entry) });
 sqlQuery = createSqlQuery({ editor: fileEditor, api, onContext: addContext, notice, bottomPanel });
 productUI = createProductUI();
-const gitSubmit = createGitSubmit({ api, getContext: () => ({ cwd: state.cwd }) });
+const gitSubmit = createGitSubmit({ api, getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, onPulled: async cwd => {
+  await fileEditor.refresh({ all: true, cwd }); if (state.cwd === cwd) $('refreshFiles').click();
+} });
 createModuleThemeControls({ root: document.documentElement, storage: localStorage, bottomPanel });
 function addContext(text) { productUI?.showConversation(); $('prompt').value = ($('prompt').value ? $('prompt').value + '\n\n' : '') + text; resizePrompt(); updateControls(); saveDraft(); $('prompt').focus(); }
+document.addEventListener('click', event => {
+  const followup = event.target.closest?.('[data-followup-prompt]');
+  if (!followup || !followup.closest('.message.agent, .agent-output')) return;
+  const prompt = followup.dataset.followupPrompt; if (!prompt?.trim()) return;
+  addContext(prompt); toast('已填入输入框，确认后发送。');
+});
 function persistEditor() {
   if (storage.get('persistDrafts') !== 'true') return;
   const files = new Map(recoverySnapshots.map(file => [JSON.stringify([file.cwd, file.path]), file]));
@@ -123,7 +142,7 @@ async function restoreDrafts() {
 }
 function updateDraftStatus() {
   const saved = storage.get('persistDrafts') === 'true';
-  $('draftStatus').textContent = draftWriteFailed ? '草稿保存失败 · 请备份' : saved ? '本机草稿恢复已开启' : '草稿仅保留在本页';
+  $('draftStatus').textContent = draftWriteFailed ? '草稿保存失败 · 请备份' : saved ? composerTools.hasPastedText ? '正文可恢复 · 文本附件仅本页' : '本机草稿恢复已开启' : '草稿仅保留在本页';
   $('draftChoice').hidden = storage.get('persistDrafts') !== null || !$('prompt').value.trim();
   $('draftRecovery').hidden = recoveryDismissed || !recoverySnapshots.length;
   $('draftRecoveryText').textContent = `有 ${recoverySnapshots.length} 份编辑草稿可恢复（不写入磁盘）。`;
@@ -163,9 +182,19 @@ async function switchProject(cwd, fromWorkbench = false) {
   } finally { state.switchingProject = false; updateControls(); }
 }
 
-function notice(message) {
-  $('noticeText').textContent = message || '';
-  $('notice').hidden = !message;
+let noticeThreadId = null;
+function notice(message, threadId = null) {
+  const text = readableNotice(message);
+  $('noticeText').textContent = text;
+  $('notice').hidden = !text;
+  noticeThreadId = text ? threadId : null;
+}
+function syncThreadNotice(thread, previous = null, force = false) {
+  if (!thread) return;
+  const error = modelRetryLabel(thread) ? null : thread.error;
+  const oldError = modelRetryLabel(previous) ? null : previous?.error;
+  if (error && (force || error !== oldError)) notice(error, thread.id);
+  else if (!error && noticeThreadId === thread.id) notice(null);
 }
 
 async function api(route, body, { signal } = {}) {
@@ -177,7 +206,7 @@ async function api(route, body, { signal } = {}) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const result = await response.json();
-  if (!response.ok) throw Object.assign(new Error(result.error || `请求失败 (${response.status})`), { status: response.status });
+  if (!response.ok || (route === '/api/sql/query' && result.ok === false)) throw Object.assign(new Error(result.error || `请求失败 (${response.status})`), { status: result.status || response.status });
   return result;
 }
 
@@ -188,9 +217,11 @@ function renderModelConnection() {
   modelSwitch.setCurrent(cosmos ? 'cosmos' : 'codex');
   const available = (state.modelCatalog || []).filter(m => (m.id === 'lemon-cosmos') === cosmos);
   const previous = $('model').value || storage.get('model') || '';
+  const previousName = [...$('model').options].find(option => option.value === previous)?.textContent || previous;
   $('model').replaceChildren(...(cosmos ? [] : [new Option('默认模型', '')]));
   for (const model of available) $('model').add(new Option(model.name || model.id, model.id));
   if (cosmos && !$('model').options.length) $('model').add(new Option('Cosmos · 待配置', 'lemon-cosmos'));
+  if (previous && (previous === 'lemon-cosmos') === cosmos && ![...$('model').options].some(o => o.value === previous)) $('model').add(new Option(previousName, previous));
   if ([...$('model').options].some(o => o.value === previous)) $('model').value = previous;
   composerTools.setModels(available);
   quotaIndicator.setAvailability({ connected: state.connected, loggedIn: cosmos ? true : state.authReady, type: cosmos ? 'cosmos' : state.authType });
@@ -219,7 +250,7 @@ function updateControls() {
   $('sendButton').title = busy ? '向正在执行的任务追加或排队' : '发送消息';
   $('stopButton').hidden = !busy;
   $('stopButton').disabled = !thread?.turnId || !state.connected || state.sending;
-  $('sendButton').disabled = !state.connected || !state.streaming || (state.authReady === false && modelService() !== 'cosmos') || state.sending || selecting || composerTools.uploading || !$('prompt').value.trim();
+  $('sendButton').disabled = !state.connected || !state.streaming || (state.authReady === false && modelService() !== 'cosmos') || state.sending || selecting || composerTools.uploading || !composerTools.canSend;
   $('model').disabled = busy || state.sending || selecting;
   $('prompt').readOnly = !!state.switchingProject;
   $('mode').disabled = busy || state.sending;
@@ -240,7 +271,8 @@ function updateControls() {
 
 function renderRunStatus() {
   const thread = selected(), duration = turnDuration(thread, thread?.turnId, state.connected && state.streaming);
-  const label = thread?.requests.length ? '等待你的回复或审批' : state.sending ? '正在发送…' : '柠檬正在处理…';
+  const asyncOnly = thread?.requests.length && thread.requests.every(request => ['item/tool/requestUserInput', 'item/agentMessage/answer'].includes(request.method) && request.params?.isBlocking === false);
+  const label = thread?.requests.length ? asyncOnly ? '柠檬正在处理，你可以补充回答' : '等待你的回复或审批' : state.sending ? '正在发送…' : modelRetryLabel(thread) || '柠檬正在处理…';
   $('runStatusText').textContent = label + (thread?.busy && duration ? ` · ${duration.text}` : '');
 }
 function refreshMessageTimes() { renderMessageTimes(selected(), elements, state.connected && state.streaming); }
@@ -383,7 +415,7 @@ async function selectThread(id, fromWorkbench = false, { preserveLayout = false 
       if (thread.cwd !== state.cwd) { state.cwd = thread.cwd; storage.set('cwd', state.cwd); workspaceLabel(); await loadHistory(); }
       if (sequence !== selectionSequence) return;
       workbench.contextChanged(); setThreadOptions(thread); restoreDraft(); render(true); renderHistory();
-      if (thread.error) notice(thread.error);
+      syncThreadNotice(thread, null, true);
     }
   } catch (error) { if (state.active === id) notice(error.message); }
   finally { if (sequence === selectionSequence) { state.selecting = false; updateControls(); } }
@@ -419,7 +451,7 @@ function render(forceScroll = false) {
   const area = $('scrollArea');
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
   const changedThread = renderedThread !== state.active;
-  if (changedThread) { executionContainers.clear(); elements.clear(); $('messages').replaceChildren(); renderedThread = state.active; }
+  if (changedThread) { executionContainers.clear(); changeSummaries.clear(); elements.clear(); $('messages').replaceChildren(); renderedThread = state.active; }
   $('welcome').hidden = !!state.active;
   $('messages').hidden = !state.active;
   renderConversationHeading();
@@ -466,6 +498,12 @@ function render(forceScroll = false) {
       } else if (item.type === 'agentMessage' || item.type === 'plan') {
         el.className = 'message agent';
         el.innerHTML = `<div class="turn-duration" hidden></div><div class="message-label"><img src="/favicon.svg" alt="">${item.type === 'plan' ? '执行计划' : '柠檬'}</div><div>${markdown(item.text)}</div>`;
+        if (item.questions?.length) {
+          const summary = document.createElement('div'); summary.className = 'async-question-summary';
+          const label = document.createElement('strong'); label.textContent = item.questionState === 'resolved' ? '补充问题 · 已处理' : item.questionState === 'past' ? '此前的补充问题' : '补充问题'; summary.append(label);
+          for (const question of item.questions) { const p = document.createElement('p'); p.textContent = question.question; summary.append(p); }
+          el.append(summary);
+        }
         const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-response'; copy.textContent = '复制'; copy.setAttribute('aria-label', '复制这条回复');
         copy.addEventListener('click', async () => {
           try { await navigator.clipboard.writeText(item.text || ''); toast('已复制回复'); }
@@ -479,6 +517,8 @@ function render(forceScroll = false) {
           link.removeAttribute('target'); link.title = '在当前工作台打开 SQL';
           link.addEventListener('click', event => { event.preventDefault(); openProjectLink(sqlPath); });
         }
+      } else if (item.type === 'imageGeneration') {
+        renderGeneratedImage(el, { ...item, turnStatus });
       } else {
         renderActivity(el, { ...item, turnStatus });
       }
@@ -502,24 +542,54 @@ function render(forceScroll = false) {
 }
 
 function organizeExecution(thread) {
-  const groups = new Map(); let turn = 'history';
-  for (const item of thread?.items || []) {
-    if (item.type === 'userMessage') turn = item.id;
-    if (!executionTypes.has(item.type)) continue;
-    const key = item.turnId || turn; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(item);
+  const blocks = executionLayout((thread?.items || []).filter(item => elements.has(item.id)));
+  const summaries = completedChangeSummaries(thread);
+  const summaryAnchors = new Map(summaries.map(summary => [summary.itemIds.findLast(id => elements.has(id)), summary]));
+  const keys = new Set(), ordered = [];
+  function appendSummary(anchor) {
+    const summary = summaryAnchors.get(anchor); if (!summary) return;
+    let card = changeSummaries.get(summary.key);
+    if (!card) {
+      const checkContext = () => { if (selected()?.id !== thread.id || state.cwd !== summary.cwd) throw new Error('请切回文件所属会话和项目后操作。'); };
+      card = createChangeSummary({
+        onOpen: (file, current) => { checkContext(); return workbench.openFile({ cwd: current.cwd, path: file.path }); },
+        onReview: current => { checkContext(); return workbench.show('git', { changes: current.changes }); },
+        onError: notice,
+      }); changeSummaries.set(summary.key, card);
+    }
+    card.update(summary); ordered.push(card.el);
   }
-  for (const [key, group] of executionContainers) if (!groups.has(key)) { group.remove(); executionContainers.delete(key); }
-  for (const [key, items] of groups) {
-    const first = elements.get(items[0].id); if (!first) continue;
+  for (const block of blocks) {
+    if (block.item) { ordered.push(elements.get(block.item.id)); appendSummary(block.item.id); continue; }
+    const { key, turnId, items } = block; keys.add(key);
+    const turnRunning = !!thread.busy && turnId === thread.turnId;
+    const running = turnRunning ? items.findLast(item => item.status === 'inProgress') : null;
+    const active = turnRunning && (!!running || block === blocks.at(-1));
     let group = executionContainers.get(key);
-    if (!group) { group = document.createElement('details'); group.className = 'execution-group'; group.open = !!thread.busy && key === thread.turnId; group.append(document.createElement('summary')); first.before(group); executionContainers.set(key, group); }
+    if (!group) { group = document.createElement('details'); group.className = 'execution-group'; group.open = active; group.append(document.createElement('summary')); executionContainers.set(key, group); }
     const failures = items.filter(activityFailed).length;
-    const active = !!thread.busy && key === thread.turnId;
-    const running = active ? items.findLast(item => item.status === 'inProgress') : null;
-    const stateLabel = active ? `进行中${running ? ` · ${activityTitle(running)}` : ''}` : key === thread.latestTurnId && thread.completion === 'interrupted' ? '已中断' : '已结束';
+    const turnEnded = thread.turnTimings?.find(turn => turn.id === turnId)?.status || (turnId === thread.latestTurnId ? thread.completion : null);
+    const interrupted = turnEnded === 'interrupted' && items.some(item => item.status === 'inProgress' || item.status === 'interrupted');
+    const stateLabel = active ? `进行中${running ? ` · ${activityTitle(running)}` : ''}` : interrupted ? '已中断' : '已结束';
     group.firstElementChild.textContent = `执行过程 · ${items.length} 项 · ${stateLabel}${failures ? ` · ${failures} 项需查看` : ''}`;
     group.classList.toggle('has-failures', !!failures);
-    for (const item of items) { const element = elements.get(item.id); if (element && element.parentNode !== group) group.append(element); }
+    let cursor = group.firstElementChild.nextSibling;
+    for (const item of items) {
+      const element = elements.get(item.id);
+      if (element !== cursor) group.insertBefore(element, cursor);
+      cursor = element.nextSibling;
+    }
+    ordered.push(group); appendSummary(items.at(-1).id);
+  }
+  for (const [key, group] of executionContainers) if (!keys.has(key)) { group.remove(); executionContainers.delete(key); }
+  const summaryKeys = new Set(summaries.map(summary => summary.key));
+  for (const [key, card] of changeSummaries) if (!summaryKeys.has(key)) { card.el.remove(); changeSummaries.delete(key); }
+  // Restore event order after history refreshes or late insertions. Nodes that
+  // are already in place are untouched, preserving details, focus and selection.
+  const messages = $('messages'); let cursor = messages.firstChild;
+  for (const element of ordered) {
+    if (element !== cursor) messages.insertBefore(element, cursor);
+    cursor = element.nextSibling;
   }
 }
 
@@ -531,49 +601,40 @@ function renderRequests(requests) {
   $('approvalProgress').textContent = current.batch ? `已处理 ${current.batch.processed} / ${current.batch.total} 项` : '仅本次已列出的命令与文件修改';
   $('approveAll').disabled = current.disabled;
   $('approveAll').textContent = current.batch ? '正在提交…' : `全部允许一次（${current.candidates.length}）`;
-  for (const [key, card] of requestCards) if (!keys.has(key) || approvalBatch.status(key).done) { card.remove(); requestCards.delete(key); }
+  const pendingKeys = new Set([...state.threads.values()].flatMap(thread => (thread.requests || []).map(request => request.key)));
+  for (const [key, card] of requestCards) {
+    if (!keys.has(key)) card.remove();
+    if (!pendingKeys.has(key) || approvalBatch.status(key).done) { card.remove(); requestCards.delete(key); }
+  }
   for (const request of requests) {
-    if (requestCards.has(request.key) || approvalBatch.status(request.key).done) continue;
+    if (approvalBatch.status(request.key).done) continue;
+    if (requestCards.has(request.key)) { const card = requestCards.get(request.key); if (!card.isConnected) $('requests').append(card); continue; }
     const { params, method } = request;
+    if (['item/tool/requestUserInput', 'item/agentMessage/answer'].includes(method)) {
+      const card = createQuestionCard(request, (request, payload) => approvalBatch.respond(request, payload), { allowSkip: state.questionInputs === true });
+      requestCards.set(request.key, card); $('requests').append(card); continue;
+    }
     if (method === 'mcpServer/elicitation/request') { const card = renderMcpRequest(request); requestCards.set(request.key, card); card.dataset.requestKey = request.key; continue; }
     const card = document.createElement('form'); card.className = 'request-card'; card.dataset.requestKey = request.key; requestCards.set(request.key, card);
-    const question = method === 'item/tool/requestUserInput';
     const title = document.createElement('h3');
-    title.textContent = question ? '柠檬需要你补充信息' : method.includes('fileChange') ? '允许这次文件修改？' : method.includes('permissions') ? '允许这次权限请求？' : '允许执行这条命令？';
+    title.textContent = method.includes('fileChange') ? '允许这次文件修改？' : method.includes('permissions') ? '允许这次权限请求？' : '允许执行这条命令？';
     card.append(title);
     const description = document.createElement('p'); description.textContent = params.reason || '请查看下方内容后决定。'; card.append(description);
-    if (question) {
-      for (const q of params.questions) {
-        const label = document.createElement('label'); label.textContent = q.question;
-        const input = document.createElement('input'); input.required = true; input.name = q.id;
-        input.id = `question-${request.key}-${q.id}`; label.htmlFor = input.id;
-        input.type = q.isSecret ? 'password' : 'text'; input.maxLength = 10000; input.autocomplete = 'off';
-        card.append(label);
-        if (q.options?.length) {
-          const select = document.createElement('select'); select.setAttribute('aria-label', `${q.header}：建议选项`);
-          select.add(new Option('选择建议或在下方输入', ''));
-          for (const option of q.options) select.add(new Option(`${option.label} — ${option.description}`, option.label));
-          select.addEventListener('change', () => { if (select.value) input.value = select.value; }); card.append(select);
-        }
-        card.append(input);
-      }
-    } else {
-      const pre = document.createElement('pre');
-      const item = selected()?.items.find(i => i.id === params.itemId);
-      pre.textContent = params.command || item?.text || JSON.stringify(params.permissions || params, null, 2);
-      card.append(pre);
-      if (params.cwd) { const cwd = document.createElement('p'); cwd.textContent = `目录：${params.cwd}`; card.append(cwd); }
-    }
+    const pre = document.createElement('pre');
+    const item = selected()?.items.find(i => i.id === params.itemId);
+    pre.textContent = params.command || item?.text || JSON.stringify(params.permissions || params, null, 2);
+    card.append(pre);
+    if (params.cwd) { const cwd = document.createElement('p'); cwd.textContent = `目录：${params.cwd}`; card.append(cwd); }
     const errorText = document.createElement('p'); errorText.className = 'field-error'; errorText.setAttribute('role', 'alert');
     const actions = document.createElement('div'); actions.className = 'request-actions';
-    if (!question) {
+    {
       const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'secondary-button'; reject.textContent = '拒绝';
       reject.addEventListener('click', () => answer('decline')); actions.append(reject);
     }
-    const accept = document.createElement('button'); accept.type = 'submit'; accept.className = 'primary-button'; accept.textContent = question ? '提交回答' : method === 'item/permissions/requestApproval' ? '允许本轮权限' : '允许这一次'; actions.append(accept);
+    const accept = document.createElement('button'); accept.type = 'submit'; accept.className = 'primary-button'; accept.textContent = method === 'item/permissions/requestApproval' ? '允许本轮权限' : '允许这一次'; actions.append(accept);
     card.append(errorText, actions); $('requests').append(card);
     const answer = async decision => {
-      await approvalBatch.respond(request, question ? { answers: Object.fromEntries(new FormData(card)) } : { decision });
+      await approvalBatch.respond(request, { decision });
     };
     card.addEventListener('submit', e => { e.preventDefault(); answer('accept'); });
   }
@@ -627,7 +688,8 @@ async function syncActiveThread(id, source) {
   try {
     const thread = await api(`/api/threads/${encodeURIComponent(id)}`);
     if (state.active !== id || stream !== source) return;
-    storeThread(thread); render(); renderHistory();
+    const previous = selected();
+    storeThread(thread); render(); renderHistory(); syncThreadNotice(thread, previous);
   } catch (error) { if (state.active === id && stream === source) notice(error.message); }
 }
 
@@ -648,12 +710,14 @@ function startStream() {
   listen('snapshot', event => {
     reconnectAttempts = 0;
     const data = JSON.parse(event.data);
+    const previous = selected();
     // A reconnected/restarted service may no longer track older browser tasks.
     // Keep their drafts/history, but do not present old busy flags as live facts.
     for (const [id, thread] of state.threads) state.threads.set(id, { ...thread, runtimeStale: true });
     versions.clear();
     for (const thread of data.threads) { versions.set(thread.id, thread); storeThread(thread); }
     setConnection(data.connected); render(); renderHistory();
+    syncThreadNotice(selected(), previous);
     // Includes state missed while this browser's SSE connection was down.
     if (data.connected && state.active && (!state.threads.has(state.active) || selected()?.runtimeStale)) void syncActiveThread(state.active, source);
   });
@@ -671,7 +735,7 @@ function startStream() {
     if (summary(previous) !== summary(thread)) renderHistory();
     if (state.active === thread.id) {
       render();
-      if (thread.error && thread.error !== previous?.error) notice(thread.error);
+      syncThreadNotice(thread, previous);
     }
     if (previous?.busy && !thread.busy) loadHistory().catch(() => {});
     if (previous?.busy && !thread.busy) void quotaIndicator.refresh();
@@ -689,14 +753,22 @@ function startStream() {
 }
 window.addEventListener('online', () => { if (!state.streaming) void recoverStream(); });
 window.addEventListener('focus', () => { if (!state.streaming) void recoverStream(); });
+window.addEventListener('focus', () => { void modelCatalogRefresh.refresh(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void modelCatalogRefresh.refresh(); });
+for (const event of ['focus', 'pointerdown']) $('model').addEventListener(event, () => { void modelCatalogRefresh.refresh(); });
 
 async function bootstrap(first = false, options) {
   const data = await api('/api/bootstrap', undefined, options);
   state.csrf = data.csrf;
   state.aiCompletionAvailable = !!data.aiCompletionAvailable;
   state.workbenchFeatures = !!data.workbenchFeatures;
+  state.computerUseAppApprovals = !!data.computerUseAppApprovals;
+  state.questionInputs = data.questionInputs === true;
+  state.memorySettings = data.memorySettings === true;
+  state.mcpAppApprovalPersistence = data.mcpAppApprovalPersistence === true;
   state.modelConnections = data.modelConnections || { active: 'codex' };
   state.modelCatalog = data.models;
+  modelCatalogRefresh.markLoaded(); $('model').title = '';
   modelSwitch.setStatus(data.modelConnections || { error: '模型切换服务尚未加载，请稍后重新打开。' });
   $('quickAgents').hidden = !state.workbenchFeatures; $('editorHistory').hidden = !state.workbenchFeatures;
   state.authReady = data.auth?.loggedIn ?? null;
@@ -720,7 +792,7 @@ $('composer').addEventListener('submit', async event => {
   if ($('sendButton').disabled || state.sending) return;
   const following = !!selected()?.busy;
   if (!following && !permissionControl.beforeSend()) return;
-  const text = $('prompt').value.trim();
+  const draftText = $('prompt').value, text = composerTools.messageText();
   const composerContext = composerTools.payload();
   const draftCwd = state.cwd, draftThread = state.active;
   state.sending = true; updateControls(); notice(null);
@@ -728,7 +800,7 @@ $('composer').addEventListener('submit', async event => {
     const result = following ? await api('/api/followup', { threadId: state.active, text, behavior: $('followupBehavior').value, attachments: composerContext.attachments, capabilities: composerContext.capabilities }) : await api('/api/send', { threadId: state.active, text, cwd: state.cwd, model: $('model').value, modelService: modelService(), ...permissionControl.payload(), ...composerContext });
     drafts.clear(draftCwd, draftThread);
     // Preserve any draft typed while the request was being submitted.
-    if ($('prompt').value.trim() === text) { $('prompt').value = ''; resizePrompt(); }
+    if ($('prompt').value === draftText) { $('prompt').value = ''; resizePrompt(); }
     state.active = result.threadId; storage.set('active', result.threadId);
     if (!state.threads.has(result.threadId)) state.threads.set(result.threadId, await api(`/api/threads/${result.threadId}`));
     workbench.contextChanged();
@@ -843,34 +915,36 @@ async function openProjectLink(target) {
 }
 function renderMcpRequest(request) {
   const { params } = request, card = document.createElement('form'); card.className = 'request-card';
-  const title = document.createElement('h3'); title.textContent = `插件请求：${params.serverName}`;
-  const description = document.createElement('p'); description.textContent = params.message || '请检查插件要求后决定是否继续。'; card.append(title, description);
-  const fields = [], schema = params.requestedSchema || {}; let supported = true;
+  const appApproval = computerUseApproval(params);
+  const persistModes = state.mcpAppApprovalPersistence ? appApproval?.persistModes || [] : [];
+  const title = document.createElement('h3'); title.textContent = appApproval ? `允许使用 ${appApproval.appName}？` : `插件请求：${params.serverName}`;
+  const description = document.createElement('p'); description.textContent = appApproval ? '电脑操作可查看、截图并操作此应用。请选择授权范围。' : params.message || '请检查插件要求后决定是否继续。'; card.append(title, description);
+  if (appApproval) {
+    if (appApproval.highRisk || appApproval.subtitle) { const detail = document.createElement('p'); detail.textContent = [appApproval.highRisk ? '较高风险' : '', appApproval.subtitle].filter(Boolean).join(' · '); card.append(detail); }
+    const scopeHint = document.createElement('p'); scopeHint.textContent = persistModes.includes('always') ? `“允许此会话”仅用于当前对话；“始终允许”可在${state.computerUseAppApprovals ? '设置 → 应用授权' : '官方桌面客户端的电脑操作设置'}中撤销。` : persistModes.includes('session') ? '授权仅用于当前对话。' : '本次仅允许当前操作。'; card.append(scopeHint);
+  }
+  let fields = null, supported = true;
   if (params.mode === 'url') {
     try { const url = new URL(params.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); const link = document.createElement('a'); link.href = url.href; link.textContent = `打开授权页面：${url.host}`; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link); } catch { supported = false; }
-  } else {
-    for (const [key, spec] of Object.entries(schema.properties || {})) {
-      if (!['string', 'boolean', 'integer', 'number', 'array'].includes(spec.type)) { supported = false; continue; }
-      const label = document.createElement('label'); label.textContent = spec.title || key;
-      const optionSpec = spec.type === 'array' ? spec.items || {} : spec;
-      const options = optionSpec.enum?.map((value, i) => ({ value, title: optionSpec.enumNames?.[i] || value })) || (optionSpec.oneOf || optionSpec.anyOf)?.map(option => ({ value: option.const, title: option.title || option.const }));
-      if (spec.type === 'array' && !options) { supported = false; continue; }
-      const input = document.createElement(options ? 'select' : 'input'); input.name = key; input.autocomplete = 'off'; input.required = schema.required?.includes(key) || false;
-      if (options) { if (spec.type === 'array') { input.multiple = true; input.size = Math.min(6, options.length); } else input.add(new Option('请选择', '')); for (const option of options) input.add(new Option(String(option.title), String(option.value))); }
-      else { input.type = spec.type === 'boolean' ? 'checkbox' : ['integer', 'number'].includes(spec.type) ? 'number' : /secret|token|password/i.test(key) ? 'password' : spec.format === 'email' ? 'email' : 'text'; if (input.type === 'checkbox') input.required = false; if (input.type === 'number') { input.step = spec.type === 'integer' ? '1' : 'any'; if (spec.minimum != null) input.min = spec.minimum; if (spec.maximum != null) input.max = spec.maximum; } else { input.maxLength = Math.min(spec.maxLength ?? 10000, 10000); if (spec.minLength) input.minLength = spec.minLength; } }
-      fields.push({ key, spec, input }); label.append(input); if (spec.description) { const hint = document.createElement('small'); hint.textContent = spec.description; label.append(hint); } card.append(label);
-    }
-  }
-  if (!supported) { const info = document.createElement('p'); info.textContent = '此表单包含网页暂不支持的字段或地址，请拒绝本次请求并在本机桌面客户端继续。'; const link = document.createElement('a'); link.href = 'codex://'; link.textContent = '打开本机桌面客户端 ↗'; card.append(info, link); }
+  } else if (mcpFormMode(params.mode)) {
+    const form = mcpFormSchema(params);
+    fields = renderMcpFields(card, form.schema, form); supported = fields.supported;
+  } else supported = false;
+  if (!supported) { const info = document.createElement('p'); info.textContent = fields?.error || '此表单包含网页暂不支持的字段或地址，请拒绝本次请求并在本机桌面客户端继续。'; const link = document.createElement('a'); link.href = 'codex://'; link.textContent = '打开本机桌面客户端 ↗'; card.append(info, link); }
   const errorText = document.createElement('p'); errorText.className = 'field-error'; errorText.setAttribute('role', 'alert');
   const actions = document.createElement('div'); actions.className = 'request-actions';
   const reject = document.createElement('button'); reject.type = 'button'; reject.textContent = '拒绝'; reject.className = 'secondary-button';
-  const accept = document.createElement('button'); accept.type = 'submit'; accept.textContent = params.mode === 'url' ? '我已完成授权，继续' : '提交给此插件'; accept.className = 'primary-button'; accept.disabled = !supported; if (!supported) accept.dataset.unsupported = 'true';
-  const answer = async decision => {
-    const content = Object.fromEntries(fields.filter(({ input, spec }) => ['boolean', 'array'].includes(spec.type) || input.value !== '').map(({ key, spec, input }) => [key, spec.type === 'array' ? [...input.selectedOptions].map(option => option.value) : spec.type === 'boolean' ? input.checked : ['number', 'integer'].includes(spec.type) ? Number(input.value) : input.value]));
-    await approvalBatch.respond(request, { decision, ...(params.mode === 'form' && decision === 'accept' ? { content } : {}) });
+  const accept = document.createElement('button'); accept.type = 'submit'; accept.textContent = appApproval ? persistModes.includes('session') ? '允许此会话' : '允许一次' : params.mode === 'url' ? '我已完成授权，继续' : '提交给此插件'; accept.className = 'primary-button'; accept.disabled = !supported; if (!supported) accept.dataset.unsupported = 'true';
+  const answer = async (decision, persist) => {
+    if (decision === 'accept' && !supported) return;
+    let content;
+    try { if (decision === 'accept' && mcpFormMode(params.mode)) content = fields.read(); }
+    catch (error) { errorText.textContent = error.message; return; }
+    await approvalBatch.respond(request, { decision, ...(content !== undefined ? { content } : {}), ...(persist ? { persist } : {}) });
   };
-  reject.addEventListener('click', () => answer('decline')); card.addEventListener('submit', event => { event.preventDefault(); answer('accept'); }); actions.append(reject, accept); card.append(errorText, actions); $('requests').append(card); return card;
+  reject.addEventListener('click', () => answer('decline')); card.addEventListener('submit', event => { event.preventDefault(); answer('accept', persistModes.includes('session') ? 'session' : undefined); }); actions.append(reject);
+  if (persistModes.includes('always')) { const always = document.createElement('button'); always.type = 'button'; always.className = 'secondary-button'; always.textContent = '始终允许'; always.addEventListener('click', () => answer('accept', 'always')); actions.append(always); }
+  actions.append(accept); card.append(errorText, actions); $('requests').append(card); return card;
 }
 
 try {

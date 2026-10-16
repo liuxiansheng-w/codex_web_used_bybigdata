@@ -57,11 +57,72 @@ export function bindMarkdownTableCopy(root, { notify = () => {} } = {}) {
   tableCopyBindings.set(root, dispose); return dispose;
 }
 
+// Native message directives are data, never HTML or executable instructions.
+// Parse the quoted attributes before Markdown so backticks/braces in values
+// cannot escape into a second interactive element.
+function messageDirective(text, start) {
+  const head = text.slice(start).match(/^:{1,2}codex-(file-citation|followup)(?:\[([^\]\n]{1,240})\])?\{/);
+  if (!head || /[:\\]/.test(text[start - 1] || '')) return null;
+  const from = start + head[0].length; let end = from, quoted = false, escaped = false;
+  for (; end < Math.min(text.length, from + 16000); end++) {
+    const char = text[end];
+    if (escaped) { escaped = false; continue; }
+    if (quoted && char === '\\') { escaped = true; continue; }
+    if (char === '"') quoted = !quoted;
+    else if (char === '}' && !quoted) break;
+  }
+  if (quoted || text[end] !== '}') return null;
+  const body = text.slice(from, end), attrs = Object.create(null), field = /\s*([a-zA-Z_][\w-]*)\s*=\s*("(?:[^"\\]|\\.)*")/y;
+  let offset = 0;
+  while (offset < body.length) {
+    if (!body.slice(offset).trim()) break;
+    field.lastIndex = offset; const match = field.exec(body);
+    if (!match || Object.hasOwn(attrs, match[1])) return null;
+    try { attrs[match[1]] = JSON.parse(match[2]); } catch { return null; }
+    offset = field.lastIndex;
+    if (offset < body.length && !/\s/.test(body[offset])) return null;
+  }
+  let html;
+  if (head[1] === 'followup') {
+    const prompt = attrs.prompt;
+    if (!head[2]?.trim() || typeof prompt !== 'string' || !prompt.trim() || prompt.length > 8000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) return null;
+    html = `<button type="button" class="message-followup" data-followup-prompt="${escapeHtml(prompt)}" title="填入输入框，确认后发送">${escapeHtml(head[2])}<span aria-hidden="true">↗</span></button>`;
+  } else {
+    const path = attrs.path;
+    if (typeof path !== 'string' || !path || path.length >= 4096 || /[\x00-\x1f\x7f\\]/.test(path) || /^[a-zA-Z][\w+.-]*:/.test(path) || path.startsWith('//') || path.includes('://')) return null;
+    const relative = path.replace(/^(?:\/|\.\/)/, '');
+    if (relative.split('/').some(part => !part || part === '.' || part === '..')) return null;
+    const name = head[2] || path.split('/').at(-1), extension = path.match(/\.([a-zA-Z0-9]{1,8})$/)?.[1].toUpperCase() || 'FILE';
+    const location = [attrs.sheet, attrs.range].filter(value => typeof value === 'string' && value.length <= 240 && !/[\x00-\x1f\x7f]/.test(value)).join(' · ');
+    html = `<button type="button" class="file-citation" data-file-link="${escapeHtml(path)}" title="打开文件：${escapeHtml(path)}"><span class="file-citation-type" aria-hidden="true">${extension}</span><span class="file-citation-info"><span class="file-citation-name">${escapeHtml(name)}</span>${location ? `<span class="file-citation-location">${escapeHtml(location)}</span>` : ''}</span><span class="file-citation-open" aria-hidden="true">打开 ↗</span></button>`;
+  }
+  return { html, end: end + 1 };
+}
+
+function protectedInline(text, save) {
+  const source = text.replace(/\u0000/g, ''), marker = /`+|:{1,2}codex-(?:file-citation|followup)/g;
+  let result = '', position = 0, match;
+  while ((match = marker.exec(source))) {
+    result += escapeHtml(source.slice(position, match.index));
+    if (match[0][0] === '`') {
+      let end = source.indexOf(match[0], marker.lastIndex);
+      while (end >= 0 && (source[end - 1] === '`' || source[end + match[0].length] === '`')) end = source.indexOf(match[0], end + 1);
+      if (end < 0) return result + escapeHtml(source.slice(match.index));
+      result += save(`<code>${escapeHtml(source.slice(marker.lastIndex, end))}</code>`); position = end + match[0].length;
+    } else {
+      const directive = messageDirective(source, match.index);
+      if (directive) { result += save(directive.html); position = directive.end; }
+      else { result += escapeHtml(match[0]); position = marker.lastIndex; }
+    }
+    marker.lastIndex = position;
+  }
+  return result + escapeHtml(source.slice(position));
+}
+
 function inline(text, documentMode = false) {
   const tokens = [];
   const save = html => { tokens.push(html); return `\u0000${tokens.length - 1}\u0000`; };
-  let s = escapeHtml(text.replace(/\u0000/g, ''));
-  s = s.replace(/`([^`]+)`/g, (_, code) => save(`<code>${code}</code>`));
+  let s = protectedInline(text, save);
   // HTML is escaped before inline parsing, so angle-delimited Markdown targets
   // contain &lt;/&gt; here. Keep spaces and parentheses inside those targets.
   s = s.replace(/\[([^\]\n]+)\]\((?:&lt;((?:(?!&lt;|&gt;)[^\n])+)&gt;|((?:[^\s()]|\([^\s()]*\))+))\)/g, (original, label, angled, bare) => {
@@ -87,10 +148,11 @@ export function markdown(text, { document: documentMode = false } = {}) {
   const endList = () => { if (list) { html += `</${list}>`; list = null; } };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/^\s*```/.test(line)) {
+    const fence = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if (fence) {
       flush(); endList(); const code = [];
-      const language = line.replace(/^\s*```/, '').trim().toLowerCase();
-      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
+      const language = fence[2].trim().toLowerCase(), close = new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`);
+      while (++i < lines.length && !close.test(lines[i])) code.push(lines[i]);
       const mode = ['sql', 'hive', 'postgresql'].includes(language) ? 'sql' : ['py', 'python'].includes(language) ? 'python' : 'text';
       html += `<pre><code>${highlightCode(code.join('\n'), mode).html}</code></pre>`; continue;
     }

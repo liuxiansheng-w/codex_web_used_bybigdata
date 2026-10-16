@@ -55,8 +55,13 @@ test('real DOM integration: workbench navigation, multi-file drafts, selection, 
     return { ok: true, json: async () => structuredClone(data) };
   };
   await import(`../public/app.js?dom=${Date.now()}`); await events.emit('open'); await settle(() => document.querySelectorAll('.file-main').length === 2);
-  assert.equal(document.querySelectorAll('#workbenchNav [role=tab]').length, 11);
+  for (const tab of document.querySelectorAll('#workbenchNav [role=tab]')) {
+    assert.ok(document.getElementById(tab.getAttribute('aria-controls')), `${tab.dataset.tab} must point to an existing panel`);
+  }
   $('workbenchButton').click(); assert.equal($('workbenchDialog').hidden, false); assert.equal($('workbenchDialog').tagName, 'SECTION');
+  for (const id of ['appApprovals', 'memories']) {
+    assert.equal(document.querySelector(`#workbenchNav [data-tab="${id}"]`).hidden, true, 'optional settings stay hidden when the server has not advertised support');
+  }
   $('searchFilenames').checked = true; input('projectSearchQuery', 'paged'); submit('projectSearchForm');
   const resultButtons = () => [...$('projectSearchResults').querySelectorAll('button')];
   await settle(() => resultButtons().some(button => button.textContent === '下一页'));
@@ -99,7 +104,10 @@ test('real DOM integration: workbench navigation, multi-file drafts, selection, 
   await events.emit('thread', { ...thread, revision: 4, busy: true, turnId: 'turn1', queue: [{ id: 'q1', text: 'pending message' }], queuePaused: false, requests: [{ key: 'mcp1', method: 'mcpServer/elicitation/request', params: { mode: 'form', serverName: 'demo', message: 'Test schema', requestedSchema: { type: 'object', required: ['count'], properties: { count: { type: 'integer', minimum: 1 }, choice: { type: 'string', enum: ['a', 'b'] } } } } }] });
   assert.match($('messageQueue').textContent, /pending message/);
   assert.equal($('currentThreadStatus').textContent, '待确认'); assert.match($('activeThreadList').textContent, /待确认/);
-  const mcp = document.querySelector('#requests form'); mcp.querySelector('[name=count]').value = '2'; mcp.querySelector('[name=choice]').value = 'b'; mcp.dispatchEvent(new window.Event('submit', { cancelable: true }));
+  const mcp = document.querySelector('#requests form');
+  mcp.querySelector('[name=count]').value = '2';
+  mcp.querySelector('input[type=radio][value=b]').click();
+  mcp.dispatchEvent(new window.Event('submit', { cancelable: true }));
   await settle(() => requests.some(r => r.route === '/api/respond')); assert.deepEqual(requests.find(r => r.route === '/api/respond').body.content, { count: 2, choice: 'b' });
   await events.emit('thread', { ...thread, revision: 5, busy: false, completion: 'completed' }); assert.equal($('currentThreadStatus').textContent, '已完成'); assert.equal($('activityCount').textContent, '1');
   await events.emit('error'); assert.match($('activeThreadList').textContent, /待核实/); assert.equal($('activityHeading').textContent, '任务状态待同步');

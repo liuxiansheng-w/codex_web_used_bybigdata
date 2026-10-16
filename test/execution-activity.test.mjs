@@ -3,7 +3,20 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { JSDOM } from 'jsdom';
 import { Workspace } from '../lib/workspace.mjs';
-import { renderActivity, activityTitle } from '../public/execution-view.js';
+import { renderActivity, activityTitle, executionLayout } from '../public/execution-view.js';
+
+test('activity segments respect replies, file edits, subtasks and legacy turn boundaries', () => {
+  const entries = [
+    ['u1', 'userMessage'], ['c1', 'commandExecution'], ['note', 'agentMessage'], ['c2', 'commandExecution'],
+    ['file', 'fileChange'], ['c3', 'webSearch'], ['child', 'collabAgentToolCall'], ['c4', 'mcpToolCall'],
+    ['u2', 'userMessage'], ['c5', 'commandExecution'],
+  ].map(([id, type]) => ({ id, type }));
+  const blocks = executionLayout(entries), groups = blocks.filter(block => block.items);
+  assert.deepEqual(groups.map(block => block.items.map(item => item.id)), [['c1'], ['c2'], ['c3'], ['c4'], ['c5']]);
+  assert.deepEqual(groups.map(block => block.turnId), ['u1', 'u1', 'u1', 'u1', 'u2']);
+  const mixed = executionLayout([{ id: 'c1', type: 'commandExecution', turnId: 't1' }, { id: 'c2', type: 'commandExecution', turnId: 't2' }, { id: 'c3', type: 'commandExecution', turnId: 't1' }]);
+  assert.equal(mixed.length, 3); assert.equal(new Set(mixed.map(block => block.key)).size, 3);
+});
 
 function fixture(t, items = []) {
   const bridge = new EventEmitter(), workspace = new Workspace(bridge, '/project');

@@ -66,21 +66,57 @@ function workspace(t) {
 }
 const prompt = { text: 'Test', cwd: '/private/tmp', mode: 'workspace-write' };
 
+test('static read failures return complete responses and recover without dropping the session', async t => {
+  let failure = null;
+  const app = createApplication({ bridge: new FakeCodex(), cwd: '/private/tmp', readAsset: async filename => {
+    if (failure) throw Object.assign(new Error(`private path: ${filename}`), { code: failure });
+    return readFile(filename);
+  } });
+  await app.start(0); t.after(() => app.close());
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const page = await fetch(base), cookie = page.headers.get('set-cookie').split(';')[0];
+  await page.text();
+  for (const code of ['EPERM', 'EACCES', 'EIO']) {
+    failure = code;
+    for (const route of ['/', '/app.js', '/vendor/markdown/document.js', '/vendor/pdfjs/build/pdf.min.mjs']) {
+      const response = await fetch(base + route, { headers: { cookie } });
+      assert.equal(response.status, 503, `${code}: ${route}`);
+      const body = await response.json();
+      assert.match(body.error, /网页资源/);
+      if (code !== 'EIO') assert.match(body.error, /文件访问权限/);
+      assert.ok(!body.error.includes('private path'));
+      assert.equal(response.headers.get('set-cookie'), null);
+    }
+    assert.equal((await fetch(base + '/api/terminal', { headers: { cookie } })).status, 200);
+    assert.equal((await fetch(base + '/api/terminal')).status, 401);
+  }
+  failure = null;
+  const restored = await fetch(base);
+  assert.equal(restored.status, 200);
+  assert.equal(restored.headers.get('set-cookie').split(';')[0], cookie);
+  await restored.text();
+});
+
 test('HTTP boundary rejects cross-site, missing session/CSRF, and arbitrary file paths', async t => {
   const app = createApplication({ bridge: new FakeCodex(), cwd: '/private/tmp' });
   await app.start(0); t.after(() => app.close());
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const page = await fetch(base); const cookie = page.headers.get('set-cookie').split(';')[0];
   assert.equal(page.status, 200);
-  for (const asset of ['/app.js', '/composer.js', '/permissions.js', '/permission-presets.js', '/interactions.js', '/file-tree.js', '/file-editor.js', '/editor-window.js', '/code-highlight.js', '/markdown.js', '/style.css', '/favicon.svg']) assert.equal((await fetch(`${base}${asset}`)).status, 200, asset);
+  for (const asset of ['/app.js', '/composer.js', '/permissions.js', '/mcp-app-approval.js', '/mcp-form-schema.js', '/mcp-form-fields.js', '/permission-presets.js', '/interactions.js', '/file-tree.js', '/file-editor.js', '/editor-window.js', '/code-highlight.js', '/markdown.js', '/style.css', '/favicon.svg']) assert.equal((await fetch(`${base}${asset}`)).status, 200, asset);
   assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 401);
+  assert.equal((await fetch(`${base}/api/models`)).status, 401);
   assert.equal((await fetch(`${base}/git-submit.js`)).status, 200);
   for (const route of ['/api/git/submit', '/api/git/submit/diff']) assert.equal((await fetch(base + route)).status, 401);
   const boot = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
   assert.equal(boot.auth.loggedIn, true);
+  assert.equal(boot.mcpAppApprovalPersistence, true);
   assert.ok(!JSON.stringify(boot).includes('private@example'));
   assert.ok(!JSON.stringify(boot).includes('never-expose'));
+  assert.equal((await fetch(`${base}/api/models`, { headers: { cookie, origin: 'https://evil.test' } })).status, 403);
+  const models = await (await fetch(`${base}/api/models`, { headers: { cookie } })).json();
+  assert.deepEqual(models.models, boot.models);
   assert.equal((await fetch(`${base}/api/send`, { method: 'POST', headers: { cookie, origin: 'https://evil.test' }, body: '{}' })).status, 403);
   assert.equal((await fetch(`${base}/api/send`, { method: 'POST', headers: { cookie, origin: base, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
   assert.equal((await fetch(`${base}/lib/bridge.mjs`, { headers: { cookie } })).status, 404);

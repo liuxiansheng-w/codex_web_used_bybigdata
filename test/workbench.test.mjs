@@ -123,6 +123,37 @@ test('MCP forms validate types/required/enums and never auto-authorize', t => {
   assert.throws(() => space.respond({ key, decision: 'accept', content: { color: 'blue' } }), /结束/);
 });
 
+test('Computer Use persistence forwards only the scope offered by the pending app approval', t => {
+  const { bridge, space } = system(t); const thread = space.importThread({ id: 'one', cwd: '/private/tmp', turns: [] });
+  const params = { threadId: 'one', serverName: 'cua_repl', mode: 'form', requestedSchema: { type: 'object', properties: {} }, _meta: { codex_approval_kind: 'mcp_tool_call', connector_id: 'computer-use', tool_params: { app: 'com.example.Browser' }, persist: ['session', 'always'] } };
+  const offer = (value = params) => { space.serverRequest({ id: `approval-${bridge.replies.length}`, method: 'mcpServer/elicitation/request', params: structuredClone(value) }); return thread.requests.at(-1).key; };
+  for (const persist of ['session', 'always']) {
+    const key = offer(), before = bridge.replies.length;
+    assert.equal(bridge.replies.length, before, 'no automatic response');
+    space.respond({ key, decision: 'accept', content: {}, persist });
+    assert.deepEqual(bridge.replies.at(-1).value, { action: 'accept', content: {}, _meta: { persist } });
+    assert.throws(() => space.respond({ key, decision: 'accept', content: {}, persist }), /已结束/);
+  }
+  const sessionOnly = offer({ ...params, _meta: { ...params._meta, persist: ['session'] } }), before = bridge.replies.length;
+  for (const persist of ['always', 'global', ['session'], null]) assert.throws(() => space.respond({ key: sessionOnly, decision: 'accept', content: {}, persist }), /授权范围/);
+  assert.throws(() => space.respond({ key: sessionOnly, decision: 'decline', persist: 'session' }), /授权范围/);
+  assert.equal(bridge.replies.length, before); assert.equal(thread.requests.at(-1).key, sessionOnly);
+  space.respond({ key: sessionOnly, decision: 'decline' }); assert.deepEqual(bridge.replies.at(-1).value, { action: 'decline' });
+  for (const value of [
+    { ...params, serverName: 'unrelated' },
+    { ...params, mode: 'url', url: 'https://example.test' },
+    { ...params, _meta: { ...params._meta, connector_id: 'another-app' } },
+    { ...params, _meta: { ...params._meta, tool_params: {} } },
+    { ...params, _meta: { ...params._meta, persist: [] } },
+    { ...params, requestedSchema: { type: 'object', properties: { name: { type: 'string' } } } },
+  ]) {
+    const key = offer(value); assert.throws(() => space.respond({ key, decision: 'accept', content: {}, persist: 'always' }), /授权范围/);
+    space.respond({ key, decision: 'decline' });
+  }
+  const legacy = offer(); space.respond({ key: legacy, decision: 'accept', content: {} });
+  assert.deepEqual(bridge.replies.at(-1).value, { action: 'accept', content: {} }, 'old pages retain one-time approval semantics');
+});
+
 test('terminal uses explicit bounded sandbox, streams output, accepts stdin and terminates only owned processes', async t => {
   const { desk, bridge } = system(t); await assert.rejects(desk.terminal({ cwd: '/private/tmp', command: 'not actually run' }), /确认/);
   const { id } = await desk.terminal({ cwd: '/private/tmp', command: 'test-only-command', confirmed: true }); const call = bridge.calls.at(-1); assert.equal(call.params.sandboxPolicy.type, 'readOnly'); assert.equal(call.params.timeoutMs, 300000);
@@ -220,4 +251,19 @@ test('new HTTP routes keep session/CSRF checks and operate only in a temporary p
   assert.equal((await fetch(previewRoute)).status, 401);
   const previewResponse = await fetch(previewRoute, { headers: { cookie } }); assert.equal(previewResponse.status, 200); assert.match(previewResponse.headers.get('content-security-policy'), /sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'/); assert.equal(previewResponse.headers.get('x-frame-options'), 'SAMEORIGIN');
   assert.equal((await fetch(`${base}/api/project/artifact?cwd=${encodeURIComponent(cwd)}&path=../secret`, { headers: { cookie } })).status, 403);
+  await mkdir(path.join(cwd, '.github'));
+  await writeFile(path.join(cwd, '.github/guide.md'), '# hidden project guide\n');
+  await writeFile(path.join(cwd, '.env'), 'TEST_FIXTURE=excluded');
+  const get = async route => fetch(base + route + '&cwd=' + encodeURIComponent(cwd), { headers: { cookie } });
+  const rootFiles = await (await get('/api/project/files?showHidden=1')).json();
+  assert.ok(rootFiles.entries.some(entry => entry.path === '.github'));
+  assert.ok(!rootFiles.entries.some(entry => entry.path === '.env'));
+  assert.ok(!(await (await get('/api/project/files?showHidden=0')).json()).entries.some(entry => entry.path === '.github'));
+  assert.equal((await get('/api/project/files?path=.github&showHidden=1')).status, 200);
+  const hiddenSearch = await (await get('/api/project/search?query=guide&filenames=1&showHidden=1')).json();
+  assert.deepEqual(hiddenSearch.results.map(hit => hit.path), ['.github/guide.md']);
+  assert.deepEqual((await (await get('/api/project/search?query=guide&filenames=1')).json()).results, []);
+  const hiddenArtifact = await (await get('/api/project/artifact?path=.github%2Fguide.md')).json();
+  assert.equal(Buffer.from(hiddenArtifact.base64, 'base64').toString(), '# hidden project guide\n');
+  assert.equal((await get('/api/project/artifact?path=.env')).status, 403);
 });

@@ -24,7 +24,7 @@ export function createApprovalBatch({ api, getThread, isConnected = () => true, 
       states.set(request.key, { done: true }); return { approved: true };
     } catch (error) {
       if (error.status === 409) { states.set(request.key, { done: true }); return { skipped: true }; }
-      states.set(request.key, { error: error.name === 'TimeoutError' ? '审批结果尚未确认，请稍后核对请求状态。' : error.message || '审批提交失败，请核对状态后重试。' });
+      states.set(request.key, { error: error.name === 'TimeoutError' ? '提交结果尚未确认，请稍后核对请求状态。' : error.message || '提交失败，请核对状态后重试。' });
       return { failed: true, stop: !error.status || [401, 403].includes(error.status) || error.status >= 500 };
     } finally { onChange(); }
   }
@@ -46,6 +46,68 @@ export function createApprovalBatch({ api, getThread, isConnected = () => true, 
     }
   }
   return { status, view, respond, approveAll };
+}
+
+export function createQuestionCard(request, respond, { doc = document, allowSkip = true } = {}) {
+  const card = doc.createElement('form'); card.className = 'request-card question-card'; card.dataset.requestKey = request.key;
+  const title = doc.createElement('h3'); title.textContent = '柠檬需要你补充信息';
+  const hint = doc.createElement('p'); hint.className = 'field-hint';
+  hint.textContent = request.params.isBlocking === false ? '这是异步提问，任务可以继续处理其他工作；回答会交回同一会话。' : '任务正在等待你的回答。';
+  const body = doc.createElement('div'); body.className = 'question-body'; body.append(hint); card.append(title, body);
+  const readers = [];
+  for (const [index, q] of request.params.questions.entries()) {
+    const group = doc.createElement('fieldset'); group.className = 'question-field';
+    const legend = doc.createElement('legend'); legend.textContent = `${index + 1}. ${q.header || '补充信息'}`;
+    const prompt = doc.createElement('p'); prompt.className = 'question-prompt'; prompt.textContent = q.question;
+    group.append(legend, prompt);
+    const options = q.options || [], radios = [];
+    const free = doc.createElement('input'); free.type = q.isSecret ? 'password' : 'text'; free.name = q.id;
+    free.id = `question-${request.key}-${index}`; free.maxLength = 10000; free.autocomplete = 'off';
+    let custom = null;
+    function choice(labelText, description, value) {
+      const label = doc.createElement('label'); label.className = 'question-choice';
+      const radio = doc.createElement('input'); radio.type = 'radio'; radio.name = `choice-${request.key}-${index}`; radio.value = value;
+      const text = doc.createElement('span'), strong = doc.createElement('strong'); strong.textContent = labelText; text.append(strong);
+      if (description) { const small = doc.createElement('small'); small.textContent = description; text.append(small); }
+      label.append(radio, text); group.append(label); radios.push(radio); return radio;
+    }
+    for (const [i, option] of options.entries()) choice(option.label, option.description, String(i));
+    if (options.length) radios[0].checked = true;
+    if (!options.length || q.isOther !== false) {
+      if (options.length) custom = choice('其他回答', '填写你自己的答案', 'custom');
+      const label = doc.createElement('label'); label.htmlFor = free.id; label.textContent = options.length ? '自己的答案' : '你的回答';
+      group.append(label, free);
+      free.addEventListener('input', () => { if (custom) custom.checked = true; free.setCustomValidity(''); });
+    }
+    let skip = null;
+    if (allowSkip && request.params.questions.length > 1) {
+      const label = doc.createElement('label'); label.className = 'question-skip';
+      skip = doc.createElement('input'); skip.type = 'checkbox'; label.append(skip, doc.createTextNode('跳过此题')); group.append(label);
+      skip.addEventListener('change', () => { for (const input of [...radios, free]) input.disabled = skip.checked; });
+    }
+    readers.push(() => {
+      if (skip?.checked) return { id: q.id, skipped: true };
+      const selected = radios.find(radio => radio.checked);
+      const value = selected && selected !== custom ? options[Number(selected.value)].label : free.value;
+      if (!value.trim()) { free.setCustomValidity('请输入回答，或选择跳过。'); free.reportValidity(); return null; }
+      return { id: q.id, value };
+    });
+    body.append(group);
+  }
+  const error = doc.createElement('p'); error.className = 'field-error'; error.setAttribute('role', 'alert');
+  const actions = doc.createElement('div'); actions.className = 'request-actions';
+  if (allowSkip) {
+    const skip = doc.createElement('button'); skip.type = 'button'; skip.className = 'secondary-button'; skip.textContent = '跳过';
+    skip.addEventListener('click', () => { void respond(request, { decision: 'skip' }); }); actions.append(skip);
+  }
+  const submit = doc.createElement('button'); submit.type = 'submit'; submit.className = 'primary-button'; submit.textContent = '发送回答'; actions.append(submit);
+  card.append(error, actions);
+  card.addEventListener('submit', event => {
+    event.preventDefault(); const values = readers.map(read => read()); if (values.some(value => !value)) return;
+    const skipped = values.filter(value => value.skipped).map(value => value.id);
+    void respond(request, { answers: Object.fromEntries(values.filter(value => !value.skipped).map(value => [value.id, value.value])), ...(skipped.length ? { skipped } : {}) });
+  });
+  return card;
 }
 
 const icons = {

@@ -2,11 +2,129 @@ import { positionPopover, createImageAttachment } from './interactions.js';
 const $ = id => document.getElementById(id);
 const effortNames = { none: '无', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高', ultra: 'Ultra' };
 const goalNames = { active: '进行中', paused: '已暂停', blocked: '遇到阻碍', complete: '已完成', budgetLimited: '预算已用完', usageLimited: '用量受限' };
+const promptLimit = 100_000, pasteThreshold = 5_000, pasteByteLimit = 10 * 1024 * 1024;
 
-export function createComposerTools({ api, notice, getContext, onChange }) {
+export function createComposerTools({ api, notice, getContext, onChange, onDraftChange = () => {} }) {
   let models = [], files = [], chosen = new Map(), plan = false, draftGoal = null;
   let catalog = null, catalogCwd = '', loadingCatalog = null, uploading = false, running = false, submitting = false;
   let activeTab = 'plugins';
+  let pasteSequence = 0, draftVersion = 0, previewedPaste = null;
+  const pasteRequests = new Map();
+  const hasPendingPaste = () => files.some(file => file.pasteState === 'uploading');
+  const hasFailedPaste = () => files.some(file => file.pasteState === 'error');
+  const pastedFiles = () => files.filter(file => typeof file.pastedText === 'string');
+  const changedPaste = () => { renderChips(); onDraftChange(); };
+  const inputChanged = () => { const prompt = $('prompt'); prompt.dispatchEvent(new prompt.ownerDocument.defaultView.Event('input', { bubbles: true })); };
+
+  function syncTextState() {
+    const length = $('prompt').value.length, oversized = length > promptLimit;
+    $('promptLength').hidden = !length;
+    $('promptLength').textContent = length >= 90_000 ? `${length.toLocaleString()} / 100,000` : `${length.toLocaleString()} 字符`;
+    $('promptLength').dataset.over = String(oversized);
+    $('prompt').setAttribute('aria-invalid', String(oversized));
+    $('promptTextWarning').hidden = length < pasteThreshold;
+    $('promptTextWarningMessage').textContent = oversized ? '已保留全部文字，超过输入上限；请转为附件后发送。' : '长文本可转为附件，输入框留给任务说明。';
+    $('convertPromptText').disabled = uploading || submitting || hasPendingPaste();
+  }
+
+  function removePaste(file) {
+    if (submitting) return;
+    pasteRequests.get(file)?.abort();
+    files = files.filter(item => item !== file);
+    if (previewedPaste === file) $('pastedTextDialog').close();
+    changedPaste();
+  }
+
+  function showPaste(file) {
+    previewedPaste = file;
+    $('pastedTextTitle').textContent = file.name;
+    $('pastedTextDetails').textContent = `${file.pastedText.length.toLocaleString()} 字符 · ${Math.ceil(file.size / 1024).toLocaleString()} KB${file.pastedText.length > 50_000 ? ' · 仅预览前 50,000 字符，下载保留全文' : ' · 完整预览'}。文本附件仅保留在本页，刷新前可下载备份。`;
+    $('pastedTextPreview').value = file.pastedText.slice(0, 50_000);
+    const canRestore = $('prompt').value.length + file.pastedText.length + ($('prompt').value ? 2 : 0) <= promptLimit;
+    $('restorePastedText').disabled = !canRestore || submitting || file.pasteState === 'uploading';
+    $('restorePastedText').title = canRestore ? '追加到现有输入内容，并移除此附件' : '还原后会超过输入上限，请下载全文';
+    const theme = $('composer').closest('[data-module-theme]');
+    $('pastedTextDialog').dataset.theme = theme?.dataset.theme || document.documentElement.dataset.theme || 'dark';
+    $('pastedTextDialog').dataset.moduleTheme = 'conversation';
+    if (!$('pastedTextDialog').open) $('pastedTextDialog').showModal();
+  }
+
+  function pastedChip(file) {
+    const node = document.createElement('span'); node.className = 'context-chip pasted-text-chip';
+    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'pasted-text-open';
+    const title = document.createElement('strong'); title.textContent = `${file.name} · ${file.pastedText.length.toLocaleString()} 字符`;
+    const state = document.createElement('small'); state.textContent = file.pasteState === 'uploading' ? '正在添加… · 原文已保留' : file.pasteState === 'error' ? file.pasteError : '已附加完整文本 · 点击预览';
+    preview.append(title, state); preview.title = state.textContent; preview.onclick = () => showPaste(file); node.append(preview);
+    if (file.pasteState === 'error' && file.size <= pasteByteLimit) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试'; retry.className = 'pasted-text-retry'; retry.disabled = submitting;
+      retry.onclick = () => void uploadPaste(file); node.append(retry);
+    }
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.disabled = submitting;
+    remove.setAttribute('aria-label', `移除 ${file.name}`); remove.onclick = () => removePaste(file); node.append(remove);
+    return node;
+  }
+
+  async function uploadPaste(file) {
+    if (submitting || !files.includes(file) || pasteRequests.has(file)) return;
+    if (file.size > pasteByteLimit) { file.pasteState = 'error'; file.pasteError = '超过 10 MB，原文已保留，请下载后拆分或引用本机文件'; changedPaste(); return; }
+    const controller = new AbortController(), version = draftVersion, context = getContext();
+    const cwd = context.cwd, threadId = context.thread?.id;
+    const current = () => version === draftVersion && files.includes(file) && getContext().cwd === cwd && getContext().thread?.id === threadId && !controller.signal.aborted;
+    pasteRequests.set(file, controller); file.pasteState = 'uploading'; file.pasteError = ''; changedPaste();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const blob = new File([file.pastedText], file.name, { type: 'text/plain;charset=utf-8' });
+      const base64 = await fileBase64(blob);
+      if (!current()) return;
+      const result = await api('/api/attachments/upload', { name: file.name, base64 }, { signal: controller.signal });
+      if (!current()) return;
+      if (typeof result.id !== 'string' || !result.id) throw new Error('服务未返回附件编号，请重试');
+      Object.assign(file, result, { pasteState: 'ready' });
+    } catch (error) {
+      if (version !== draftVersion || !files.includes(file)) return;
+      file.pasteState = 'error'; file.pasteError = `添加失败，原文已保留：${controller.signal.aborted ? '上传超时，请重试' : error.message}`;
+    } finally {
+      clearTimeout(timer); pasteRequests.delete(file);
+      if (version === draftVersion && files.includes(file)) {
+        if (file.pasteState === 'uploading') { file.pasteState = 'error'; file.pasteError = '会话已变化，原文已保留，请重试'; }
+        if (previewedPaste === file) showPaste(file);
+        changedPaste();
+      }
+    }
+  }
+
+  function addPastedText(text, { replaceInput = false } = {}) {
+    if (!text || submitting) return false;
+    if (files.length >= 30) { notice('每条消息最多添加 30 个附件；已保留输入文字，请先移除附件。'); return false; }
+    const file = { name: `粘贴文本-${++pasteSequence}.txt`, kind: 'file', size: new Blob([text]).size, pastedText: text, pasteState: 'uploading' };
+    files.push(file);
+    if (replaceInput) { $('prompt').value = ''; inputChanged(); }
+    void uploadPaste(file);
+    return true;
+  }
+
+  function resetPastes() {
+    draftVersion++;
+    for (const request of pasteRequests.values()) request.abort();
+    previewedPaste = null; $('pastedTextDialog').close();
+  }
+
+  $('prompt').addEventListener('input', syncTextState);
+  $('convertPromptText').addEventListener('click', () => { if (addPastedText($('prompt').value, { replaceInput: true })) $('prompt').focus(); });
+  $('pastedTextDialog').addEventListener('close', () => { previewedPaste = null; $('pastedTextPreview').value = ''; });
+  $('downloadPastedText').addEventListener('click', () => {
+    if (!previewedPaste) return;
+    const url = URL.createObjectURL(new Blob([previewedPaste.pastedText], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url; link.download = previewedPaste.name; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $('restorePastedText').addEventListener('click', () => {
+    const file = previewedPaste, prompt = $('prompt');
+    if (!file || submitting || file.pasteState === 'uploading' || !files.includes(file)) return;
+    const text = `${prompt.value}${prompt.value ? '\n\n' : ''}${file.pastedText}`;
+    if (text.length > promptLimit) return;
+    prompt.value = text; removePaste(file); inputChanged(); prompt.focus();
+  });
   const positionMenu = () => positionPopover($('addButton'), $('addMenu'));
 
   function closeMenu(focus = false) {
@@ -15,6 +133,7 @@ export function createComposerTools({ api, notice, getContext, onChange }) {
   }
 
   function chip(label, remove, file) {
+    if (typeof file?.pastedText === 'string') return pastedChip(file);
     const node = document.createElement('span'); node.className = 'context-chip'; node.title = label;
     if (file?.kind === 'image' && file.previewUrl) { node.classList.add('context-image'); node.append(createImageAttachment(file, { compact: true })); }
     const text = document.createElement('span'); text.textContent = label;
@@ -139,7 +258,7 @@ export function createComposerTools({ api, notice, getContext, onChange }) {
     reader.readAsDataURL(file);
   });
   async function uploadFiles(batch) {
-    if (!batch.length || uploading || submitting) return;
+    if (!batch.length || uploading || hasPendingPaste() || submitting) return;
     uploading = true; onChange();
     $('chooseFiles').disabled = true; $('chooseFolder').disabled = true; $('uploadError').hidden = true;
     try {
@@ -168,12 +287,18 @@ export function createComposerTools({ api, notice, getContext, onChange }) {
     finally { uploading = false; onChange(); event.submitter.disabled = false; }
   });
   $('prompt').addEventListener('paste', event => {
+    if (event.defaultPrevented || submitting || $('prompt').readOnly) return;
     const images = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
-    if (images.length) { event.preventDefault(); $('attachmentDialog').showModal(); uploadFiles(images); }
+    if (images.length) { event.preventDefault(); $('attachmentDialog').showModal(); uploadFiles(images); return; }
+    const text = event.clipboardData?.getData('text/plain') || '';
+    const prompt = $('prompt'), length = prompt.value.length - (prompt.selectionEnd - prompt.selectionStart) + text.length;
+    if (text.length < pasteThreshold && length <= promptLimit) return;
+    event.preventDefault();
+    if (!addPastedText(text)) { prompt.setRangeText(text, prompt.selectionStart, prompt.selectionEnd, 'end'); inputChanged(); }
   });
   const hasProjectReference = (cwd, relative) => files.some(file => (file.projectCwd || file.projectRoot) === cwd && file.projectPath === relative);
   async function addProjectReference({ cwd, path, snapshot }) {
-    if (uploading || submitting) throw new Error('正在提交或添加文件，请稍后再试。');
+    if (uploading || hasPendingPaste() || submitting) throw new Error('正在提交或添加文件，请稍后再试。');
     if (hasProjectReference(cwd, path)) return false;
     if (files.length >= 30) throw new Error('每条消息最多添加 30 个文件或文件夹。');
     const context = getContext(), threadId = context.thread?.id;
@@ -288,17 +413,20 @@ export function createComposerTools({ api, notice, getContext, onChange }) {
   });
 
   return {
-    get uploading() { return uploading; },
+    get uploading() { return uploading || hasPendingPaste(); },
+    get hasPastedText() { return pastedFiles().length > 0; },
+    get canSend() { return $('prompt').value.length <= promptLimit && !hasFailedPaste() && !hasPendingPaste() && (!!$('prompt').value.trim() || pastedFiles().some(file => file.pasteState === 'ready')); },
+    messageText() { return $('prompt').value.trim() || (pastedFiles().some(file => file.pasteState === 'ready') ? '请读取附加的完整长文本，按其中的要求处理；内容较长时请分段读取。' : ''); },
     addProjectReference,
     hasProjectReference,
-    payload() { return { effort: $('effort').value, plan, attachments: files.map(f => f.id), capabilities: [...chosen.keys()], ...(draftGoal ? { goal: draftGoal } : {}) }; },
+    payload() { return { effort: $('effort').value, plan, attachments: files.filter(f => f.id && (!f.pasteState || f.pasteState === 'ready')).map(f => f.id), capabilities: [...chosen.keys()], ...(draftGoal ? { goal: draftGoal } : {}) }; },
     sent(payload) { files = files.filter(f => !payload.attachments.includes(f.id)); for (const key of payload.capabilities) chosen.delete(key); draftGoal = null; renderChips(); renderGoal(); },
     setModels(value) { models = value; renderEffort(); },
     snapshot() { return structuredClone({ files, chosen: [...chosen], plan, draftGoal, effort: $('effort').value }); },
-    restoreDraft(draft) { files = structuredClone(draft.files || []); chosen = new Map(draft.chosen || []); plan = !!draft.plan; draftGoal = draft.draftGoal || null; renderEffort(draft.effort || ''); renderChips(); renderCatalog(); renderGoal(); },
-    restore(thread) { files = []; chosen.clear(); plan = !!thread.plan; draftGoal = null; renderEffort(thread.effort || ''); renderChips(); renderGoal(); closeMenu(); },
-    reset() { files = []; chosen.clear(); plan = false; draftGoal = null; renderChips(); renderGoal(); closeMenu(); },
+    restoreDraft(draft) { resetPastes(); files = structuredClone(draft.files || []); for (const file of pastedFiles()) if (file.pasteState === 'uploading') { file.pasteState = 'error'; file.pasteError = '添加尚未完成，原文已保留，请重试'; } chosen = new Map(draft.chosen || []); plan = !!draft.plan; draftGoal = draft.draftGoal || null; renderEffort(draft.effort || ''); renderChips(); renderCatalog(); renderGoal(); },
+    restore(thread) { resetPastes(); files = []; chosen.clear(); plan = !!thread.plan; draftGoal = null; renderEffort(thread.effort || ''); renderChips(); renderGoal(); closeMenu(); },
+    reset() { resetPastes(); files = []; chosen.clear(); plan = false; draftGoal = null; renderChips(); renderGoal(); closeMenu(); },
     renderGoal,
-    setBusy(busy, sending) { running = busy; submitting = sending; $('effort').disabled = busy || sending; $('togglePlan').disabled = busy || sending || catalog?.planSupported === false; $('addButton').disabled = sending; if (sending) closeMenu(); },
+    setBusy(busy, sending) { running = busy; submitting = sending; $('effort').disabled = busy || sending; $('togglePlan').disabled = busy || sending || catalog?.planSupported === false; $('addButton').disabled = sending; if (sending) closeMenu(); syncTextState(); },
   };
 }
