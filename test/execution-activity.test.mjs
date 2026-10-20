@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { JSDOM } from 'jsdom';
 import { Workspace } from '../lib/workspace.mjs';
-import { renderActivity, activityTitle, executionLayout } from '../public/execution-view.js';
+import { renderActivity, activityTitle, executionLayout, activityState, renderExecutionGroup } from '../public/execution-view.js';
 
 test('activity segments respect replies, file edits, subtasks and legacy turn boundaries', () => {
   const entries = [
@@ -89,5 +89,38 @@ test('live output preserves expanded details, scroll and selected output; untrus
   assert.match(element.textContent, /读取 demo.md/); assert.match(element.textContent, /退出码：0/);
   renderActivity(element, { ...item, status: 'completed', exitCode: -1 }); assert.equal(element.querySelector('.activity-status').textContent, '失败');
   renderActivity(element, { ...item, turnStatus: 'interrupted' }); assert.equal(element.querySelector('.activity-status').textContent, '已结束，状态未返回');
+  dom.window.close();
+});
+
+test('execution motion follows observed status and never treats interrupted or disconnected work as running', () => {
+  const running = { type: 'commandExecution', status: 'inProgress', turnStatus: 'inProgress' };
+  assert.equal(activityState(running), 'running');
+  assert.equal(activityState(running, { live: false }), 'unknown');
+  assert.equal(activityState(running, { active: false }), 'unknown', 'a historical inProgress record must not keep spinning');
+  assert.equal(activityState(running, { waiting: true }), 'waiting');
+  assert.equal(activityState({ ...running, turnStatus: 'interrupted' }), 'interrupted');
+  assert.equal(activityState({ ...running, turnStatus: 'completed' }), 'unknown');
+  assert.equal(activityState({ ...running, status: 'completed', exitCode: 1 }), 'failed');
+  const dom = new JSDOM('<article></article>'), element = dom.window.document.querySelector('article');
+  renderActivity(element, { ...running, status: 'completed' }, { animate: true });
+  assert.equal(element.querySelector('.just-completed'), null, 'history must not replay a completion effect');
+  renderActivity(element, running, { animate: true });
+  const marker = element.querySelector('.activity-marker'), details = element.querySelector('details'); details.open = true;
+  renderActivity(element, { ...running, status: 'completed', turnStatus: 'completed' }, { animate: true });
+  assert.equal(element.dataset.executionState, 'completed'); assert.equal(marker.textContent, '✓'); assert.equal(marker.classList.contains('just-completed'), true);
+  const end = new dom.window.Event('animationend', { bubbles: true }); Object.defineProperty(end, 'animationName', { value: 'execution-complete' }); marker.dispatchEvent(end);
+  renderActivity(element, { ...running, status: 'completed', text: '追加记录' }, { animate: true }); assert.equal(marker.classList.contains('just-completed'), false, 'ordinary streamed updates must not restart completion motion'); assert.equal(details.open, true); assert.equal(element.querySelector('.activity-marker'), marker);
+  renderActivity(element, running, { live: false }); assert.equal(element.dataset.executionState, 'unknown'); assert.equal(element.querySelector('.activity-status').textContent, '状态待同步');
+  dom.window.close();
+});
+test('execution header motion stops for approvals, missing live state and completion without rebuilding expanded logs', () => {
+  const dom = new JSDOM('<details><summary></summary><article>保留输出</article></details>'), group = dom.window.document.querySelector('details');
+  const items = [{ id: 'run', type: 'commandExecution', status: 'inProgress', title: '示例命令' }]; group.open = true;
+  renderExecutionGroup(group, { items, active: true }); const heading = group.firstElementChild, status = group.querySelector('.execution-status'), output = group.querySelector('article');
+  assert.equal(group.dataset.executionState, 'running'); assert.match(status.textContent, /进行中/);
+  group.open = false; renderExecutionGroup(group, { items, active: true, waiting: true }); assert.equal(group.dataset.executionState, 'waiting'); assert.match(status.textContent, /等待你处理/);
+  renderExecutionGroup(group, { items, active: true, live: false }); assert.equal(group.dataset.executionState, 'unknown'); assert.match(status.textContent, /状态待同步/);
+  renderExecutionGroup(group, { items: [{ ...items[0], status: 'failed' }], active: false }); assert.equal(group.dataset.executionState, 'failed'); assert.match(status.textContent, /1 项需查看/);
+  assert.equal(group.firstElementChild, heading); assert.equal(group.querySelector('article'), output); assert.equal(group.open, false); assert.equal(group.querySelectorAll('.execution-flow').length, 1);
   dom.window.close();
 });

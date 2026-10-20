@@ -93,8 +93,10 @@ test('steering pins active turn and queue preserves permissions, pauses on stop 
   const { bridge, space } = system(t); const { threadId } = await space.send({ cwd: '/private/tmp', text: 'first', mode: 'read-only' }); const thread = space.threads.get(threadId);
   await space.followup({ threadId, text: 'more', behavior: 'steer' }); assert.equal(bridge.calls.at(-1).method, 'turn/steer'); assert.equal(bridge.calls.at(-1).params.expectedTurnId, 'turn-1');
   await space.followup({ threadId, text: 'next', behavior: 'queue' }); assert.equal(thread.queue.length, 1);
-  space.notification({ method: 'turn/completed', params: { threadId, turn: { status: 'completed' } } }); await new Promise(resolve => setTimeout(resolve, 150));
-  assert.equal(thread.queue.length, 0); assert.equal(bridge.calls.at(-1).method, 'turn/start'); assert.equal(bridge.calls.at(-1).params.sandboxPolicy.type, 'readOnly');
+  space.notification({ method: 'turn/completed', params: { threadId, turn: { status: 'completed' } } });
+  for (let i = 0; i < 100 && bridge.calls.filter(call => call.method === 'turn/start').length < 2; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  const queuedTurns = bridge.calls.filter(call => call.method === 'turn/start');
+  assert.equal(thread.queue.length, 0); assert.equal(queuedTurns.length, 2); assert.equal(queuedTurns[1].params.threadId, threadId); assert.equal(queuedTurns[1].params.sandboxPolicy.type, 'readOnly');
   thread.mode = 'danger-full-access'; await assert.rejects(space.followup({ threadId, text: 'unsafe', behavior: 'queue' }), /完全访问/);
   thread.mode = 'read-only'; await space.followup({ threadId, text: 'hold', behavior: 'queue' });
   space.notification({ method: 'turn/completed', params: { threadId, turn: { status: 'interrupted' } } }); await new Promise(resolve => setTimeout(resolve, 150)); assert.equal(thread.queue.length, 1); assert.equal(thread.queuePaused, true);
@@ -237,7 +239,7 @@ test('new HTTP routes keep session/CSRF checks and operate only in a temporary p
   assert.match(page.headers.get('content-security-policy'), /style-src 'self';/); assert.doesNotMatch(page.headers.get('content-security-policy'), /unsafe-inline/);
   assert.equal((await fetch(base + '/vendor/markdown/document.js')).status, 401);
   assert.notEqual((await fetch(base + '/vendor/markdown/package.json', { headers: { cookie } })).status, 200);
-  for (const asset of ['/workbench.js', '/editor-tools.js', '/project-list.js', '/task-results.js', '/message-timing.js']) assert.equal((await fetch(base + asset)).status, 200);
+  for (const asset of ['/workbench.js', '/schedules.js', '/schedule-time.js', '/editor-tools.js', '/project-list.js', '/task-results.js', '/message-timing.js']) assert.equal((await fetch(base + asset)).status, 200);
   for (const route of ['/api/project/mutate', '/api/project/replace-apply', '/api/git/action', '/api/review', '/api/terminal/start', '/api/schedules/action', '/api/connections/action', '/api/threads/action']) assert.equal((await fetch(base + route, { method: 'POST', headers: { cookie, origin: base, 'content-type': 'application/json' }, body: '{}' })).status, 403);
   const search = await (await fetch(`${base}/api/project/search?cwd=${encodeURIComponent(cwd)}&query=x`, { headers: { cookie } })).json(); assert.equal(search.results[0].path, 'sample.py');
   const created = await fetch(base + '/api/project/mutate', { method: 'POST', headers, body: JSON.stringify({ cwd, path: 'new.txt', action: 'createFile' }) }); assert.equal(created.status, 200);

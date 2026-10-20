@@ -1,3 +1,4 @@
+import { bindEditorTodos } from './editor-context.js';
 const $ = id => document.getElementById(id);
 const SQL_WORDS = 'SELECT FROM WHERE JOIN LEFT RIGHT INNER OUTER CROSS FULL ON AND OR NOT GROUP BY ORDER ASC DESC HAVING INSERT INTO VALUES UPDATE SET CREATE TABLE CASE WHEN THEN ELSE END WITH DISTINCT COUNT SUM AVG MIN MAX AS UNION ALL LIMIT OFFSET IS NULL COALESCE CAST OVER PARTITION ROW_NUMBER BETWEEN IN LIKE EXISTS';
 function insideSqlLiteral(text) {
@@ -185,6 +186,7 @@ export function createInlineCompletion({ editor, api, getConfig = () => ({}), st
 
 export function createEditorTools({ editor, api, notice, onContext, onPreview, completion }) {
   const status = text => { $('editorToolStatus').textContent = text; };
+  bindEditorTodos({ editor, onContext, status });
   const current = () => { const file = editor.current; if (!file) throw new Error('请先打开一个文本文件。'); return file; };
   const run = handler => async () => { try { await handler(); } catch (error) { status(error.message); } };
   function context(intent) {

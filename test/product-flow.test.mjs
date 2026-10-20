@@ -5,6 +5,20 @@ import { EventEmitter } from 'node:events';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { taskResult, projectPath } from '../public/task-results.js';
 import { Workspace } from '../lib/workspace.mjs';
+test('schedule settings preserve their form and chat drafts across closing, refresh and navigation', async t => {
+  const { $, document, window, input, settle } = await page(t);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (route, options = {}) => route === '/api/schedules' ? { ok: true, json: async () => ({ jobs: [], connected: true }) } : originalFetch(route, options);
+  $('settingsButton').click(); document.querySelector('[data-tab=schedules]').click(); await settle(() => /还没有/.test($('scheduleResults').textContent));
+  $('scheduleNew').click(); input('scheduleName', '保留这份任务草稿'); input('scheduleText', '只读检查文件');
+  const event = new window.Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
+  input('prompt', '原来的聊天草稿'); $('scheduleRefresh').click(); await new Promise(setImmediate);
+  $('closeWorkbench').click(); assert.equal($('workbenchDialog').hidden, true);
+  $('settingsButton').click(); document.querySelector('[data-tab=schedules]').click(); await new Promise(setImmediate);
+  assert.equal($('scheduleName').value, '保留这份任务草稿'); assert.equal($('scheduleText').value, '只读检查文件'); assert.equal($('prompt').value, '原来的聊天草稿');
+  assert.equal($('scheduleForm').hidden, false); assert.equal($('workbenchDialog').classList.contains('schedules-view'), true);
+  $('closeWorkbench').click();
+});
 test('switching model service retains editor and composer drafts, separates old conversations and never stores a key', async t => {
   const { $, document, window, settle, input, open, requests } = await page(t);
   let connection = { active: 'codex', revision: 0, cosmos: { protocol: 'workflow', baseUrl: 'https://cosmos.example/v1', model: '', inputKey: 'input', outputKey: 'output', hasKey: false } };
@@ -102,7 +116,7 @@ test('new commands appear after the latest reply while approval and earlier sele
   update(3, pending);
   const current = document.querySelectorAll('.execution-group')[1], approval = document.querySelector('[data-request-key="test-approval"]');
   assert.equal($('messages').lastElementChild, current); assert.match(current.previousElementSibling.textContent, /现在执行最新命令/);
-  assert.equal(current.open, true); assert.match(current.firstElementChild.textContent, /进行中/); assert.match(previous.firstElementChild.textContent, /已结束/);
+  assert.equal(current.open, true); assert.match(current.firstElementChild.textContent, /等待你处理/); assert.match(previous.firstElementChild.textContent, /已结束/);
   assert.equal(previous.querySelector('.activity-output'), output); assert.equal(document.getSelection().toString(), 'previous output');
   assert.ok(approval); current.open = false;
   items[items.length - 1] = { ...items.at(-1), text: 'fresh output' };
@@ -346,6 +360,57 @@ async function page(t, stored = {}, terminalProcesses = [], features = false, ap
     async open(path) { document.querySelector(`.file-main[aria-label="打开编辑：${path}"]`).click(); await settle(() => $('editorFilename').textContent === path && !$('fileEditorText').readOnly); },
   };
 }
+
+test('automatic editor context sends the current unsaved selection, can be disabled and retains failed replacement drafts', async t => {
+  const { $, window, settle, input, open, events, thread } = await page(t);
+  const originalFetch = globalThis.fetch, sends = []; let fail = false;
+  globalThis.fetch = async (route, options) => {
+    if (route === '/api/send' || route === '/api/followup') {
+      sends.push({ route, body: JSON.parse(options.body) });
+      return fail ? { ok: false, status: 409, json: async () => ({ error: '停止结果尚未确认' }) } : { ok: true, json: async () => ({ threadId: 't1' }) };
+    }
+    return originalFetch(route, options);
+  };
+  await open('a.py'); input('fileEditorText', 'prefix\nunsaved selection\nsuffix'); $('fileEditorText').setSelectionRange(7, 24);
+  input('prompt', '解释这里'); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => sends.length === 1 && !$('prompt').value);
+  assert.equal(sends[0].body.text, '解释这里'); assert.match(sends[0].body.editorContext.text, /unsaved selection/); assert.match(sends[0].body.editorContext.label, /未保存/);
+  $('editorContextToggle').click(); input('prompt', '不需要文件'); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => sends.length === 2 && !$('prompt').value); assert.equal(sends[1].body.editorContext, null);
+  events.emit('thread', { ...thread, revision: 5, busy: true, turnId: 'active' }); fail = true;
+  $('followupBehavior').value = 'interrupt'; input('prompt', '停止后做这个'); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => $('noticeText').textContent.includes('停止结果尚未确认'));
+  assert.equal(sends[2].body.behavior, 'interrupt'); assert.equal($('prompt').value, '停止后做这个'); assert.equal($('fileEditorText').value, 'prefix\nunsaved selection\nsuffix');
+});
+
+test('TODO action preserves the existing prompt and only prepares a draft; stale TODO entries cannot change another file', async t => {
+  const { $, document, input, open, requests, files } = await page(t);
+  files['a.py'] = '# TODO validate an empty name\nname = ""\n'; await open('a.py'); input('prompt', '已有要求');
+  $('editorTodo').click(); assert.equal($('editorTodos').hidden, false);
+  $('editorTodos').querySelector('button').click();
+  assert.match($('prompt').value, /^已有要求/); assert.match($('prompt').value, /TODO validate an empty name/);
+  assert.equal(requests.some(item => ['/api/send', '/api/followup', '/api/project/save'].includes(item.route)), false);
+  $('editorTodo').click(); const stale = $('editorTodos').querySelector('button'), before = $('prompt').value;
+  await open('b.py'); stale.click(); assert.equal($('prompt').value, before); assert.match($('editorToolStatus').textContent, /变化/);
+  assert.equal(document.querySelectorAll('.editor-todos button').length, 1);
+});
+
+test('separate review controls send the chosen scope and navigate to the returned review thread', async t => {
+  const { $, document, window, settle, input, requests, thread } = await page(t, { 'codex-desk:active': 't1' }, [], true);
+  const originalFetch = globalThis.fetch; let review;
+  globalThis.fetch = async (route, options) => {
+    if (route === '/api/review') { review = JSON.parse(options.body); return { ok: true, json: async () => ({ threadId: 'review1' }) }; }
+    if (route === '/api/threads/review1') return { ok: true, json: async () => ({ ...thread, id: 'review1', title: '独立审查', parentThreadId: 't1', mode: 'read-only' }) };
+    return originalFetch(route, options);
+  };
+  await settle(() => $('threadTitle').textContent === 'Task' && !$('parentThreadBack').disabled); input('prompt', '原对话草稿');
+  $('workbenchButton').click(); document.querySelector('[data-tab="git"]').click(); $('review-tab-review').click();
+  $('reviewTarget').value = 'baseBranch'; $('reviewValue').value = 'main'; $('reviewDelivery').value = 'detached'; $('reviewStart').click();
+  await settle(() => $('threadTitle').textContent === '独立审查');
+  assert.deepEqual(review, { threadId: 't1', delivery: 'detached', target: { type: 'baseBranch', branch: 'main' } });
+  $('parentThreadBack').click(); await settle(() => $('threadTitle').textContent === 'Task' && !$('parentThreadBack').disabled); assert.equal($('prompt').value, '原对话草稿');
+  assert.equal(requests.some(item => item.route === '/api/send'), false);
+});
 
 test('long text composer sends file references, retains failed drafts and supports attachment-only followups', async t => {
   const { $, document, window, settle, input, events, thread } = await page(t);
@@ -983,4 +1048,22 @@ test('memory settings and previews use native APIs, preserve drafts, reject stal
   assert.equal($('memoriesSave').disabled, true);
   $('memorySettingsForm').dispatchEvent(new window.Event('submit', { cancelable: true })); assert.equal(memoryCalls.filter(call => call.body).length, 1);
   assert.equal(requests.some(request => request.route === '/api/send'), false);
+});
+
+test('execution motion pauses on disconnect and matching approvals while preserving selected logs and drafts', async t => {
+  const { $, document, settle, events, thread, input, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task'); input('prompt', '保留动效验收草稿');
+  const running = { ...thread, revision: 2, busy: true, turnId: 'motion', latestTurnId: 'motion', items: [{ id: 'motion-command', type: 'commandExecution', turnId: 'motion', title: '示例命令', status: 'inProgress', text: '保留这一段输出' }] };
+  events.emit('thread', running);
+  const group = document.querySelector('.execution-group'), activity = group.querySelector('.activity'), details = activity.querySelector('details'), output = activity.querySelector('.activity-output'); details.open = true;
+  const range = document.createRange(); range.selectNodeContents(output.firstChild); document.getSelection().removeAllRanges(); document.getSelection().addRange(range);
+  assert.equal(document.getSelection().toString(), '保留这一段输出');
+  assert.equal(group.dataset.executionState, 'running'); assert.equal(activity.dataset.executionState, 'running');
+  events.emit('connection', { connected: false }); assert.equal(group.dataset.executionState, 'unknown'); assert.equal(activity.dataset.executionState, 'unknown'); assert.match(group.textContent, /状态待同步/);
+  assert.equal(activity.querySelector('details'), details); assert.equal(details.open, true); assert.equal(document.getSelection().toString(), '保留这一段输出');
+  events.emit('snapshot', { connected: true, threads: [{ ...running, revision: 3 }] }); assert.equal(group.dataset.executionState, 'running'); assert.equal(activity.dataset.executionState, 'running');
+  const approval = { key: 'motion-approval', method: 'item/commandExecution/requestApproval', params: { threadId: 't1', itemId: 'motion-command', command: '示例命令' } };
+  events.emit('thread', { ...running, revision: 4, requests: [approval] }); assert.equal(group.dataset.executionState, 'waiting'); assert.equal(activity.dataset.executionState, 'waiting');
+  events.emit('thread', { ...running, revision: 5, busy: false, turnId: null, completion: 'interrupted', items: [{ ...running.items[0], status: 'inProgress' }] });
+  assert.equal(group.dataset.executionState, 'interrupted'); assert.equal(activity.dataset.executionState, 'interrupted'); assert.equal(details.open, true); assert.equal($('prompt').value, '保留动效验收草稿'); assert.equal(requests.some(request => request.body), false);
 });

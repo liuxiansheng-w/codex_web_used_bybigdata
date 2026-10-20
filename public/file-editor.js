@@ -510,7 +510,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     const source = document.createElement('div'); source.className = 'editor-source';
     const rendered = document.createElement('pre'); rendered.className = 'editor-highlight'; rendered.setAttribute('aria-hidden', 'true');
     const input = document.createElement('textarea');
-    Object.assign(input, { className: 'editor-input', spellcheck: false, wrap: 'off', maxLength: 1048576, readOnly: true });
+    Object.assign(input, { className: 'editor-input', spellcheck: false, wrap: 'off', maxLength: 20 * 1024 * 1024, readOnly: true });
     input.setAttribute('aria-label', `编辑文件内容：${doc.path}`); input.setAttribute('aria-describedby', 'editorHelp');
     for (const [name, value] of [['autocapitalize', 'off'], ['autocomplete', 'off'], ['autocorrect', 'off']]) input.setAttribute(name, value);
     source.append(rendered, input); panel.append(numbers, source); $('editorBuffers').append(panel);

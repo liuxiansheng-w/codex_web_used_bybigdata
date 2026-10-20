@@ -37,16 +37,52 @@ const views = new WeakMap();
 const update = (node, value = '') => { const content = String(value ?? ''); if (node.textContent !== content) node.textContent = content; };
 const durationLabel = ms => !Number.isFinite(ms) || ms < 0 ? '' : ms < 1000 ? `${Math.round(ms)} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`;
 
-export function renderActivity(element, item) {
+const markerText = state => ({ completed: '✓', failed: '!', interrupted: 'Ⅱ', waiting: 'Ⅱ', unknown: '·' })[state] || '';
+export function activityState(item, { live = true, waiting = false, active = true } = {}) {
+  if (activityFailed(item)) return 'failed';
+  if (item.status === 'completed') return 'completed';
+  if (item.status === 'interrupted') return 'interrupted';
+  if (item.status === 'inProgress') {
+    if (item.turnStatus && item.turnStatus !== 'inProgress') return item.turnStatus === 'interrupted' ? 'interrupted' : 'unknown';
+    if (!live || !active) return 'unknown';
+    return waiting ? 'waiting' : 'running';
+  }
+  return 'pending';
+}
+
+const groupViews = new WeakMap();
+export function renderExecutionGroup(group, { items, active, interrupted = false, live = true, waiting = false }) {
+  let view = groupViews.get(group);
+  if (!view) {
+    const document = group.ownerDocument, summary = group.firstElementChild || group.appendChild(document.createElement('summary'));
+    summary.classList.add('execution-heading'); summary.replaceChildren();
+    const span = className => { const element = document.createElement('span'); element.className = className; summary.append(element); return element; };
+    view = { marker: span('execution-indicator'), title: span('execution-label'), count: span('execution-count'), status: span('execution-status'), flow: span('execution-flow') };
+    view.marker.setAttribute('aria-hidden', 'true'); view.flow.setAttribute('aria-hidden', 'true'); update(view.title, '执行过程'); groupViews.set(group, view);
+  }
+  const failures = items.filter(activityFailed).length, running = items.findLast(item => item.status === 'inProgress');
+  const state = active ? !live ? 'unknown' : waiting ? 'waiting' : 'running' : interrupted ? 'interrupted' : failures ? 'failed' : 'finished';
+  const label = active ? !live ? '状态待同步' : waiting ? '等待你处理' : `进行中${running ? ` · ${activityTitle(running)}` : ''}` : interrupted ? '已中断' : '已结束';
+  group.dataset.executionState = state;
+  group.classList.toggle('has-failures', !!failures);
+  update(view.marker, markerText(state)); update(view.count, `· ${items.length} 项`);
+  update(view.status, `· ${label}${failures ? ` · ${failures} 项需查看` : ''}`);
+}
+
+export function renderActivity(element, item, { live = true, waiting = false, active = true, animate = false } = {}) {
   let view = views.get(element);
   const document = element.ownerDocument;
+  const motion = animate && live && document.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches !== true;
   const node = (tag, className, parent) => { const value = document.createElement(tag); value.className = className; parent?.append(value); return value; };
   const narrative = ['activitySummary', 'activityPlan'].includes(item.type);
   if (!view || view.type !== item.type) {
     element.replaceChildren(); element.className = `tool activity${narrative ? ' activity-narrative' : ''}`;
     const details = narrative ? node('div', 'activity-body', element) : node('details', 'activity-details', element);
     const heading = node(narrative ? 'div' : 'summary', 'activity-heading', details);
-    view = { type: item.type, details, title: node('span', 'tool-title', heading), status: node('span', 'activity-status', heading), duration: node('span', 'activity-duration', heading) };
+    view = { type: item.type, details, marker: node('span', 'activity-marker', heading), title: node('span', 'tool-title', heading), status: node('span', 'activity-status', heading), duration: node('span', 'activity-duration', heading) };
+    view.marker.setAttribute('aria-hidden', 'true');
+    if (motion && active && (!item.turnStatus || item.turnStatus === 'inProgress')) element.classList.add('activity-enter');
+    element.addEventListener('animationend', event => { if (event.animationName === 'execution-enter') element.classList.remove('activity-enter'); if (event.animationName === 'execution-complete') view.marker.classList.remove('just-completed'); });
     if (narrative) {
       view.text = node('div', 'activity-narrative-text', details);
       view.steps = node('ol', 'activity-steps', details);
@@ -66,7 +102,11 @@ export function renderActivity(element, item) {
   }
   update(view.title, activityTitle(item));
   const turnEnded = item.turnStatus && item.turnStatus !== 'inProgress';
-  update(view.status, item.status === 'inProgress' && turnEnded ? '已结束，状态未返回' : activityFailed(item) ? statusLabel(['declined', 'denied'].includes(item.status) ? item.status : 'failed') : statusLabel(item.status));
+  const state = activityState(item, { live, waiting, active });
+  if (motion && view.state === 'running' && state === 'completed') view.marker.classList.add('just-completed');
+  if (state !== 'completed') view.marker.classList.remove('just-completed');
+  view.state = state; element.dataset.executionState = state; update(view.marker, markerText(state));
+  update(view.status, item.status === 'inProgress' && turnEnded ? '已结束，状态未返回' : item.status === 'inProgress' && state === 'unknown' ? '状态待同步' : item.status === 'inProgress' && waiting ? '等待你处理' : activityFailed(item) ? statusLabel(['declined', 'denied'].includes(item.status) ? item.status : 'failed') : statusLabel(item.status));
   update(view.duration, durationLabel(item.durationMs));
   element.classList.toggle('has-failures', activityFailed(item));
   if (narrative) {

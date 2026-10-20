@@ -35,6 +35,19 @@ test('saved versions survive restart; restore preserves CRLF/BOM and can itself 
   const revert = await restarted.preview({ cwd, path: 'example.txt', source: 'history', revisionId: undo.versions[0].id });
   await restarted.apply({ id: revert.id, confirmed: true }); assert.equal((await files.read({ cwd, path: 'example.txt' })).content, 'new\n');
 });
+test('saved history restores a document larger than 1 MB without truncation', async t => {
+  const { cwd, files, tools, history } = await fixture(); t.after(() => tools.close());
+  const content = '# Large history\n' + ('测试正文'.repeat(1000) + '\n').repeat(100) + '原始末尾\n';
+  const relative = 'large.md'; await writeFile(path.join(cwd, relative), content);
+  const loaded = await files.read({ cwd, path: relative });
+  await files.save({ ...loaded, content: content + '新增末尾\n' });
+  const { versions } = await history.list(loaded);
+  const preview = await history.preview({ ...loaded, source: 'history', revisionId: versions[0].id });
+  assert.equal(preview.after, content);
+  await history.apply({ id: preview.id, confirmed: true });
+  assert.equal(await readFile(path.join(cwd, relative), 'utf8'), content);
+});
+
 test('restore refuses external edits, in-flight tasks, symlinks, and revisions from another file', async () => {
   const { cwd, files, workspace, history } = await fixture(); await writeFile(path.join(cwd, 'a.txt'), 'one\n'); await writeFile(path.join(cwd, 'b.txt'), 'other');
   await files.save({ ...await files.read({ cwd, path: 'a.txt' }), content: 'two\n' });

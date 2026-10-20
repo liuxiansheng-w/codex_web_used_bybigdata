@@ -5,6 +5,7 @@ import { createDraftStore, positionPopover, createThemeControl, createAppearance
 import { createFileTree } from './file-tree.js';
 import { createFileEditor } from './file-editor.js';
 import { createEditorTools, createInlineCompletion } from './editor-tools.js';
+import { createEditorContext } from './editor-context.js';
 import { createWorkbench } from './workbench.js';
 import { createProjectList } from './project-list.js';
 import { taskResult, subtaskGroups, completedChangeSummaries, createChangeSummary } from './task-results.js';
@@ -12,7 +13,7 @@ import { renderMessageTimes, turnDuration } from './message-timing.js';
 import { createSqlQuery, sqlFileFromRunnerLink } from './sql-query.js';
 import { createProductUI, createGitSubmit } from './product-ui.js';
 import { createBottomPanel } from './editor-window.js';
-import { renderActivity, activityTitle, activityFailed, executionLayout } from './execution-view.js';
+import { renderActivity, renderExecutionGroup, executionLayout } from './execution-view.js';
 import { renderGeneratedImage, modelRetryLabel } from './interactions.js';
 import { createModelCatalogRefresh } from './interactions.js';
 import { computerUseApproval } from './mcp-app-approval.js';
@@ -55,8 +56,8 @@ try { if (storage.get('persistDrafts') === 'true') { const saved = JSON.parse(st
 let selectionSequence = 0;
 const projectThreads = new Map();
 let projectList, fileTree;
-let sqlQuery, inlineCompletion, productUI;
-let renderedThread = null;
+let sqlQuery, inlineCompletion, productUI, editorContext;
+let renderedThread = null, executionStreamReady = false;
 let stream, reconnectTimer, recoveringStream;
 let reconnectAttempts = 0;
 const composerTools = createComposerTools({ api, notice, getContext: () => ({ cwd: state.cwd, thread: selected() }), onChange: () => updateControls(), onDraftChange: () => saveDraft() });
@@ -86,7 +87,8 @@ const attachProjectFile = async entry => {
     if (await composerTools.addProjectReference({ ...entry, ...(choice === 'snapshot' ? { snapshot: file.content } : {}) })) { productUI?.showConversation(); saveDraft(); toast(`已加入${choice === 'snapshot' ? '未保存快照' : '磁盘引用'}：${entry.path}`); }
   } finally { attachingVersion = false; updateControls(); }
 };
-const fileEditor = createFileEditor({ api, onReveal: entry => { showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); sqlQuery?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
+const fileEditor = createFileEditor({ api, onReveal: entry => { showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); editorContext?.schedule(); sqlQuery?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
+editorContext = createEditorContext({ editor: fileEditor, getContext: () => ({ cwd: state.cwd, modelService: modelService() }) });
 fileTree = createFileTree({
   api, notice, hasAttachment: (cwd, path) => composerTools.hasProjectReference(cwd, path),
   onAttach: attachProjectFile,
@@ -156,7 +158,7 @@ $('recoverDraftsNow').addEventListener('click', () => restoreDrafts().catch(erro
 $('dismissDraftRecovery').addEventListener('click', () => { recoveryDismissed = true; updateDraftStatus(); });
 window.addEventListener('beforeunload', event => {
   clearTimeout(persistenceTimer); saveDraft(); persistEditor();
-  if ($('prompt').value.trim() || drafts.hasUnsent(state.cwd, state.active) || composerTools.snapshot().files.length) { event.preventDefault(); event.returnValue = ''; }
+  if ($('prompt').value.trim() || drafts.hasUnsent(state.cwd, state.active) || composerTools.snapshot().files.length || workbench.hasDraft || workbench.busy) { event.preventDefault(); event.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => { clearTimeout(persistenceTimer); saveDraft(); persistEditor(); });
 async function switchProject(cwd, fromWorkbench = false) {
@@ -232,6 +234,7 @@ function storeThread(thread) {
 }
 function setConnection(value) {
   state.connected = value;
+  if (!value || !state.streaming) executionStreamReady = false;
   quotaIndicator.setAvailability({ connected: value, loggedIn: modelService() === 'cosmos' ? true : state.authReady, type: modelService() === 'cosmos' ? 'cosmos' : state.authType });
   const online = value && state.streaming;
   $('connection').className = `connection ${online ? 'online' : 'offline'}`;
@@ -240,8 +243,22 @@ function setConnection(value) {
   updateControls(); renderHistory(); renderConversationHeading();
   refreshMessageTimes();
   renderRequests(selected()?.requests || []);
+  // Connection changes must also stop execution motion without replacing logs.
+  renderExecutionConnection();
+}
+
+function renderExecutionConnection() {
+  const thread = selected(); if (!thread || renderedThread !== state.active) return;
+  const live = state.connected && state.streaming && executionStreamReady && !thread.runtimeStale;
+  for (const item of thread.items) {
+    const element = elements.get(item.id); if (!element?.classList.contains('activity')) continue;
+    const turnStatus = thread.turnTimings?.find(turn => turn.id === item.turnId)?.status || (item.turnId === thread.latestTurnId ? thread.busy ? 'inProgress' : thread.completion : null);
+    renderActivity(element, { ...item, turnStatus }, { live, active: !!thread.busy && !!thread.turnId && item.turnId === thread.turnId, waiting: !!thread.requests?.some(request => request.params?.itemId === item.id) });
+  }
+  organizeExecution(thread);
 }
 function updateControls() {
+  editorContext?.schedule();
   const thread = selected();
   const busy = !!thread?.busy;
   const selecting = state.selecting || !!state.switchingProject || attachingVersion;
@@ -466,7 +483,10 @@ function render(forceScroll = false) {
       if (!el) { el = document.createElement('article'); elements.set(item.id, el); $('messages').append(el); }
       if (groups.has(item.id)) { workbench.renderAgentGroup(el, groups.get(item.id)); continue; }
       const turnStatus = t.turnTimings?.find(turn => turn.id === item.turnId)?.status || (item.turnId === t.latestTurnId ? t.busy ? 'inProgress' : t.completion : null);
-      const signature = JSON.stringify(['userMessage', 'agentMessage', 'plan'].includes(item.type) ? item : [item, turnStatus]);
+      const live = state.connected && state.streaming && executionStreamReady && !t.runtimeStale;
+      const waiting = !!t.requests?.some(request => request.params?.itemId === item.id);
+      const active = !!t.busy && !!t.turnId && item.turnId === t.turnId;
+      const signature = JSON.stringify(['userMessage', 'agentMessage', 'plan'].includes(item.type) ? item : [item, turnStatus, live, waiting, active]);
       if (el.dataset.signature === signature) continue;
       el.dataset.signature = signature;
       if (item.type === 'userMessage') {
@@ -476,6 +496,12 @@ function render(forceScroll = false) {
         const label = document.createElement('div'); label.className = 'message-label'; label.textContent = '你';
         const body = document.createElement('div'); body.textContent = presentation.text; body.hidden = !presentation.text;
         el.append(label, body);
+        if (item.editorContext) {
+          const details = document.createElement('details'); details.className = 'editor-context-history';
+          const summary = document.createElement('summary'); summary.textContent = `编辑器上下文 · ${item.editorContext.label}`;
+          const preview = document.createElement('pre'); preview.textContent = item.editorContext.text;
+          details.append(summary, preview); el.append(details);
+        }
         const actions = document.createElement('div'); actions.className = 'user-message-actions';
         const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = '复制'; copy.className = 'text-button'; copy.onclick = async () => { try { await navigator.clipboard.writeText(presentation.text); toast('已复制消息'); } catch { notice('请选中文字复制。'); } };
         const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = '编辑后重发'; edit.className = 'text-button'; edit.onclick = () => { if ($('prompt').value.trim() && !confirm('用这条消息替换输入框里的草稿？')) return; productUI?.showConversation(); $('prompt').value = presentation.text; resizePrompt(); updateControls(); saveDraft(); $('prompt').focus(); if (presentation.attachments.length) notice('文字已载入输入框；需要的附件请重新选择，确认后发送。'); };
@@ -520,7 +546,7 @@ function render(forceScroll = false) {
       } else if (item.type === 'imageGeneration') {
         renderGeneratedImage(el, { ...item, turnStatus });
       } else {
-        renderActivity(el, { ...item, turnStatus });
+        renderActivity(el, { ...item, turnStatus }, { live, waiting, active, animate: !changedThread && !!item.turnId && (item.turnId === t.turnId || item.turnId === t.latestTurnId) });
       }
       if (item.type === 'fileChange' && state.workbenchFeatures) {
         const view = el.querySelector('.activity-diff') || document.createElement('button'); view.className = 'text-button activity-diff'; view.textContent = '查看差异 / 回退';
@@ -567,12 +593,9 @@ function organizeExecution(thread) {
     const active = turnRunning && (!!running || block === blocks.at(-1));
     let group = executionContainers.get(key);
     if (!group) { group = document.createElement('details'); group.className = 'execution-group'; group.open = active; group.append(document.createElement('summary')); executionContainers.set(key, group); }
-    const failures = items.filter(activityFailed).length;
     const turnEnded = thread.turnTimings?.find(turn => turn.id === turnId)?.status || (turnId === thread.latestTurnId ? thread.completion : null);
     const interrupted = turnEnded === 'interrupted' && items.some(item => item.status === 'inProgress' || item.status === 'interrupted');
-    const stateLabel = active ? `进行中${running ? ` · ${activityTitle(running)}` : ''}` : interrupted ? '已中断' : '已结束';
-    group.firstElementChild.textContent = `执行过程 · ${items.length} 项 · ${stateLabel}${failures ? ` · ${failures} 项需查看` : ''}`;
-    group.classList.toggle('has-failures', !!failures);
+    renderExecutionGroup(group, { items, active, interrupted, live: state.connected && state.streaming && executionStreamReady && !thread.runtimeStale, waiting: !!thread.requests?.length });
     let cursor = group.firstElementChild.nextSibling;
     for (const item of items) {
       const element = elements.get(item.id);
@@ -695,6 +718,7 @@ async function syncActiveThread(id, source) {
 
 function startStream() {
   clearTimeout(reconnectTimer); stream?.close();
+  executionStreamReady = false;
   const source = stream = new EventSource('/api/events?version=2');
   const versions = new Map();
   const disconnected = () => {
@@ -710,6 +734,7 @@ function startStream() {
   listen('snapshot', event => {
     reconnectAttempts = 0;
     const data = JSON.parse(event.data);
+    executionStreamReady = true;
     const previous = selected();
     // A reconnected/restarted service may no longer track older browser tasks.
     // Keep their drafts/history, but do not present old busy flags as live facts.
@@ -727,6 +752,7 @@ function startStream() {
     if (data.connected) { await bootstrap(false); loadHistory().catch(e => notice(e.message)); }
   });
   const receiveThread = thread => {
+    executionStreamReady = true;
     const previous = state.threads.get(thread.id);
     storeThread(thread);
     const changedFiles = value => JSON.stringify((value?.items || []).filter(item => item.type === 'fileChange' && item.status === 'completed').map(item => item.id));
@@ -794,10 +820,11 @@ $('composer').addEventListener('submit', async event => {
   if (!following && !permissionControl.beforeSend()) return;
   const draftText = $('prompt').value, text = composerTools.messageText();
   const composerContext = composerTools.payload();
+  const automaticContext = editorContext.payload();
   const draftCwd = state.cwd, draftThread = state.active;
   state.sending = true; updateControls(); notice(null);
   try {
-    const result = following ? await api('/api/followup', { threadId: state.active, text, behavior: $('followupBehavior').value, attachments: composerContext.attachments, capabilities: composerContext.capabilities }) : await api('/api/send', { threadId: state.active, text, cwd: state.cwd, model: $('model').value, modelService: modelService(), ...permissionControl.payload(), ...composerContext });
+    const result = following ? await api('/api/followup', { threadId: state.active, text, behavior: $('followupBehavior').value, editorContext: automaticContext, attachments: composerContext.attachments, capabilities: composerContext.capabilities }) : await api('/api/send', { threadId: state.active, text, cwd: state.cwd, model: $('model').value, modelService: modelService(), ...permissionControl.payload(), ...composerContext, editorContext: automaticContext });
     drafts.clear(draftCwd, draftThread);
     // Preserve any draft typed while the request was being submitted.
     if ($('prompt').value === draftText) { $('prompt').value = ''; resizePrompt(); }

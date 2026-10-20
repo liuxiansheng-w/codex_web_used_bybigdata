@@ -103,7 +103,7 @@ test('HTTP boundary rejects cross-site, missing session/CSRF, and arbitrary file
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const page = await fetch(base); const cookie = page.headers.get('set-cookie').split(';')[0];
   assert.equal(page.status, 200);
-  for (const asset of ['/app.js', '/composer.js', '/permissions.js', '/mcp-app-approval.js', '/mcp-form-schema.js', '/mcp-form-fields.js', '/permission-presets.js', '/interactions.js', '/file-tree.js', '/file-editor.js', '/editor-window.js', '/code-highlight.js', '/markdown.js', '/style.css', '/favicon.svg']) assert.equal((await fetch(`${base}${asset}`)).status, 200, asset);
+  for (const asset of ['/app.js', '/editor-context.js', '/composer.js', '/permissions.js', '/mcp-app-approval.js', '/mcp-form-schema.js', '/mcp-form-fields.js', '/permission-presets.js', '/interactions.js', '/file-tree.js', '/file-editor.js', '/editor-window.js', '/code-highlight.js', '/markdown.js', '/style.css', '/favicon.svg']) assert.equal((await fetch(`${base}${asset}`)).status, 200, asset);
   assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 401);
   assert.equal((await fetch(`${base}/api/models`)).status, 401);
@@ -195,7 +195,7 @@ test('file editing HTTP routes enforce authentication, CSRF, project boundaries 
   const { tmpdir } = await import('node:os'); const path = await import('node:path');
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'codex-editor-http-test-')));
   await writeFile(path.join(cwd, 'example.txt'), 'before\n');
-  const app = createApplication({ bridge: new FakeCodex(), cwd });
+  const app = createApplication({ bridge: new FakeCodex(), cwd, stateDir: path.join(cwd, 'state') });
   await app.start(0); t.after(() => app.close());
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const page = await fetch(base), cookie = page.headers.get('set-cookie').split(';')[0];
@@ -215,6 +215,16 @@ test('file editing HTTP routes enforce authentication, CSRF, project boundaries 
   assert.equal(saved.status, 200); assert.equal((await saved.json()).content, 'after\n');
   assert.equal(await readFile(path.join(cwd, 'example.txt'), 'utf8'), 'after\n');
   assert.equal((await fetch(`${base}/api/project/save`, { method: 'POST', headers, body })).status, 409);
+  const current = await (await fetch(`${base}${route}`, { headers: { cookie } })).json();
+  // Exercise HTTP serialization past the old 6.5 MB request limit, including escapes.
+  const large = ('中文\\\"\n' + 'a'.repeat(100)).repeat(65000) + '完整末尾';
+  const largeBody = JSON.stringify({ ...current, content: large });
+  assert.ok(Buffer.byteLength(largeBody) > 6_500_000);
+  const largeSaved = await fetch(`${base}/api/project/save`, { method: 'POST', headers, body: largeBody });
+  assert.equal(largeSaved.status, 200); assert.equal((await largeSaved.json()).content, large);
+  assert.equal(await readFile(path.join(cwd, 'example.txt'), 'utf8'), large);
+  const largeLoaded = await (await fetch(`${base}${route}`, { headers: { cookie } })).json();
+  assert.equal(largeLoaded.content, large);
   assert.equal(app.bridge.calls.filter(call => call.method === 'turn/start').length, 0);
 });
 

@@ -8,7 +8,7 @@ import { CodexBridge } from './lib/bridge.mjs';
 import { TitleGenerator } from './lib/thread-titles.mjs';
 import { SqlCompletion, completionContext } from './lib/sql-completion.mjs';
 import { Workspace, check, directory } from './lib/workspace.mjs';
-import { ProjectFiles } from './lib/project-files.mjs';
+import { ProjectFiles, maxSaveBodyBytes } from './lib/project-files.mjs';
 import { FileTools } from './lib/file-tools.mjs';
 import { Workbench } from './lib/workbench.mjs';
 import { GitSubmit } from './lib/git-submit.mjs';
@@ -53,10 +53,13 @@ const assets = new Map([
   ['/editor-window.js', ['editor-window.js', 'text/javascript; charset=utf-8']],
   ['/code-highlight.js', ['code-highlight.js', 'text/javascript; charset=utf-8']],
   ['/workbench.js', ['workbench.js', 'text/javascript; charset=utf-8']],
+  ['/schedules.js', ['schedules.js', 'text/javascript; charset=utf-8']],
+  ['/schedule-time.js', ['schedule-time.js', 'text/javascript; charset=utf-8']],
   ['/git-submit.js', ['git-submit.js', 'text/javascript; charset=utf-8']],
   ['/artifact-viewer.js', ['artifact-viewer.js', 'text/javascript; charset=utf-8']],
   ['/project-list.js', ['project-list.js', 'text/javascript; charset=utf-8']],
   ['/editor-tools.js', ['editor-tools.js', 'text/javascript; charset=utf-8']],
+  ['/editor-context.js', ['editor-context.js', 'text/javascript; charset=utf-8']],
   ['/query-history.js', ['query-history.js', 'text/javascript; charset=utf-8']],
   ['/product-ui.js', ['product-ui.js', 'text/javascript; charset=utf-8']],
   ['/task-results.js', ['task-results.js', 'text/javascript; charset=utf-8']],
@@ -79,7 +82,7 @@ async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) {
     length += chunk.length;
-    const limit = req.url === '/api/attachments/upload' ? 14_100_000 : req.url === '/api/project/save' ? 6_500_000 : req.url === '/api/project/language' ? 1_400_000 : 512_000;
+    const limit = req.url === '/api/attachments/upload' ? 14_100_000 : req.url === '/api/project/save' ? maxSaveBodyBytes : req.url === '/api/project/language' ? 1_400_000 : 512_000;
     check(length <= limit, '请求过大。', 413);
     chunks.push(chunk);
   }

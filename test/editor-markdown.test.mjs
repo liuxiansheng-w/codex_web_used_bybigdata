@@ -94,6 +94,22 @@ test('document links open relative to the Markdown folder through existing file 
   for (const target of ['../../private.md', '/project-other/a.md', 'file:///private.md', '//evil.test/a.md', '%2e%2e/%2e%2e/private.md', '%6aavascript:bad.md', 'a%00.md']) assert.throws(() => resolveMarkdownLink(target, { cwd: '/project', path: 'docs/guide.md' }));
 });
 
+test('Markdown over 1 MB previews its last section and remains editable beyond the old character limit', async t => {
+  const page = browser(t), { editor, $, reader, window } = page;
+  const large = '# Large document\n\n' + ('a'.repeat(11000) + '\n\n').repeat(100) + '## Last section\n\n完整末尾';
+  page.files.set('docs/guide.md', large);
+  editor.setProject('/project'); await editor.open({ cwd: '/project', path: 'docs/guide.md' });
+  assert.equal(reader().querySelector('h2').textContent, 'Last section');
+  assert.equal(reader().textContent.trimEnd().endsWith('完整末尾'), true);
+  $('editorMarkdownSource').click(); const input = $('fileEditorText');
+  assert.equal(input.value, large); assert.ok(input.maxLength > large.length);
+  input.setSelectionRange(large.length, large.length);
+  input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  assert.ok(input.value.length > large.length, 'indentation after the old limit still edits the draft');
+  assert.equal(editor.dirty, true);
+  $('editorMarkdownPreview').click(); assert.match(reader().textContent, /完整末尾/);
+});
+
 test('document rendering keeps HTML and unsafe protocols inert, scopes anchors and supports six heading levels', () => {
   const doc = JSDOM.fragment(markdown('# 标题\n\n# 标题\n\n###### 最小标题\n\n[跳转](#标题) [链接](javascript:alert(1))\n\n<script>alert(1)</script>\n\n<img src=x onerror=bad>\n\n```html\n<img src=x onerror=bad>\n```', { document: true }));
   assert.deepEqual([...doc.querySelectorAll('h1')].map(node => node.dataset.markdownHeading), ['标题', '标题-1']);

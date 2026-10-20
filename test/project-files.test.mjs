@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, symlink, realpath, readFile, stat, chmod, link, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ProjectFiles } from '../lib/project-files.mjs';
+import { ProjectFiles, maxTextBytes } from '../lib/project-files.mjs';
 import { ContextStore, attachmentInput } from '../lib/context.mjs';
 
 async function fixture() {
@@ -104,7 +104,7 @@ test('text editor rejects outdated versions, parallel saves and replaced files w
 
 test('text editor refuses binary, non-UTF8, mixed newline, oversized, hard-linked and read-only files', async () => {
   const cwd = await fixture(), files = new ProjectFiles();
-  for (const [name, content, status] of [['binary.bin', Buffer.from([0, 1, 2]), 415], ['invalid.txt', Buffer.from([255]), 415], ['mixed.txt', 'a\r\nb\n', 415], ['huge.txt', 'a'.repeat(1024 * 1024 + 1), 413]]) {
+  for (const [name, content, status] of [['binary.bin', Buffer.from([0, 1, 2]), 415], ['invalid.txt', Buffer.from([255]), 415], ['mixed.txt', 'a\r\nb\n', 415], ['huge.txt', 'a'.repeat(maxTextBytes + 1), 413]]) {
     await writeFile(path.join(cwd, name), content); await assert.rejects(files.read({ cwd, path: name }), { status });
   }
   await chmod(path.join(cwd, 'README.md'), 0o444);
@@ -114,6 +114,29 @@ test('text editor refuses binary, non-UTF8, mixed newline, oversized, hard-linke
   const linked = await files.read({ cwd, path: 'hardlink.txt' }); assert.equal(linked.writable, false);
   await assert.rejects(files.save({ cwd, path: 'hardlink.txt', version: linked.version, content: 'no' }), { status: 403 });
   await assert.rejects(files.save({ cwd, path: 'README.md', content: 'no' }), /版本/);
+});
+
+test('large UTF-8 documents round-trip without truncation and enforce disk bytes including BOM and CRLF', async () => {
+  const cwd = await fixture(), files = new ProjectFiles(), relative = 'large.md';
+  const content = '# 大文档\n' + '中文内容与换行\n'.repeat(60000) + '末尾完整标记\n';
+  const disk = value => '\uFEFF' + value.replaceAll('\n', '\r\n');
+  await writeFile(path.join(cwd, relative), disk(content));
+  const loaded = await files.read({ cwd, path: relative });
+  assert.ok(Buffer.byteLength(content) > 1024 * 1024);
+  assert.equal(loaded.content, content);
+  await assert.rejects(files.read({ cwd, path: relative, maxBytes: 1024 * 1024 }), { status: 413 });
+  const edited = content + '修改后的末尾\n';
+  const saved = await files.save({ ...loaded, content: edited });
+  assert.equal(saved.content, edited);
+  assert.equal(await readFile(path.join(cwd, relative), 'utf8'), disk(edited));
+  await assert.rejects(files.save({ ...saved, content: '界'.repeat(Math.ceil(maxTextBytes / 3)) }), { status: 413 });
+  // Input fits, but the preserved BOM and added CR bytes exceed the disk budget.
+  await assert.rejects(files.save({ ...saved, content: 'a'.repeat(maxTextBytes - 1) + '\n' }), { status: 413 });
+  assert.equal(await readFile(path.join(cwd, relative), 'utf8'), disk(edited));
+  await writeFile(path.join(cwd, 'boundary.txt'), 'a'.repeat(maxTextBytes));
+  const boundary = await files.read({ cwd, path: 'boundary.txt' });
+  assert.equal(boundary.content.length, maxTextBytes);
+  assert.equal((await files.save({ ...boundary, content: boundary.content.slice(0, -1) + 'b' })).content.at(-1), 'b');
 });
 
 test('project file references preserve native attachment input, deduplicate and never copy or expose file bytes', async () => {
