@@ -7,7 +7,7 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { Workspace } from '../lib/workspace.mjs';
 import { readHistoryTiming, turnTiming } from '../lib/message-timing.mjs';
-import { messageClock, formatDuration, turnDuration, renderMessageTimes } from '../public/message-timing.js';
+import { messageClock, formatDuration, turnDuration, requestSegments, currentRequest, requestDuration, renderMessageTimes } from '../public/message-timing.js';
 
 const start = 1789635363000;
 function workspace(t) {
@@ -96,4 +96,59 @@ test('message clocks show dates across days and only the last reply in each turn
   assert.equal(final.querySelector('.turn-duration').textContent, '用时 4 分钟 6 秒'); assert.equal(time.getAttribute('datetime'), new Date(sent + 246000).toISOString());
   renderMessageTimes(thread, elements, true, today + 1000);
   assert.equal(final.querySelector('time'), time); assert.equal(final.querySelector('p'), body); assert.equal(final.querySelectorAll('time').length, 1);
+});
+
+test('a followup in the same native turn starts its own clock and freezes the earlier display range', t => {
+  const dom = new JSDOM('<main></main>'), saved = globalThis.document; globalThis.document = dom.window.document;
+  t.after(() => { globalThis.document = saved; dom.window.close(); });
+  const thread = { busy: true, turnId: 'turn', latestTurnId: 'turn', turnTimings: [{ id: 'turn', status: 'inProgress', startedAt: start }], items: [
+    { id: 'u1', type: 'userMessage', turnId: 'turn', timestamp: start },
+    { id: 'a1', type: 'agentMessage', turnId: 'turn', timestamp: start + 300000 },
+    { id: 'u2', type: 'userMessage', turnId: 'turn', timestamp: start + 660000 },
+    { id: 'a2-progress', type: 'agentMessage', turnId: 'turn', timestamp: start + 670000 },
+    { id: 'a2', type: 'agentMessage', turnId: 'turn', timestamp: start + 680000 },
+  ] };
+  const before = JSON.stringify(thread), segments = requestSegments(thread);
+  assert.equal(segments.length, 2); assert.equal(currentRequest(thread, segments), segments[1]);
+  assert.equal(requestDuration(thread, segments[0], true, start + 881000).text, '本段用时 11 分钟');
+  assert.equal(requestDuration(thread, segments[1], true, start + 881000).text, '已用时 3 分钟 41 秒');
+  const elements = new Map(thread.items.map(item => { const el = document.createElement('article'); el.innerHTML = '<div class="turn-duration" hidden></div><p>reply</p>'; return [item.id, el]; }));
+  renderMessageTimes(thread, elements, true, start + 881000);
+  assert.equal(elements.get('a1').querySelector('.turn-duration').textContent, '本段用时 11 分钟');
+  assert.equal(elements.get('a2-progress').querySelector('.turn-duration').hidden, true);
+  assert.equal(elements.get('a2').querySelector('.turn-duration').textContent, '已用时 3 分钟 41 秒');
+  const reply = elements.get('a2').querySelector('p');
+  assert.equal(requestDuration(thread, segments[1], false, start + 999000).text, '耗时待同步');
+  assert.equal(JSON.stringify(thread), before, 'display segmentation leaves native items and timing untouched');
+  thread.busy = false; thread.turnId = null;
+  Object.assign(thread.turnTimings[0], { status: 'completed', completedAt: start + 900000, durationMs: 900000 });
+  renderMessageTimes(thread, elements, true, start + 999000);
+  assert.equal(elements.get('a1').querySelector('.turn-duration').textContent, '本段用时 11 分钟');
+  assert.equal(elements.get('a2').querySelector('.turn-duration').textContent, '本次用时 4 分钟');
+  assert.equal(elements.get('a2').querySelector('p'), reply);
+});
+
+test('followup timing never borrows the previous start when its own timestamp is missing', () => {
+  const thread = { busy: true, turnId: 'turn', turnTimings: [{ id: 'turn', status: 'inProgress', startedAt: start }], items: [
+    { id: 'u1', type: 'userMessage', turnId: 'turn', timestamp: start },
+    { id: 'u2', type: 'userMessage', turnId: 'turn', timestamp: null },
+  ] };
+  assert.equal(requestDuration(thread, undefined, true, start + 881000), null);
+  thread.items[1].timestamp = start + 660000; thread.items[1].timestampSource = 'observed';
+  assert.equal(requestDuration(thread, undefined, true, start + 881000).text, '已用时约 3 分钟 41 秒');
+  thread.runtimeStale = true; assert.equal(requestDuration(thread).text, '耗时待同步'); thread.runtimeStale = false;
+  Object.assign(thread.turnTimings[0], { status: 'interrupted', durationMs: 900000 }); thread.busy = false;
+  assert.equal(requestDuration(thread).text, '本次用时约 4 分钟 · 已停止');
+  thread.items.push({ id: 'pending', type: 'userMessage', pending: true, timestamp: start + 1000000 });
+  assert.equal(currentRequest(thread).user.id, 'pending'); assert.equal(requestDuration(thread), null);
+});
+
+test('a newly starting turn and late updates from an older turn cannot select the previous question', () => {
+  const thread = { busy: true, turnId: 'new', latestTurnId: 'old', items: [
+    { id: 'u-old', type: 'userMessage', turnId: 'old' }, { id: 'a-old', type: 'agentMessage', turnId: 'old' },
+  ] };
+  assert.deepEqual(currentRequest(thread).items, []);
+  thread.turnId = null; assert.deepEqual(currentRequest(thread).items, []);
+  thread.turnId = 'new'; thread.items.push({ id: 'u-new', type: 'userMessage', turnId: 'new' }, { id: 'a-new', type: 'agentMessage', turnId: 'new' }, { id: 'late-old', type: 'fileChange', turnId: 'old' });
+  assert.deepEqual(currentRequest(thread).items.map(item => item.id), ['a-new']);
 });

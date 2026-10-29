@@ -165,11 +165,11 @@ test('terminal uses explicit bounded sandbox, streams output, accepts stdin and 
   await assert.rejects(desk.terminalAction({ id: 'external', action: 'stop' }), /结束/); bridge.completeCommand({ exitCode: 0 }); await new Promise(setImmediate); assert.equal(desk.terminalList()[0].running, false);
 });
 
-test('scheduled tasks require consent, stay readonly, persist safely and restart paused', async t => {
+test('scheduled tasks require consent, default to native auto review, persist safely and restart paused', async t => {
   const { cwd } = await fixture(), stateDir = path.join(cwd, 'state'); const { desk, bridge } = system(t, stateDir);
   await assert.rejects(desk.scheduleAction({ action: 'create', cwd, text: 'test', minutes: 60 }), /确认/);
-  await desk.scheduleAction({ action: 'create', cwd, text: 'Inspect only', minutes: 15, confirmed: true }); assert.equal(bridge.calls.length, 0);
-  const job = desk.jobs[0]; await desk.scheduleAction({ action: 'run', id: job.id, confirmed: true }); assert.equal(bridge.calls.at(-1).params.sandboxPolicy.type, 'readOnly'); assert.equal(job.history.length, 1);
+  await desk.scheduleAction({ action: 'create', cwd, text: 'Inspect project', minutes: 15, confirmed: true }); assert.equal(bridge.calls.filter(call => ['thread/start', 'turn/start'].includes(call.method)).length, 0);
+  const job = desk.jobs[0]; await desk.scheduleAction({ action: 'run', id: job.id, confirmed: true }); const turn = bridge.calls.find(call => call.method === 'turn/start').params; assert.equal(turn.sandboxPolicy.type, 'workspaceWrite'); assert.equal(turn.approvalPolicy, 'on-request'); assert.equal(turn.approvalsReviewer, 'auto_review'); assert.equal(job.history.length, 1);
   assert.equal((await stat(path.join(stateDir, 'schedules.json'))).mode & 0o777, 0o600);
   const restarted = new Workbench(desk.workspace, new ProjectFiles(), stateDir); t.after(() => restarted.close()); assert.equal((await restarted.schedules()).jobs[0].enabled, false);
 });
@@ -223,10 +223,10 @@ test('SQL/Python formatting and diagnostics are static and never execute source'
 });
 
 test('opt-in drafts persist only text/model, never attachments or permissions; markdown highlights safely', () => {
-  const map = new Map(), storage = { getItem: key => map.get(key), setItem: (key, value) => map.set(key, value), removeItem: key => map.delete(key) };
+  const map = new Map(), storage = { get length() { return map.size; }, key: i => [...map.keys()][i], getItem: key => map.get(key) ?? null, setItem: (key, value) => map.set(key, value), removeItem: key => map.delete(key) };
   let drafts = createDraftStore({ storage }); drafts.save('/p', 't', { text: 'private', context: { files: [{ secret: true }] } }); assert.equal(map.size, 0);
-  storage.setItem('codex-desk:persistDrafts', 'true'); drafts.save('/p', 't', { text: 'saved', model: 'test', context: { files: [{ secret: true }] } }); assert.ok(!storage.getItem('codex-desk:promptDrafts').includes('secret'));
-  drafts = createDraftStore({ storage }); assert.equal(drafts.read('/p', 't').text, 'saved'); drafts.clearSaved(); assert.ok(!map.has('codex-desk:promptDrafts'));
+  storage.setItem('codex-desk:persistDrafts', 'true'); drafts.save('/p', 't', { text: 'saved', model: 'test', context: { files: [{ secret: true }] } }); assert.ok(![...map.values()].join('').includes('secret'));
+  drafts = createDraftStore({ storage }); assert.equal(drafts.read('/p', 't').text, 'saved'); drafts.clearSaved(); assert.equal([...map.keys()].filter(key => key.startsWith('codex-desk:promptDrafts')).length, 0);
   const rendered = markdown('```python\ndef foo():\n  return "<script>"\n```\n[file](src/test.py:8)\n[x](javascript:bad.py)'); assert.match(rendered, /syntax-keyword/); assert.match(rendered, /data-file-link="src\/test.py:8"/); assert.ok(!rendered.includes('data-file-link="javascript:'));
 });
 
@@ -241,6 +241,10 @@ test('new HTTP routes keep session/CSRF checks and operate only in a temporary p
   assert.notEqual((await fetch(base + '/vendor/markdown/package.json', { headers: { cookie } })).status, 200);
   for (const asset of ['/workbench.js', '/schedules.js', '/schedule-time.js', '/editor-tools.js', '/project-list.js', '/task-results.js', '/message-timing.js']) assert.equal((await fetch(base + asset)).status, 200);
   for (const route of ['/api/project/mutate', '/api/project/replace-apply', '/api/git/action', '/api/review', '/api/terminal/start', '/api/schedules/action', '/api/connections/action', '/api/threads/action']) assert.equal((await fetch(base + route, { method: 'POST', headers: { cookie, origin: base, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+  const optionsUrl = `${base}/api/schedules/options?cwd=${encodeURIComponent(cwd)}`;
+  assert.equal((await fetch(optionsUrl)).status, 401);
+  const options = await (await fetch(optionsUrl, { headers: { cookie } })).json(); assert.equal(options.cwd, cwd); assert.deepEqual(options.folders, []); assert.ok(options.permissions.options.some(option => option.id === 'auto-review' && option.enabled));
+  assert.equal(app.bridge.calls.filter(call => ['thread/start', 'turn/start'].includes(call.method)).length, 0);
   const search = await (await fetch(`${base}/api/project/search?cwd=${encodeURIComponent(cwd)}&query=x`, { headers: { cookie } })).json(); assert.equal(search.results[0].path, 'sample.py');
   const created = await fetch(base + '/api/project/mutate', { method: 'POST', headers, body: JSON.stringify({ cwd, path: 'new.txt', action: 'createFile' }) }); assert.equal(created.status, 200);
   const artifact = await (await fetch(`${base}/api/project/artifact?cwd=${encodeURIComponent(cwd)}&path=sample.py`, { headers: { cookie } })).json(); assert.equal(Buffer.from(artifact.base64, 'base64').toString(), 'x=1\n');

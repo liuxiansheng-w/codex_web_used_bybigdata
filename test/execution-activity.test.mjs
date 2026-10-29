@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { JSDOM } from 'jsdom';
 import { Workspace } from '../lib/workspace.mjs';
-import { renderActivity, activityTitle, executionLayout, activityState, renderExecutionGroup } from '../public/execution-view.js';
+import { renderActivity, activityTitle, executionLayout, activityState, renderExecutionGroup, fileChangeLines } from '../public/execution-view.js';
 
 test('activity segments respect replies, file edits, subtasks and legacy turn boundaries', () => {
   const entries = [
@@ -26,6 +26,28 @@ function fixture(t, items = []) {
   const emit = (method, params = {}) => workspace.notification({ method, params: { threadId: 'thread', turnId: 'turn', ...params } });
   return { workspace, raw, thread, emit };
 }
+
+test('native file patch snapshots stream before tool start, replace proposals and reject stale turns', t => {
+  const { thread, emit, workspace, raw } = fixture(t);
+  const first = { path: '/project/a.py', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@\n-x=1\n+x=2' };
+  emit('item/fileChange/patchUpdated', { itemId: 'edit', changes: [first] });
+  assert.equal(thread.items.length, 1); assert.equal(thread.items[0].patchStreaming, true);
+  emit('item/fileChange/patchUpdated', { itemId: 'edit', changes: [{ ...first, diff: first.diff + '00' }, { path: '/project/b.py', kind: { type: 'add' }, diff: '+y=1' }] });
+  assert.equal(thread.items.length, 1); assert.equal(thread.items[0].changes.length, 2); assert.match(thread.items[0].changes[0].diff, /x=200$/);
+  const refreshed = workspace.importThread(raw);
+  assert.equal(refreshed.items.length, 1, 'refresh retains pre-start native proposal');
+  emit('item/started', { item: { id: 'edit', type: 'fileChange', status: 'inProgress', changes: [] } });
+  assert.equal(refreshed.items[0].changes.length, 2); assert.equal(refreshed.items[0].patchStreaming, undefined);
+  emit('item/completed', { item: { id: 'edit', type: 'fileChange', status: 'completed', changes: [first] } });
+  const completed = JSON.stringify(refreshed.items);
+  emit('item/fileChange/patchUpdated', { itemId: 'edit', changes: [{ ...first, diff: 'late' }] });
+  emit('item/fileChange/patchUpdated', { itemId: 'other', turnId: 'old-turn', changes: [first] });
+  emit('item/fileChange/patchUpdated', { itemId: 'other', threadId: 'other-thread', changes: [first] });
+  assert.equal(JSON.stringify(refreshed.items), completed);
+  refreshed.busy = false;
+  emit('item/fileChange/patchUpdated', { itemId: 'late', changes: [first] });
+  assert.equal(JSON.stringify(refreshed.items), completed);
+});
 
 test('public summaries stream by index, finalize once and never expose raw reasoning', t => {
   const { thread, emit, workspace } = fixture(t);
@@ -123,4 +145,62 @@ test('execution header motion stops for approvals, missing live state and comple
   renderExecutionGroup(group, { items: [{ ...items[0], status: 'failed' }], active: false }); assert.equal(group.dataset.executionState, 'failed'); assert.match(status.textContent, /1 项需查看/);
   assert.equal(group.firstElementChild, heading); assert.equal(group.querySelector('article'), output); assert.equal(group.open, false); assert.equal(group.querySelectorAll('.execution-flow').length, 1);
   dom.window.close();
+});
+
+test('inline file diffs distinguish patch headers from literal signs, show exact line numbers and bound large previews', () => {
+  const patch = '--- a/demo.py\n+++ b/demo.py\n@@ -36,2 +36,3 @@\n keep\n---literal\n+++literal\n+<img src=x onerror=alert(1)>\n@@ -100 +101,0 @@\n-delete\n';
+  const parsed = fileChangeLines(patch);
+  assert.equal(parsed.known, true); assert.equal(parsed.added, 2); assert.equal(parsed.removed, 2);
+  assert.deepEqual(parsed.rows.filter(row => ['add', 'remove'].includes(row.kind)), [
+    { kind: 'remove', oldLine: 37, text: '--literal' }, { kind: 'add', newLine: 37, text: '++literal' },
+    { kind: 'add', newLine: 38, text: '<img src=x onerror=alert(1)>' }, { kind: 'remove', oldLine: 100, text: 'delete' },
+  ]);
+  assert.equal(fileChangeLines('没有文本差异').known, false);
+  const large = fileChangeLines('@@ -0,0 +1,4000 @@\n' + '+line\n'.repeat(4000));
+  assert.equal(large.rows.length, 3000); assert.equal(large.truncated, true); assert.equal(large.known, false);
+  assert.equal(fileChangeLines('x'.repeat(200_001)).truncated, true);
+});
+
+test('native file changes appear before completion and preserve rows, folding, selection and output during live updates', t => {
+  const { thread, emit } = fixture(t), dom = new JSDOM('<article></article>'), document = dom.window.document;
+  t.after(() => dom.window.close());
+  const element = document.querySelector('article'), opened = [], options = { cwd: '/project', onOpenFile: entry => opened.push(entry), animate: true };
+  let item = { id: 'edit', type: 'fileChange', status: 'inProgress', changes: [{ path: '/project/demo.py', kind: { type: 'update' }, diff: '@@ -1 +1,2 @@\n-old\n+new\n+<img src=x>\n' }] };
+  emit('item/started', { item }); renderActivity(element, thread.items[0], options);
+  const details = element.querySelector('.activity-details'), file = element.querySelector('.file-change-file'), code = element.querySelector('[data-kind=add] .file-diff-code'), scroller = element.querySelector('.file-diff-scroll'), link = element.querySelector('.file-change-path');
+  assert.equal(details.open, true); assert.equal(file.open, true); assert.equal(element.dataset.executionState, 'running');
+  assert.equal(code.textContent, 'new'); assert.match(element.textContent, /\+2  −1/); assert.equal(element.querySelector('img'), null);
+  assert.equal(element.querySelector('.activity-output'), null, 'patch is visible directly, not in a generic output box');
+  const selection = dom.window.getSelection(), range = document.createRange(); range.selectNodeContents(code); selection.addRange(range);
+  assert.equal(selection.toString(), 'new'); scroller.scrollTop = 47; scroller.scrollLeft = 19; file.open = false;
+  emit('item/fileChange/outputDelta', { itemId: 'edit', delta: '应用中\n' }); renderActivity(element, thread.items[0], options);
+  assert.equal(element.querySelector('.file-change-file'), file); assert.equal(file.open, false);
+  assert.equal(element.querySelector('[data-kind=add] .file-diff-code'), code); assert.equal(selection.toString(), 'new');
+  assert.equal(scroller.scrollTop, 47); assert.equal(scroller.scrollLeft, 19);
+  assert.equal(element.querySelector('.file-change-log').hidden, false); assert.match(element.querySelector('.activity-log').textContent, /应用中/);
+  renderActivity(element, thread.items[0], { ...options, waiting: true }); assert.equal(element.dataset.executionState, 'waiting'); assert.match(element.querySelector('.file-change-hint').textContent, /待确认/);
+  renderActivity(element, thread.items[0], { ...options, live: false }); assert.equal(element.dataset.executionState, 'unknown');
+  item = { ...item, status: 'completed' }; emit('item/completed', { item }); renderActivity(element, thread.items[0], options);
+  assert.equal(element.dataset.executionState, 'completed'); assert.equal(element.querySelector('.file-change-path'), link);
+  assert.equal(selection.toString(), 'new'); assert.equal(file.open, false); assert.match(element.querySelector('.file-change-hint').textContent, /已应用/);
+  link.click(); assert.deepEqual(opened, [{ cwd: '/project', path: 'demo.py' }]);
+  renderActivity(element, { ...thread.items[0], status: 'failed' }, options); assert.equal(element.dataset.executionState, 'failed'); assert.equal(code.textContent, 'new');
+});
+
+test('file preview actions enforce project and creation boundaries, retain unknown diffs and disclose limits', t => {
+  const dom = new JSDOM('<article></article>'), element = dom.window.document.querySelector('article'); t.after(() => dom.window.close());
+  const changes = [
+    { path: '/project/new.py', kind: 'add', diff: '@@ -0,0 +1,200 @@\n' + '+line\n'.repeat(200) },
+    { path: '/project/deleted.py', kind: 'delete', diff: '' }, { path: '/outside/other.py', kind: 'update' },
+    { path: '/project/.env', kind: 'update' }, { path: '/project/before.py', movePath: '/project/after.py', kind: 'update', diff: '' },
+  ], options = { cwd: '/project', onOpenFile() {} };
+  renderActivity(element, { type: 'fileChange', status: 'inProgress', changes }, options);
+  const files = [...element.querySelectorAll('.file-change-file')];
+  assert.deepEqual(files.map(file => file.querySelector('button').disabled), [true, true, true, true, false]);
+  assert.match(files[1].textContent, /尚未提供文本差异/); assert.equal(files[0].querySelectorAll('.file-diff-line').length, 160);
+  files[0].querySelector('.file-diff-more').click(); assert.equal(files[0].querySelectorAll('.file-diff-line').length, 201);
+  renderActivity(element, { type: 'fileChange', status: 'completed', changes }, options);
+  assert.equal(files[0].querySelector('button').disabled, false); assert.match(files[4].querySelector('button').title, /after\.py/);
+  renderActivity(element, { type: 'fileChange', status: 'completed', changes: Array.from({ length: 15 }, (_, i) => ({ path: `/project/file${i}.py`, diff: '' })) }, options);
+  assert.equal(element.querySelectorAll('.file-change-file').length, 12); assert.match(element.textContent, /另有 3 个文件/);
 });

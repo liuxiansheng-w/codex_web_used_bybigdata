@@ -139,7 +139,7 @@ function inline(text, documentMode = false) {
   return s.replace(/\u0000(\d+)\u0000/g, (_, n) => tokens[Number(n)]);
 }
 
-export function markdown(text, { document: documentMode = false } = {}) {
+export function markdown(text, { document: documentMode = false, charts = false } = {}) {
   if (documentMode) return documentMarkdown(text);
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const renderInline = text => inline(text, documentMode), anchors = new Set();
@@ -153,6 +153,9 @@ export function markdown(text, { document: documentMode = false } = {}) {
       flush(); endList(); const code = [];
       const language = fence[2].trim().toLowerCase(), close = new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`);
       while (++i < lines.length && !close.test(lines[i])) code.push(lines[i]);
+      if (charts && ['chart', 'lemon-chart'].includes(language) && i < lines.length) {
+        html += '<figure class="ai-chart" data-ai-chart><figcaption>AI 图表</figcaption><div data-ai-chart-host><p role="status">正在渲染图表…</p></div><details class="ai-chart-source"><summary>查看配置与数据</summary><pre><code data-ai-chart-source>' + escapeHtml(code.join('\n')) + '</code></pre></details></figure>'; continue;
+      }
       const mode = ['sql', 'hive', 'postgresql'].includes(language) ? 'sql' : ['py', 'python'].includes(language) ? 'python' : 'text';
       html += `<pre><code>${highlightCode(code.join('\n'), mode).html}</code></pre>`; continue;
     }

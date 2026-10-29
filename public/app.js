@@ -1,3 +1,6 @@
+import { createSubmissionState } from './submission-state.js';
+import { createMessageRenderer } from './message-renderer.js';
+import { createDraftJournal } from './draft-journal.js';
 import { markdown, escapeHtml as esc, bindMarkdownTableCopy } from './markdown.js';
 import { createComposerTools } from './composer.js';
 import { createPermissionControl, createApprovalBatch, createQuestionCard } from './permissions.js';
@@ -6,12 +9,13 @@ import { createFileTree } from './file-tree.js';
 import { createFileEditor } from './file-editor.js';
 import { createEditorTools, createInlineCompletion } from './editor-tools.js';
 import { createEditorContext } from './editor-context.js';
+import { createLiveEdits } from './live-edits.js';
 import { createWorkbench } from './workbench.js';
 import { createProjectList } from './project-list.js';
 import { taskResult, subtaskGroups, completedChangeSummaries, createChangeSummary } from './task-results.js';
-import { renderMessageTimes, turnDuration } from './message-timing.js';
+import { renderMessageTimes, requestDuration } from './message-timing.js';
 import { createSqlQuery, sqlFileFromRunnerLink } from './sql-query.js';
-import { createProductUI, createGitSubmit } from './product-ui.js';
+import { createProductUI, createGitSubmit, createTestPreview } from './product-ui.js';
 import { createBottomPanel } from './editor-window.js';
 import { renderActivity, renderExecutionGroup, executionLayout } from './execution-view.js';
 import { renderGeneratedImage, modelRetryLabel } from './interactions.js';
@@ -19,6 +23,11 @@ import { createModelCatalogRefresh } from './interactions.js';
 import { computerUseApproval } from './mcp-app-approval.js';
 import { mcpFormMode, mcpFormSchema } from './mcp-form-schema.js';
 import { renderMcpFields } from './mcp-form-fields.js';
+
+// Older running servers may not yet expose the new optional static modules.
+// Keep the existing workbench usable until its tasks finish and it can upgrade.
+const createToolbox = (await import('./toolbox.js').catch(() => null))?.createToolbox;
+const createThreadOrganization = (await import('./thread-organization.js').catch(() => null))?.createThreadOrganization;
 
 const $ = id => document.getElementById(id);
 bindMarkdownTableCopy(document, { notify: toast });
@@ -30,12 +39,16 @@ const storage = {
   set(key, value) { try { localStorage.setItem(`codex-desk:${key}`, value); } catch {} },
 };
 const state = { connected: false, streaming: false, authReady: null, csrf: '', cwd: '', active: null, threads: new Map(), history: [], cursor: null, sending: false, selecting: false, loadSequence: 0, archived: false };
+const threadOrganization = createThreadOrganization?.({ api, getContext: () => ({ cwd: state.cwd, available: state.threadOrganization, batch: state.threadOrganizationBatch, scope: JSON.stringify([$('search').value.trim().toLowerCase(), $('threadSearchScope').value, state.archived]) }), onChange: renderHistory, notify: toast, notice, legacyPins: pinnedThreads });
 const modelCatalogRefresh = createModelCatalogRefresh({
   load: () => api('/api/models', undefined, { signal: AbortSignal.timeout(20_000) }),
   available: () => state.connected && !document.hidden && modelService() === 'codex',
+  onStart: () => { $('model').setAttribute('aria-busy', 'true'); $('model').title = '正在刷新模型列表…'; },
   apply: models => { state.modelCatalog = models; $('model').title = ''; renderModelConnection(); inlineCompletion?.sync(); },
   onError: () => { $('model').title = '模型列表刷新失败，已保留当前列表和选择；稍后会再次刷新。'; },
+  onFinish: () => { $('model').removeAttribute('aria-busy'); if ($('model').title === '正在刷新模型列表…') $('model').title = ''; },
 });
+const submissions = createSubmissionState({ api, storage: window.sessionStorage, getEpoch: () => state.submissionEpoch });
 const requestCards = new Map();
 const approvalBatch = createApprovalBatch({ api, getThread: selected, isConnected: () => state.connected && state.streaming, onChange: () => renderRequests(selected()?.requests || []), onComplete: toast });
 const approvalToolbar = $('approvalToolbar');
@@ -50,13 +63,23 @@ const modelSwitch = createModelSwitch({ button: $('modelSwitchButton'), api,
   },
 });
 const elements = new Map(), executionContainers = new Map(), changeSummaries = new Map();
+const renderSignatures = new WeakMap();
+let visibleHistory = 120;
+const replies = createMessageRenderer({
+  onCopy: async (text, code = false) => { try { await navigator.clipboard.writeText(text); toast(code ? '已复制代码块' : '已复制回复'); } catch { notice('剪贴板不可用，请手动选中文字复制。'); } },
+  onOpenFile: openProjectLink, runnerPath: sqlFileFromRunnerLink, onContext: addChartContext,
+});
 let persistenceTimer, recoverySnapshots = [], attachingVersion = false, draftWriteFailed = false, recoveryDismissed = false;
 const drafts = createDraftStore({ storage: localStorage, onError: message => { draftWriteFailed = true; notice(message); } });
-try { if (storage.get('persistDrafts') === 'true') { const saved = JSON.parse(storage.get('editorDrafts') || '[]'); if (Array.isArray(saved)) recoverySnapshots = saved.filter(file => typeof file.cwd === 'string' && typeof file.path === 'string' && typeof file.content === 'string' && typeof file.baseline === 'string' && typeof file.version === 'string').slice(0, 30); } } catch {}
-let selectionSequence = 0;
+const editorJournal = createDraftJournal({ storage: localStorage, name: 'editorDrafts', limit: 2_000_000, onError: message => { draftWriteFailed = true; notice(message); } });
+const validEditorDraft = file => typeof file?.cwd === 'string' && typeof file.path === 'string' && typeof file.content === 'string' && typeof file.baseline === 'string' && typeof file.version === 'string';
+recoverySnapshots = editorJournal.latest().map(record => record.value).filter(validEditorDraft);
+let persistedEditorIds = new Set();
+
+let selectionSequence = 0, starterUndo = null;
 const projectThreads = new Map();
 let projectList, fileTree;
-let sqlQuery, inlineCompletion, productUI, editorContext;
+let sqlQuery, inlineCompletion, productUI, editorContext, liveEdits, toolbox, testPreview;
 let renderedThread = null, executionStreamReady = false;
 let stream, reconnectTimer, recoveringStream;
 let reconnectAttempts = 0;
@@ -87,7 +110,7 @@ const attachProjectFile = async entry => {
     if (await composerTools.addProjectReference({ ...entry, ...(choice === 'snapshot' ? { snapshot: file.content } : {}) })) { productUI?.showConversation(); saveDraft(); toast(`已加入${choice === 'snapshot' ? '未保存快照' : '磁盘引用'}：${entry.path}`); }
   } finally { attachingVersion = false; updateControls(); }
 };
-const fileEditor = createFileEditor({ api, onReveal: entry => { showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); editorContext?.schedule(); sqlQuery?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
+const fileEditor = createFileEditor({ api, onReveal: entry => { showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); editorContext?.schedule(); sqlQuery?.sync(); toolbox?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
 editorContext = createEditorContext({ editor: fileEditor, getContext: () => ({ cwd: state.cwd, modelService: modelService() }) });
 fileTree = createFileTree({
   api, notice, hasAttachment: (cwd, path) => composerTools.hasProjectReference(cwd, path),
@@ -96,24 +119,38 @@ fileTree = createFileTree({
   onManage: entry => workbench.show('files', entry),
   onSearch: query => workbench.show('search', { query, filenames: true }),
 });
-projectList = createProjectList({ api, onSelect: switchProject, onGit: (cwd, action) => gitSubmit.show(cwd, { action }), getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, notice });
+projectList = createProjectList({ api, onSelect: switchProject, onGit: (cwd, action) => gitSubmit.show(cwd, { action }), getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, notice,
+  remote: { load: () => api('/api/projects'), save: projects => api('/api/projects', { projects }) },
+});
 const workbench = createWorkbench({
   bottomPanel,
-  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), features: state.workbenchFeatures, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
+  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), model: $('model').value, features: state.workbenchFeatures, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
   onContext: addContext, onThread: id => selectThread(id, true), onProject: cwd => switchProject(cwd, true), projects: projectList, refreshFiles: () => $('refreshFiles').click(),
   getDraftPreference: () => storage.get('persistDrafts') === 'true',
-  setDraftPreference, clearDrafts: clearSavedDrafts, restoreDrafts,
+  setDraftPreference, clearDrafts: clearSavedDrafts, restoreDrafts, showDraftVersions,
+  onGitSubmit: cwd => gitSubmit.show(cwd),
   getArtifacts: () => taskResult(selected()).artifacts,
   getChanges: () => taskResult(selected()).changes,
 });
 inlineCompletion = createInlineCompletion({ editor: fileEditor, api, getConfig: () => ({ available: state.aiCompletionAvailable, model: $('model').value }) });
 createEditorTools({ editor: fileEditor, api, notice, completion: inlineCompletion, onContext: addContext, onPreview: entry => workbench.previewArtifact(entry) });
-sqlQuery = createSqlQuery({ editor: fileEditor, api, onContext: addContext, notice, bottomPanel });
+sqlQuery = createSqlQuery({ editor: fileEditor, api, onContext: addContext, onChartContext: addChartContext, notice, bottomPanel });
 productUI = createProductUI();
+toolbox = createToolbox?.({ editor: fileEditor, notify: toast, onContext: addChartContext, getContextKey: () => JSON.stringify([state.cwd, state.active]) });
+if (!toolbox) {
+  $('toolboxButton').title = '工具箱模块暂时无法加载，点击查看说明';
+  $('toolboxButton').onclick = () => notice('工具箱模块暂时无法加载，请刷新页面。若仍不可用，请检查服务是否已加载最新的工具箱资源。');
+}
+testPreview = createTestPreview({ getContext: () => ({ thread: selected(), cwd: state.cwd, live: state.connected && state.streaming && executionStreamReady && !selected()?.runtimeStale }) });
 const gitSubmit = createGitSubmit({ api, getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, onPulled: async cwd => {
   await fileEditor.refresh({ all: true, cwd }); if (state.cwd === cwd) $('refreshFiles').click();
 } });
+liveEdits = createLiveEdits({ onOpen: async (file, thread) => { if (selected()?.id !== thread.id || state.cwd !== thread.cwd) throw new Error('请切回修改所属项目和会话。'); if (file.kind === 'delete') return workbench.show('git', { changes: [{ ...file, itemId: file.item.id, status: file.item.status }] }); return workbench.openFile({ cwd: thread.cwd, path: file.movePath || file.path }); }, getContext: () => ({ thread: selected(), live: state.connected && state.streaming && executionStreamReady && !selected()?.runtimeStale }) });
 createModuleThemeControls({ root: document.documentElement, storage: localStorage, bottomPanel });
+function addChartContext(text) {
+  if (!composerTools.appendText(text)) { toast('当前正在提交消息，稍后再加入图表内容。'); return false; }
+  productUI?.showConversation(); resizePrompt(); updateControls(); saveDraft(); $('prompt').focus(); toast('已加入当前对话草稿，确认后发送。'); return true;
+}
 function addContext(text) { productUI?.showConversation(); $('prompt').value = ($('prompt').value ? $('prompt').value + '\n\n' : '') + text; resizePrompt(); updateControls(); saveDraft(); $('prompt').focus(); }
 document.addEventListener('click', event => {
   const followup = event.target.closest?.('[data-followup-prompt]');
@@ -124,18 +161,20 @@ document.addEventListener('click', event => {
 function persistEditor() {
   if (storage.get('persistDrafts') !== 'true') return;
   const files = new Map(recoverySnapshots.map(file => [JSON.stringify([file.cwd, file.path]), file]));
-  // Reopening a disk file must not erase a pending, explicitly cached draft.
-  for (const file of fileEditor.snapshots()) files.set(JSON.stringify([file.cwd, file.path]), file);
-  const data = JSON.stringify([...files.values()]);
-  try { if (data.length > 2000000) throw new Error(); localStorage.setItem('codex-desk:editorDrafts', data); } catch { draftWriteFailed = true; notice('编辑草稿缓存空间不足，请保存文件或手动备份。'); updateDraftStatus(); }
+  const activeSnapshots = fileEditor.snapshots();
+  for (const file of activeSnapshots) files.set(JSON.stringify([file.cwd, file.path]), file);
+  for (const id of persistedEditorIds) if (!files.has(id)) editorJournal.remove(id);
+  for (const file of activeSnapshots) editorJournal.put(JSON.stringify([file.cwd, file.path]), file);
+  persistedEditorIds = new Set(files.keys());
 }
-function clearSavedDrafts() { recoverySnapshots = []; drafts.clearSaved(); localStorage.removeItem('codex-desk:editorDrafts'); updateDraftStatus(); }
+function clearSavedDrafts() { recoverySnapshots = []; drafts.clearSaved(); editorJournal.clear(); updateDraftStatus(); }
 function setDraftPreference(enabled) {
   if (enabled && !confirm('允许此浏览器将输入和编辑草稿以明文保存在本机？请勿在共享设备上开启。')) return;
   storage.set('persistDrafts', String(enabled));
   if (enabled) { saveDraft(); persistEditor(); } else clearSavedDrafts(); updateDraftStatus();
 }
 async function restoreDrafts() {
+  if (!recoverySnapshots.length) recoverySnapshots = editorJournal.latest().map(record => record.value).filter(validEditorDraft);
   if (!recoverySnapshots.length) return toast('没有可恢复的编辑草稿。');
   const pending = [...recoverySnapshots];
   await fileEditor.restore(pending);
@@ -145,12 +184,44 @@ async function restoreDrafts() {
 function updateDraftStatus() {
   const saved = storage.get('persistDrafts') === 'true';
   $('draftStatus').textContent = draftWriteFailed ? '草稿保存失败 · 请备份' : saved ? composerTools.hasPastedText ? '正文可恢复 · 文本附件仅本页' : '本机草稿恢复已开启' : '草稿仅保留在本页';
+  $('undoStarterPrompt').hidden = !starterUndo || starterUndo.cwd !== state.cwd || starterUndo.thread !== state.active || $('prompt').value !== starterUndo.after;
   $('draftChoice').hidden = storage.get('persistDrafts') !== null || !$('prompt').value.trim();
   $('draftRecovery').hidden = recoveryDismissed || !recoverySnapshots.length;
   $('draftRecoveryText').textContent = `有 ${recoverySnapshots.length} 份编辑草稿可恢复（不写入磁盘）。`;
   $('composerHelp').textContent = storage.get('enterBehavior') === 'cmd' ? '⌘ / Ctrl + Enter 发送 · Enter 换行' : 'Enter 发送 · Shift + Enter 换行';
   $('composerHelp').title = $('composerHelp').textContent;
 }
+let previewedDraftVersion;
+function showDraftVersions() {
+  const list = $('draftVersionsList'); list.replaceChildren(); $('draftVersionPreview').hidden = true; $('draftVersionsStatus').textContent = '';
+  const prompts = createDraftJournal({ storage: localStorage, name: 'promptDrafts' }).list().map(record => ({ ...record, kind: 'prompt' }));
+  const records = [...prompts, ...editorJournal.list().filter(record => validEditorDraft(record.value)).map(record => ({ ...record, kind: 'editor' }))].sort((a, b) => b.at - a.at);
+  for (const record of records) {
+    const row = document.createElement('button'); row.type = 'button'; row.className = 'draft-version-row';
+    let parts; try { parts = JSON.parse(record.id); } catch { continue; }
+    const label = record.kind === 'editor' ? parts[1] : '聊天草稿 · ' + (parts[1] ? String(parts[1]).slice(0, 12) : '新对话');
+    row.textContent = label + ' · ' + (record.at ? new Date(record.at).toLocaleString('zh-CN') : '迁移的旧版本'); row.title = parts[0];
+    row.addEventListener('click', () => { previewedDraftVersion = record; const text = record.kind === 'editor' ? record.value.content : record.value.text || ''; $('draftVersionLabel').textContent = label; $('draftVersionHint').textContent = parts[0] + (text.length > 50_000 ? ' · 仅预览前 50,000 字符，恢复保留全文' : ''); $('draftVersionText').value = text.slice(0, 50_000); $('draftVersionPreview').hidden = false; $('draftVersionRestore').textContent = record.kind === 'editor' ? '打开为未保存草稿' : '加入当前聊天草稿'; });
+    list.append(row);
+  }
+  if (!records.length) { const empty = document.createElement('p'); empty.textContent = '尚无已保存的草稿版本。'; list.append(empty); }
+  $('draftVersionsDialog').showModal();
+}
+$('draftVersionRestore').addEventListener('click', async () => {
+  const record = previewedDraftVersion; if (!record) return;
+  try {
+    if (record.kind === 'prompt') { if (JSON.parse(record.id)[0] !== state.cwd) throw new Error('请先切换到草稿所属项目，再加入对话。'); addContext(record.value.text || ''); }
+    else {
+      const entry = record.value; if (entry.cwd !== state.cwd) throw new Error('请先切换到草稿所属项目。');
+      if (fileEditor.inspect(entry)?.dirty) throw new Error('该文件已有未保存草稿，请先保存或关闭对应标签，再恢复此版本。');
+      await fileEditor.restore([entry]);
+      if (fileEditor.inspect(entry)?.content !== entry.content) throw new Error('尚未恢复，请检查文件是否可打开。');
+    }
+    $('draftVersionsDialog').close(); toast('已恢复为草稿，确认后再保存或发送。');
+  } catch (error) { $('draftVersionsStatus').textContent = error.message; }
+});
+window.addEventListener('storage', event => { if (drafts.matchesStorage(event.key) || editorJournal.matches(event.key)) { updateDraftStatus(); if (event.key !== 'codex-desk:persistDrafts') toast('其他窗口更新了草稿，可在设置中查看各版本。'); } });
+
 $('enableDraftRecovery').addEventListener('click', () => setDraftPreference(true));
 $('keepDraftTemporary').addEventListener('click', () => setDraftPreference(false));
 $('draftStatus').addEventListener('click', () => workbench.show('preferences'));
@@ -158,7 +229,7 @@ $('recoverDraftsNow').addEventListener('click', () => restoreDrafts().catch(erro
 $('dismissDraftRecovery').addEventListener('click', () => { recoveryDismissed = true; updateDraftStatus(); });
 window.addEventListener('beforeunload', event => {
   clearTimeout(persistenceTimer); saveDraft(); persistEditor();
-  if ($('prompt').value.trim() || drafts.hasUnsent(state.cwd, state.active) || composerTools.snapshot().files.length || workbench.hasDraft || workbench.busy) { event.preventDefault(); event.returnValue = ''; }
+  if (submissions.all().length || $('prompt').value.trim() || drafts.hasUnsent(state.cwd, state.active) || composerTools.snapshot().files.length || workbench.hasDraft || workbench.busy) { event.preventDefault(); event.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => { clearTimeout(persistenceTimer); saveDraft(); persistEditor(); });
 async function switchProject(cwd, fromWorkbench = false) {
@@ -253,21 +324,34 @@ function renderExecutionConnection() {
   for (const item of thread.items) {
     const element = elements.get(item.id); if (!element?.classList.contains('activity')) continue;
     const turnStatus = thread.turnTimings?.find(turn => turn.id === item.turnId)?.status || (item.turnId === thread.latestTurnId ? thread.busy ? 'inProgress' : thread.completion : null);
-    renderActivity(element, { ...item, turnStatus }, { live, active: !!thread.busy && !!thread.turnId && item.turnId === thread.turnId, waiting: !!thread.requests?.some(request => request.params?.itemId === item.id) });
+    renderActivity(element, { ...item, turnStatus }, { ...fileChangeOptions(thread), live, active: !!thread.busy && !!thread.turnId && item.turnId === thread.turnId, waiting: !!thread.requests?.some(request => request.params?.itemId === item.id) });
   }
   organizeExecution(thread);
 }
+function fileChangeOptions(thread) {
+  return { cwd: thread.cwd, onOpenFile: async entry => {
+    if (state.active !== thread.id || state.cwd !== entry.cwd) throw new Error('请切回这次修改所属的会话和项目后查看文件。');
+    await workbench.openFile(entry);
+  } };
+}
 function updateControls() {
   editorContext?.schedule();
+  liveEdits?.sync();
+  testPreview?.sync();
   const thread = selected();
   const busy = !!thread?.busy;
   const selecting = state.selecting || !!state.switchingProject || attachingVersion;
   $('sendButton').hidden = false;
   $('followupBehavior').hidden = !busy;
-  $('sendButton').title = busy ? '向正在执行的任务追加或排队' : '发送消息';
+  const behavior = $('followupBehavior').value;
+  const sendLabel = busy ? { steer: '追加指令', queue: '加入队列', interrupt: '停止并发送' }[behavior] : '发送';
+  $('sendButtonLabel').textContent = sendLabel; $('sendButton').title = sendLabel; $('sendButton').setAttribute('aria-label', sendLabel);
+  $('followupHint').hidden = !busy;
+  $('followupHint').textContent = { steer: '补充到正在执行的任务，沿用当前模型和权限。', queue: '当前任务结束后发送，按当前模型和权限执行。', interrupt: '先停止当前任务再发送；已完成的文件修改会保留。' }[behavior];
+  renderSubmission();
   $('stopButton').hidden = !busy;
   $('stopButton').disabled = !thread?.turnId || !state.connected || state.sending;
-  $('sendButton').disabled = !state.connected || !state.streaming || (state.authReady === false && modelService() !== 'cosmos') || state.sending || selecting || composerTools.uploading || !composerTools.canSend;
+  $('sendButton').disabled = !state.connected || !state.streaming || (state.authReady === false && modelService() !== 'cosmos') || state.sending || selecting || composerTools.uploading || !composerTools.canSend || !!submissions.get(state.cwd, state.active);
   $('model').disabled = busy || state.sending || selecting;
   $('prompt').readOnly = !!state.switchingProject;
   $('mode').disabled = busy || state.sending;
@@ -287,7 +371,7 @@ function updateControls() {
 }
 
 function renderRunStatus() {
-  const thread = selected(), duration = turnDuration(thread, thread?.turnId, state.connected && state.streaming);
+  const thread = selected(), duration = requestDuration(thread, undefined, state.connected && state.streaming);
   const asyncOnly = thread?.requests.length && thread.requests.every(request => ['item/tool/requestUserInput', 'item/agentMessage/answer'].includes(request.method) && request.params?.isBlocking === false);
   const label = thread?.requests.length ? asyncOnly ? '柠檬正在处理，你可以补充回答' : '等待你的回复或审批' : state.sending ? '正在发送…' : modelRetryLabel(thread) || '柠檬正在处理…';
   $('runStatusText').textContent = label + (thread?.busy && duration ? ` · ${duration.text}` : '');
@@ -317,38 +401,47 @@ function renderHistory() {
   const focusedRow = $('threadList').contains(document.activeElement) ? document.activeElement.closest('.thread-row') : null;
   const focusedId = focusedRow?.querySelector('[data-thread-id]')?.dataset.threadId;
   const focusedMenu = document.activeElement?.classList.contains('thread-menu');
+  const focusedPin = document.activeElement?.classList.contains('thread-pin');
+  const focusedSelection = document.activeElement?.classList.contains('thread-select');
+  const focusedGroup = document.activeElement?.dataset.groupToggle, focusedFolder = document.activeElement?.dataset.folderEdit;
   const query = $('search').value.trim().toLowerCase(), contentSearch = $('threadSearchScope')?.value === 'content' && !!query;
   const merged = new Map(state.history.map(t => [t.id, t]));
   for (const t of state.threads.values()) if (!contentSearch && t.cwd === state.cwd && !!t.archived === state.archived) merged.set(t.id, { ...merged.get(t.id), ...t, preview: t.items?.filter(item => ['userMessage', 'agentMessage'].includes(item.type)).at(-1)?.text || merged.get(t.id)?.preview || t.preview });
-  const pins = pinnedThreads();
+  const pins = threadOrganization ? new Set([...merged.values()].filter(t => threadOrganization.isPinned(t)).map(t => t.id)) : pinnedThreads();
   const timestamp = t => t.updatedAt ? Number(t.updatedAt) * (Number(t.updatedAt) < 1e12 ? 1000 : 1) : 0;
   const list = [...merged.values()].filter(t => contentSearch || t.title.toLowerCase().includes(query)).sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || timestamp(b) - timestamp(a));
   $('threadList').replaceChildren();
-  if (!list.length) {
-    const p = document.createElement('p'); p.className = 'list-empty';
-    p.textContent = query ? '没有匹配的对话' : '还没有对话，点击右上角 ＋ 开始。';
-    $('threadList').append(p);
-  }
-  let lastGroup = '';
-  for (const t of list) {
+  const rowFor = t => {
     const updated = t.updatedAt ? new Date(t.updatedAt < 1e12 ? t.updatedAt * 1000 : t.updatedAt) : null;
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const group = pins.has(t.id) ? '置顶' : updated ? updated >= today ? '今天' : updated >= new Date(today.getTime() - 86400000) ? '昨天' : updated.toLocaleDateString('zh-CN') : '最近会话';
-    if (group !== lastGroup) { const heading = document.createElement('div'); heading.className = 'history-date'; heading.textContent = group; $('threadList').append(heading); lastGroup = group; }
     const button = document.createElement('button'); button.className = `thread-button${t.id === state.active ? ' active' : ''}`;
     const status = displayState(t), content = document.createElement('span'); content.className = 'thread-content';
-    const title = document.createElement('strong'); title.textContent = `${pins.has(t.id) ? '⌑ ' : ''}${t.title}`;
+    const title = document.createElement('strong'); title.textContent = `${pins.has(t.id) && !threadOrganization?.ready() ? '⌑ ' : ''}${t.title}`;
     const meta = document.createElement('span'); meta.className = 'thread-meta'; if (!['done', 'idle', 'new'].includes(status.key)) meta.append(statusBadge(status)); if (updated) { const time = document.createElement('time'); time.textContent = updated >= today ? updated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : updated.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }); time.title = updated.toLocaleString('zh-CN'); time.dateTime = updated.toISOString(); meta.append(time); } content.append(title, meta); const preview = document.createElement('small'); preview.className = 'thread-preview'; preview.textContent = (t.preview || '').replace(/\s+/g, ' ').slice(0, 110); if (contentSearch && preview.textContent) content.append(preview); button.append(content); button.title = `${t.title}\n${status.label}${status.key === 'unknown' ? ' · 打开会话或恢复连接后核对' : ''}`;
     button.dataset.busy = String(status.key === 'running'); button.dataset.threadId = t.id;
     button.setAttribute('aria-current', t.id === state.active ? 'true' : 'false');
-    button.addEventListener('click', () => selectThread(t.id));
-    const row = document.createElement('div'); row.className = 'thread-row'; const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'thread-menu'; menu.textContent = '⋯'; menu.setAttribute('aria-label', `管理会话 ${t.title}`); menu.addEventListener('click', () => openThreadActions(t)); row.append(button, menu); $('threadList').append(row);
+    button.addEventListener('click', () => { if (!threadOrganization?.activateSelection?.(t)) void selectThread(t.id); });
+    const folder = threadOrganization?.folderFor(t);
+    if (folder && pins.has(t.id)) { const badge = document.createElement('small'); badge.className = 'thread-folder-badge'; badge.textContent = folder.name; content.append(badge); }
+    const row = document.createElement('div'); row.className = 'thread-row'; const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'thread-menu'; menu.textContent = '⋯'; menu.setAttribute('aria-label', `管理会话 ${t.title}`); menu.addEventListener('click', () => openThreadActions(t)); const selection = threadOrganization?.selectionControl?.(t); if (selection) { row.append(selection); row.classList.toggle('is-selected', selection.checked); button.setAttribute('aria-pressed', String(selection.checked)); } row.append(button); const pin = threadOrganization?.pinButton(t); if (pin) row.append(pin); row.append(menu); return row;
+  };
+  if (!threadOrganization?.render(list, rowFor, { query })) {
+    if (!list.length) { const p = document.createElement('p'); p.className = 'list-empty'; p.textContent = query ? '没有匹配的对话' : '还没有对话，点击右上角 ＋ 开始。'; $('threadList').append(p); }
+    let lastGroup = '';
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    for (const t of list) {
+      const updated = t.updatedAt ? new Date(timestamp(t)) : null;
+      const group = pins.has(t.id) ? '置顶' : updated ? updated >= today ? '今天' : updated >= new Date(today.getTime() - 86400000) ? '昨天' : updated.toLocaleDateString('zh-CN') : '最近会话';
+      if (group !== lastGroup) { const heading = document.createElement('div'); heading.className = 'history-date'; heading.textContent = group; $('threadList').append(heading); lastGroup = group; }
+      $('threadList').append(rowFor(t));
+    }
   }
   $('loadMore').hidden = !state.cursor;
   if (focusedId && $('mainPanel').dataset.chatView === 'history') {
     const button = [...$('threadList').querySelectorAll('[data-thread-id]')].find(button => button.dataset.threadId === focusedId);
-    (focusedMenu ? button?.parentElement.querySelector('.thread-menu') : button)?.focus({ preventScroll: true });
+    (focusedSelection ? button?.parentElement.querySelector('.thread-select') : focusedMenu ? button?.parentElement.querySelector('.thread-menu') : focusedPin ? button?.parentElement.querySelector('.thread-pin') : button)?.focus({ preventScroll: true });
   }
+  if (focusedGroup || focusedFolder) [...$('threadList').querySelectorAll('[data-group-toggle], [data-folder-edit]')].find(button => focusedGroup ? button.dataset.groupToggle === focusedGroup : button.dataset.folderEdit === focusedFolder)?.focus({ preventScroll: true });
   $('threadList').scrollTop = historyTop;
   renderActiveThreads();
 }
@@ -391,10 +484,14 @@ async function loadHistory(append = false) {
   catch (error) { if (generation === state.loadSequence && cwd === state.cwd) { $('historyError').textContent = error.message; $('historyError').hidden = false; } throw error; }
   if (generation !== state.loadSequence || cwd !== state.cwd) return;
   if (result.cwd !== state.cwd) { state.cwd = result.cwd; storage.set('cwd', state.cwd); workspaceLabel(); }
-  state.history = append ? [...state.history, ...result.threads] : result.threads;
+  threadOrganization?.accept(result.organization);
+  state.history = [...new Map((append ? [...state.history, ...result.threads] : result.threads).map(thread => [thread.id, thread])).values()];
   state.cursor = result.nextCursor;
   if ($('threadSearchInfo')) $('threadSearchInfo').textContent = $('threadSearchScope').value === 'content' && $('search').value.trim() ? `搜索当前项目会话内容${result.nextCursor ? ' · 可加载更多继续搜索' : ''}${result.partial ? ' · 部分会话未能读取，可重试' : ''}` : '';
+  if (result.organizationPartial) $('threadSearchInfo').textContent += ' · 部分分组会话尚未读取，可刷新或加载更多';
+  if (result.organizationError) { $('historyError').textContent = result.organizationError; $('historyError').hidden = false; }
   renderHistory();
+  void threadOrganization?.migrate(result.threads);
 }
 
 function hideSidebar() { $('sidebar').classList.remove('open'); $('scrim').hidden = true; }
@@ -468,16 +565,19 @@ function render(forceScroll = false) {
   const area = $('scrollArea');
   const nearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 100;
   const changedThread = renderedThread !== state.active;
-  if (changedThread) { executionContainers.clear(); changeSummaries.clear(); elements.clear(); $('messages').replaceChildren(); renderedThread = state.active; }
+  if (changedThread) { visibleHistory = 120; executionContainers.clear(); changeSummaries.clear(); elements.clear(); $('messages').replaceChildren(); renderedThread = state.active; }
+  $('loadEarlierMessages').hidden = true;
   $('welcome').hidden = !!state.active;
   $('messages').hidden = !state.active;
   renderConversationHeading();
   if (t) {
-    const groups = new Map(subtaskGroups(t).map(group => [group.anchor, group]));
+    const start = Math.max(0, t.items.length - visibleHistory), visibleItems = t.items.slice(start);
+    const groups = new Map(subtaskGroups({ ...t, items: visibleItems }).map(group => [group.anchor, group]));
     const groupedIds = new Set([...groups.values()].flatMap(group => group.itemIds));
-    const liveIds = new Set(t.items.filter(item => !groupedIds.has(item.id) || groups.has(item.id)).map(i => i.id));
+    const liveIds = new Set(visibleItems.filter(item => !groupedIds.has(item.id) || groups.has(item.id)).map(i => i.id));
     for (const [id, el] of elements) if (!liveIds.has(id)) { el.remove(); elements.delete(id); }
-    for (const item of t.items) {
+    $('loadEarlierMessages').hidden = !start; $('loadEarlierMessages').textContent = '加载更早记录（还有 ' + start + ' 条）';
+    for (const item of visibleItems) {
       if (groupedIds.has(item.id) && !groups.has(item.id)) continue;
       let el = elements.get(item.id);
       if (!el) { el = document.createElement('article'); elements.set(item.id, el); $('messages').append(el); }
@@ -486,7 +586,11 @@ function render(forceScroll = false) {
       const live = state.connected && state.streaming && executionStreamReady && !t.runtimeStale;
       const waiting = !!t.requests?.some(request => request.params?.itemId === item.id);
       const active = !!t.busy && !!t.turnId && item.turnId === t.turnId;
-      const signature = JSON.stringify(['userMessage', 'agentMessage', 'plan'].includes(item.type) ? item : [item, turnStatus, live, waiting, active]);
+      const presentation = ['userMessage', 'agentMessage', 'plan'].includes(item.type) ? '' : JSON.stringify([turnStatus, live, waiting, active]);
+      const cached = renderSignatures.get(el);
+      if (cached?.item === item && cached.presentation === presentation) continue;
+      const signature = JSON.stringify(presentation ? [item, turnStatus, live, waiting, active] : item);
+      renderSignatures.set(el, { item, presentation });
       if (el.dataset.signature === signature) continue;
       el.dataset.signature = signature;
       if (item.type === 'userMessage') {
@@ -522,31 +626,11 @@ function render(forceScroll = false) {
           el.append(tags);
         }
       } else if (item.type === 'agentMessage' || item.type === 'plan') {
-        el.className = 'message agent';
-        el.innerHTML = `<div class="turn-duration" hidden></div><div class="message-label"><img src="/favicon.svg" alt="">${item.type === 'plan' ? '执行计划' : '柠檬'}</div><div>${markdown(item.text)}</div>`;
-        if (item.questions?.length) {
-          const summary = document.createElement('div'); summary.className = 'async-question-summary';
-          const label = document.createElement('strong'); label.textContent = item.questionState === 'resolved' ? '补充问题 · 已处理' : item.questionState === 'past' ? '此前的补充问题' : '补充问题'; summary.append(label);
-          for (const question of item.questions) { const p = document.createElement('p'); p.textContent = question.question; summary.append(p); }
-          el.append(summary);
-        }
-        const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-response'; copy.textContent = '复制'; copy.setAttribute('aria-label', '复制这条回复');
-        copy.addEventListener('click', async () => {
-          try { await navigator.clipboard.writeText(item.text || ''); toast('已复制回复'); }
-          catch { notice('浏览器不允许访问剪贴板，请选中文字后复制。'); }
-        });
-        el.querySelector('.message-label').append(copy);
-        for (const code of el.querySelectorAll('pre > code')) { const copyCode = document.createElement('button'); copyCode.type = 'button'; copyCode.className = 'code-copy'; copyCode.textContent = '复制代码'; copyCode.addEventListener('click', async () => { try { await navigator.clipboard.writeText(code.textContent); toast('已复制代码块'); } catch { notice('剪贴板不可用，请手动复制。'); } }); code.parentElement.prepend(copyCode); }
-        for (const link of el.querySelectorAll('[data-file-link]')) link.addEventListener('click', () => openProjectLink(link.dataset.fileLink));
-        for (const link of el.querySelectorAll('a[href]')) {
-          const sqlPath = sqlFileFromRunnerLink(link.href); if (!sqlPath) continue;
-          link.removeAttribute('target'); link.title = '在当前工作台打开 SQL';
-          link.addEventListener('click', event => { event.preventDefault(); openProjectLink(sqlPath); });
-        }
+        replies.update(el, item);
       } else if (item.type === 'imageGeneration') {
         renderGeneratedImage(el, { ...item, turnStatus });
       } else {
-        renderActivity(el, { ...item, turnStatus }, { live, waiting, active, animate: !changedThread && !!item.turnId && (item.turnId === t.turnId || item.turnId === t.latestTurnId) });
+        renderActivity(el, { ...item, turnStatus }, { ...fileChangeOptions(t), live, waiting, active, animate: !changedThread && !!item.turnId && (item.turnId === t.turnId || item.turnId === t.latestTurnId) });
       }
       if (item.type === 'fileChange' && state.workbenchFeatures) {
         const view = el.querySelector('.activity-diff') || document.createElement('button'); view.className = 'text-button activity-diff'; view.textContent = '查看差异 / 回退';
@@ -563,7 +647,7 @@ function render(forceScroll = false) {
   const usage = t?.tokenUsage; $('tokenUsage').textContent = usage ? `${Number(usage.total?.totalTokens || 0).toLocaleString()} tokens${usage.modelContextWindow ? ` · 上下文 ${Math.min(100, Math.round((usage.last?.inputTokens || 0) / usage.modelContextWindow * 100))}%` : ''}` : '';
   $('tokenUsage').title = $('tokenUsage').textContent || '运行时报告的 token 用量';
   updateControls();
-  if (forceScroll || changedThread || nearBottom) requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; updateScrollButton(); });
+  if ((forceScroll || changedThread || nearBottom) && document.getSelection?.()?.isCollapsed !== false) requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; updateScrollButton(); });
   else updateScrollButton();
 }
 
@@ -754,6 +838,7 @@ function startStream() {
   const receiveThread = thread => {
     executionStreamReady = true;
     const previous = state.threads.get(thread.id);
+    if (state.active === thread.id && previous) visibleHistory += Math.max(0, thread.items.length - previous.items.length);
     storeThread(thread);
     const changedFiles = value => JSON.stringify((value?.items || []).filter(item => item.type === 'fileChange' && item.status === 'completed').map(item => item.id));
     if (previous?.busy && !thread.busy || changedFiles(previous) !== changedFiles(thread)) void fileEditor.refresh({ all: true, cwd: thread.cwd });
@@ -763,7 +848,7 @@ function startStream() {
       render();
       syncThreadNotice(thread, previous);
     }
-    if (previous?.busy && !thread.busy) loadHistory().catch(() => {});
+    if (!previous && thread.cwd === state.cwd || previous?.busy && !thread.busy) loadHistory().catch(() => {});
     if (previous?.busy && !thread.busy) void quotaIndicator.refresh();
     if (previous?.busy && !thread.busy) notifyTask('柠檬任务已结束，请查看结果。');
     if ((thread.requests?.length || 0) > (previous?.requests?.length || 0)) notifyTask('柠檬需要你的回复或审批。');
@@ -781,13 +866,19 @@ window.addEventListener('online', () => { if (!state.streaming) void recoverStre
 window.addEventListener('focus', () => { if (!state.streaming) void recoverStream(); });
 window.addEventListener('focus', () => { void modelCatalogRefresh.refresh(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void modelCatalogRefresh.refresh(); });
-for (const event of ['focus', 'pointerdown']) $('model').addEventListener(event, () => { void modelCatalogRefresh.refresh(); });
+$('model').addEventListener('focus', () => { void modelCatalogRefresh.refresh(); });
+$('model').addEventListener('pointerdown', () => { void modelCatalogRefresh.refresh({ force: true }); });
+window.setInterval?.(() => { void modelCatalogRefresh.refresh(); }, 60_000);
 
 async function bootstrap(first = false, options) {
   const data = await api('/api/bootstrap', undefined, options);
   state.csrf = data.csrf;
+  state.submissionEpoch = data.submissionRecovery ? data.submissionEpoch : null;
   state.aiCompletionAvailable = !!data.aiCompletionAvailable;
   state.workbenchFeatures = !!data.workbenchFeatures;
+  state.threadOrganization = !!data.threadOrganization;
+  state.threadOrganizationBatch = !!data.threadOrganizationBatch;
+  threadOrganization?.sync();
   state.computerUseAppApprovals = !!data.computerUseAppApprovals;
   state.questionInputs = data.questionInputs === true;
   state.memorySettings = data.memorySettings === true;
@@ -813,6 +904,53 @@ async function bootstrap(first = false, options) {
   return data;
 }
 
+async function acceptSubmission(record, result = record.result) {
+  const sameDraft = state.cwd === record.cwd && state.active === record.originalThread;
+  if (!record.snapshot) { submissions.forget(record); notice('已确认上次消息送达，会话记录可查看结果；本页草稿保留，请避免重复发送。'); if (record.threadId) await selectThread(record.threadId); return; }
+  drafts.clear(record.cwd, record.originalThread, record.snapshot.draftText);
+  submissions.forget(record);
+  if (!sameDraft) { toast('上次消息已发送，可从会话列表查看。'); return; }
+  // Preserve any draft typed while the request was being submitted.
+  if ($('prompt').value === record.snapshot.draftText) { $('prompt').value = ''; resizePrompt(); }
+  state.active = result.threadId; storage.set('active', result.threadId);
+  if (!state.threads.has(result.threadId)) state.threads.set(result.threadId, await api(`/api/threads/${result.threadId}`));
+  workbench.contextChanged();
+  composerTools.sent(record.snapshot.composerContext);
+  saveDraft();
+  render(true); renderHistory();
+}
+function renderSubmission() {
+  const record = submissions.get(state.cwd, state.active);
+  $('submissionStatus').hidden = !record || record.state === 'sending';
+  if (!record) return;
+  $('submissionStatusText').textContent = record.message || ({ pending: '服务已收到消息，正在确认启动结果。', unknown: '上次发送结果尚未确认，草稿已保留。', notFound: '服务尚无这次提交记录，可以使用原内容重新提交。' })[record.state] || '请先核对上次发送结果。';
+  $('submissionRetry').hidden = record.state !== 'notFound' || !record.snapshot;
+  $('submissionOpen').hidden = !record.threadId;
+}
+$('submissionCheck').addEventListener('click', async () => {
+  const record = submissions.get(state.cwd, state.active); if (!record || state.sending) return;
+  state.sending = true; updateControls();
+  try {
+    const result = await submissions.check(record);
+    if (result.state === 'accepted') await acceptSubmission(record);
+    else if (result.state === 'failed') { submissions.forget(record); notice(result.message || '上次消息未成功发送，草稿已保留。'); }
+  } catch (error) { record.message = error.message; notice(error.message); }
+  finally { state.sending = false; updateControls(); }
+});
+$('submissionRetry').addEventListener('click', async () => {
+  const record = submissions.get(state.cwd, state.active); if (!record || record.state !== 'notFound' || state.sending) return;
+  state.sending = true; updateControls();
+  try { await acceptSubmission(record, await submissions.send(record)); }
+  catch (error) { notice(error.message); }
+  finally { state.sending = false; updateControls(); }
+});
+$('submissionOpen').addEventListener('click', () => { const record = submissions.get(state.cwd, state.active); if (record?.threadId) void selectThread(record.threadId); });
+$('submissionDismiss').addEventListener('click', () => {
+  const record = submissions.get(state.cwd, state.active);
+  if (record && confirm('结束这次发送核对？请先确认会话里是否已执行；之后发送相同内容可能会重复执行。')) { submissions.forget(record); updateControls(); }
+});
+$('followupBehavior').addEventListener('change', updateControls);
+
 $('composer').addEventListener('submit', async event => {
   event.preventDefault();
   if ($('sendButton').disabled || state.sending) return;
@@ -824,15 +962,11 @@ $('composer').addEventListener('submit', async event => {
   const draftCwd = state.cwd, draftThread = state.active;
   state.sending = true; updateControls(); notice(null);
   try {
-    const result = following ? await api('/api/followup', { threadId: state.active, text, behavior: $('followupBehavior').value, editorContext: automaticContext, attachments: composerContext.attachments, capabilities: composerContext.capabilities }) : await api('/api/send', { threadId: state.active, text, cwd: state.cwd, model: $('model').value, modelService: modelService(), ...permissionControl.payload(), ...composerContext, editorContext: automaticContext });
-    drafts.clear(draftCwd, draftThread);
-    // Preserve any draft typed while the request was being submitted.
-    if ($('prompt').value === draftText) { $('prompt').value = ''; resizePrompt(); }
-    state.active = result.threadId; storage.set('active', result.threadId);
-    if (!state.threads.has(result.threadId)) state.threads.set(result.threadId, await api(`/api/threads/${result.threadId}`));
-    workbench.contextChanged();
-    composerTools.sent(composerContext);
-    render(true); renderHistory();
+    const body = following ? { threadId: state.active, text, behavior: $('followupBehavior').value, editorContext: automaticContext, attachments: composerContext.attachments, capabilities: composerContext.capabilities } : { threadId: state.active, text, cwd: state.cwd, model: $('model').value, modelService: modelService(), ...permissionControl.payload(), ...composerContext, editorContext: automaticContext };
+    const record = submissions.begin(draftCwd, draftThread, following ? '/api/followup' : '/api/send', body, { draftText, composerContext });
+    record.originalThread = draftThread;
+    const result = await submissions.send(record);
+    await acceptSubmission(record, result);
   } catch (error) { notice(error.message); }
   finally { state.sending = false; updateControls(); $('prompt').focus(); }
 });
@@ -856,7 +990,8 @@ $('archivedThreads').addEventListener('change', () => { state.archived = $('arch
 $('refreshThreads').addEventListener('click', () => loadHistory().catch(e => notice(e.message)));
 $('loadMore').addEventListener('click', () => loadHistory(true).catch(e => notice(e.message)));
 $('dismissNotice').addEventListener('click', () => notice(null));
-for (const button of document.querySelectorAll('[data-prompt]')) button.addEventListener('click', () => { $('prompt').value = button.dataset.prompt; resizePrompt(); updateControls(); $('prompt').focus(); });
+for (const button of document.querySelectorAll('[data-prompt]')) button.addEventListener('click', () => { const before = $('prompt').value; addContext(button.dataset.prompt); starterUndo = { cwd: state.cwd, thread: state.active, before, after: $('prompt').value }; updateDraftStatus(); });
+$('undoStarterPrompt').addEventListener('click', () => { if (!starterUndo || $('prompt').value !== starterUndo.after || state.cwd !== starterUndo.cwd || state.active !== starterUndo.thread) return; $('prompt').value = starterUndo.before; starterUndo = null; resizePrompt(); saveDraft(); updateControls(); $('prompt').focus(); });
 function showSidebar() {
   if (window.matchMedia('(max-width: 760px)').matches) { $('sidebar').classList.add('open'); $('scrim').hidden = false; }
   else { $('appShell').classList.remove('sidebar-collapsed'); storage.set('sidebarCollapsed', 'false'); }
@@ -870,7 +1005,7 @@ $('closeSidebar').addEventListener('click', () => {
 });
 $('scrim').addEventListener('click', hideSidebar);
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
+  if (event.defaultPrevented || document.querySelector('dialog[open]') || event.target.closest?.('#toolboxPanel, #testPreviewWindow')) return;
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); newThread(); }
   if ((event.metaKey || event.ctrlKey) && event.key === '/') { event.preventDefault(); productUI.showHistory({ focusSearch: true }); }
   if (event.key === 'Escape') { if ($('mainPanel').dataset.chatView === 'history') { productUI.showConversation(); $('chatHistoryButton').focus(); return; } hideSidebar(); if (!event.defaultPrevented && !fileEditor.visible) $('prompt').focus(); }
@@ -880,6 +1015,7 @@ let toastTimer;
 function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false; toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2200); }
 function updateScrollButton() { const area = $('scrollArea'); $('scrollBottom').hidden = !state.active || area.scrollHeight - area.scrollTop - area.clientHeight < 150; }
 $('scrollArea').addEventListener('scroll', updateScrollButton, { passive: true });
+$('loadEarlierMessages').addEventListener('click', () => { const area = $('scrollArea'), top = area.scrollTop, height = area.scrollHeight; visibleHistory += 120; render(); requestAnimationFrame(() => { area.scrollTop = top + area.scrollHeight - height; }); });
 $('scrollBottom').addEventListener('click', () => { $('scrollArea').scrollTop = $('scrollArea').scrollHeight; updateScrollButton(); });
 window.addEventListener('resize', () => {
   positionPopover($('addButton'), $('addMenu')); positionPopover($('permissionButton'), $('permissionMenu'));
@@ -901,14 +1037,15 @@ $('reconnect').addEventListener('click', async () => {
 
 function pinnedThreads() { try { const value = JSON.parse(storage.get('pinnedThreads') || '[]'); return new Set(Array.isArray(value) ? value : []); } catch { return new Set(); } }
 let actionThread = null;
-function openThreadActions(thread = selected()) { if (!thread) return notice('请先选择一个会话。'); actionThread = thread; $('threadRename').value = thread.title; $('threadActionError').textContent = ''; $('threadActionsDialog').showModal(); }
+function openThreadActions(thread = selected()) { if (!thread) return notice('请先选择一个会话。'); actionThread = thread; $('threadRename').value = thread.title; $('threadActionError').textContent = ''; threadOrganization?.prepareActions(thread); $('threadActionsDialog').showModal(); }
 $('conversationTitleButton').addEventListener('click', () => openThreadActions());
 $('closeThreadActions').addEventListener('click', () => $('threadActionsDialog').close());
 for (const button of document.querySelectorAll('[data-thread-action]')) button.addEventListener('click', async () => {
   if (!actionThread) return; const thread = actionThread, action = button.dataset.threadAction;
   for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = true;
   try {
-    if (action === 'pin') { const pins = pinnedThreads(); pins.has(thread.id) ? pins.delete(thread.id) : pins.add(thread.id); storage.set('pinnedThreads', JSON.stringify([...pins])); renderHistory(); }
+    if (action === 'move' || action === 'pin' && threadOrganization?.supported()) await threadOrganization.act(action, thread);
+    else if (action === 'pin') { const pins = pinnedThreads(); pins.has(thread.id) ? pins.delete(thread.id) : pins.add(thread.id); storage.set('pinnedThreads', JSON.stringify([...pins])); renderHistory(); }
     else {
       if (['archive', 'fork', 'compact'].includes(action) && !confirm({ archive: '归档此会话？不会删除项目文件，可以从归档列表恢复。', fork: '从当前会话创建只读分支？不会复制或回滚项目文件，也不会自动继续目标。', compact: '整理此会话的上下文？此操作可能消耗模型额度。' }[action])) return;
       const result = await api('/api/threads/action', { threadId: thread.id, action, name: $('threadRename').value });
@@ -919,7 +1056,7 @@ for (const button of document.querySelectorAll('[data-thread-action]')) button.a
     }
     $('threadActionsDialog').close();
   } catch (error) { $('threadActionError').textContent = error.message; }
-  finally { for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = false; }
+  finally { for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = false; threadOrganization?.sync(); }
 });
 for (const [id, tab] of [['workbenchButton', 'search'], ['quickSearch', 'search'], ['quickGit', 'git'], ['quickTerminal', 'terminal']]) $(id).addEventListener('click', () => workbench.show(tab));
 const nativeLink = document.createElement('a'); nativeLink.href = 'codex://'; nativeLink.textContent = '打开本机桌面客户端 ↗'; nativeLink.className = 'secondary-button'; $('recordingDialog').append(nativeLink);

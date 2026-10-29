@@ -417,6 +417,12 @@ export function createComposerTools({ api, notice, getContext, onChange, onDraft
     get hasPastedText() { return pastedFiles().length > 0; },
     get canSend() { return $('prompt').value.length <= promptLimit && !hasFailedPaste() && !hasPendingPaste() && (!!$('prompt').value.trim() || pastedFiles().some(file => file.pasteState === 'ready')); },
     messageText() { return $('prompt').value.trim() || (pastedFiles().some(file => file.pasteState === 'ready') ? '请读取附加的完整长文本，按其中的要求处理；内容较长时请分段读取。' : ''); },
+    appendText(text) {
+      if (typeof text !== 'string' || !text.trim() || submitting) return false;
+      const prompt = $('prompt'), combined = prompt.value + (prompt.value ? '\n\n' : '') + text;
+      if (text.length >= pasteThreshold || combined.length > promptLimit) return addPastedText(text);
+      prompt.value = combined; inputChanged(); return true;
+    },
     addProjectReference,
     hasProjectReference,
     payload() { return { effort: $('effort').value, plan, attachments: files.filter(f => f.id && (!f.pasteState || f.pasteState === 'ready')).map(f => f.id), capabilities: [...chosen.keys()], ...(draftGoal ? { goal: draftGoal } : {}) }; },

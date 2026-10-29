@@ -22,6 +22,8 @@ import { createEventStream, prepareThread } from './lib/event-stream.mjs';
 import { ModelConnections, COSMOS_MODEL } from './lib/model-connections.mjs';
 import { AppApprovals } from './lib/app-approvals.mjs';
 import { Memories } from './lib/memories.mjs';
+import { ProjectFavorites } from './lib/project-favorites.mjs';
+import { ThreadOrganization } from './lib/thread-organization.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 export function defaultWorkspace(appRoot = root, explicit = process.env.WORKSPACE_CWD) {
@@ -53,17 +55,22 @@ const assets = new Map([
   ['/editor-window.js', ['editor-window.js', 'text/javascript; charset=utf-8']],
   ['/code-highlight.js', ['code-highlight.js', 'text/javascript; charset=utf-8']],
   ['/workbench.js', ['workbench.js', 'text/javascript; charset=utf-8']],
+  ...['toolbox', 'toolbox-core', 'toolbox-worker'].map(name => ['/' + name + '.js', [name + '.js', 'text/javascript; charset=utf-8']]),
+  ['/vendor/toolbox.js', ['vendor/toolbox.js', 'text/javascript; charset=utf-8']],
   ['/schedules.js', ['schedules.js', 'text/javascript; charset=utf-8']],
   ['/schedule-time.js', ['schedule-time.js', 'text/javascript; charset=utf-8']],
   ['/git-submit.js', ['git-submit.js', 'text/javascript; charset=utf-8']],
   ['/artifact-viewer.js', ['artifact-viewer.js', 'text/javascript; charset=utf-8']],
   ['/project-list.js', ['project-list.js', 'text/javascript; charset=utf-8']],
+  ['/thread-organization.js', ['thread-organization.js', 'text/javascript; charset=utf-8']],
   ['/editor-tools.js', ['editor-tools.js', 'text/javascript; charset=utf-8']],
   ['/editor-context.js', ['editor-context.js', 'text/javascript; charset=utf-8']],
   ['/query-history.js', ['query-history.js', 'text/javascript; charset=utf-8']],
   ['/product-ui.js', ['product-ui.js', 'text/javascript; charset=utf-8']],
   ['/task-results.js', ['task-results.js', 'text/javascript; charset=utf-8']],
   ['/execution-view.js', ['execution-view.js', 'text/javascript; charset=utf-8']],
+  ...['draft-journal', 'project-paths', 'message-renderer', 'submission-state'].map(name => ['/' + name + '.js', [name + '.js', 'text/javascript; charset=utf-8']]),
+  ['/live-edits.js', ['live-edits.js', 'text/javascript; charset=utf-8']],
   ['/message-timing.js', ['message-timing.js', 'text/javascript; charset=utf-8']],
   ['/sql-query.js', ['sql-query.js', 'text/javascript; charset=utf-8']],
   ['/sql-parameters.js', ['sql-parameters.js', 'text/javascript; charset=utf-8']],
@@ -101,6 +108,13 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
   const gitSubmit = new GitSubmit(workbench);
   const fileHistory = new FileHistory(projectFiles, fileTools, workspace, stateDir);
   const spreadsheets = new SpreadsheetPreview(workbench), subagents = new Subagents(workspace);
+  const projectFavorites = new ProjectFavorites(stateDir);
+  const threadOrganization = new ThreadOrganization(stateDir, { verifyThread: async (id, project) => {
+    check(bridge.ready, '助手尚未连接，请连接后再整理会话。', 503);
+    const thread = workspace.threads.get(id) || (await bridge.request('thread/read', { threadId: id, includeTurns: false })).thread;
+    return thread?.id === id && thread.cwd && await directory(thread.cwd) === project;
+  } });
+  workbench.threadOrganization = threadOrganization;
   const session = randomBytes(32).toString('hex');
   const csrf = randomBytes(32).toString('hex');
   const clients = new Set();
@@ -188,9 +202,11 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       if (url.pathname === '/api/bootstrap' && req.method === 'GET') {
         const data = bridge.ready ? await workspace.bootstrap() : { connected: false, cwd, models: [], error: startupError || '柠檬正在连接，请稍候或点击重新连接。' };
         const connections = await modelConnections.status().catch(error => ({ error: error.message }));
-        json({ ...data, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true, mcpAppApprovalPersistence: true, computerUseAppApprovals: true, questionInputs: true, memorySettings: true }); return;
+        json({ ...data, submissionRecovery: true, submissionEpoch: workspace.submissions.epoch, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true, mcpAppApprovalPersistence: true, computerUseAppApprovals: true, questionInputs: true, memorySettings: true, threadOrganization: true, threadOrganizationBatch: true }); return;
       }
       if (url.pathname === '/api/model-connections' && req.method === 'GET') { json(await modelConnections.status()); return; }
+      const submissionRoute = url.pathname.match(/^\/api\/submissions\/([a-f0-9-]{36})$/i);
+      if (submissionRoute && req.method === 'GET') { json(workspace.submissions.get(submissionRoute[1], url.searchParams.get('epoch'))); return; }
       if (url.pathname === '/api/models' && req.method === 'GET') {
         check(bridge.ready, '模型服务暂未连接，请稍后刷新列表。', 503);
         json({ models: await workspace.readModels() }); return;
@@ -211,6 +227,8 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         json(await workspace.bootstrap()); return;
       }
       // Browsing local filenames does not depend on the model connection.
+      if (url.pathname === '/api/thread-organization' && req.method === 'GET') { json(await threadOrganization.list(url.searchParams.get('cwd') || cwd)); return; }
+      if (url.pathname === '/api/thread-organization' && req.method === 'POST') { json(await threadOrganization.action(await readBody(req))); return; }
       if (url.pathname === '/api/computer-use/approvals' && req.method === 'GET') { json(await appApprovals.list()); return; }
       if (url.pathname === '/api/computer-use/approvals/revoke' && req.method === 'POST') { json(await appApprovals.revoke(await readBody(req))); return; }
       if (url.pathname === '/api/sql/status' && req.method === 'GET') { json(await sqlRunner.status()); return; }
@@ -222,6 +240,8 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       if (url.pathname === '/api/project/files' && req.method === 'GET') {
         json(await projectFiles.list({ cwd: url.searchParams.get('cwd') || cwd, path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset') || 0), showHidden: url.searchParams.get('showHidden') === '1' })); return;
       }
+      if (url.pathname === '/api/projects' && req.method === 'GET') { json(await projectFavorites.list()); return; }
+      if (url.pathname === '/api/projects' && req.method === 'POST') { json(await projectFavorites.replace((await readBody(req)).projects)); return; }
       if (url.pathname === '/api/project/attach' && req.method === 'POST') {
         json(await projectFiles.attach(workspace.context, await readBody(req))); return;
       }
@@ -276,6 +296,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         if (url.pathname === '/api/git/submit') { json(await gitSubmit.snapshot(query)); return; }
         if (url.pathname === '/api/git/submit/diff') { json(await gitSubmit.diff(query)); return; }
         if (url.pathname === '/api/schedules') { json(await workbench.schedules()); return; }
+        if (url.pathname === '/api/schedules/options') { json(await workbench.scheduleOptions(url.searchParams.get('cwd') || cwd)); return; }
         if (url.pathname === '/api/terminal') { json({ processes: workbench.terminalList() }); return; }
       }
       if (req.method === 'POST' && url.pathname === '/api/git/submit') { json(await gitSubmit.action(await readBody(req))); return; }
@@ -295,7 +316,12 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         json(await workspace.catalog.get(await directory(url.searchParams.get('cwd') || cwd), url.searchParams.get('refresh') === '1')); return;
       }
       if (url.pathname === '/api/threads' && req.method === 'GET') {
-        json(await workspace.list(url.searchParams.get('cwd') || cwd, url.searchParams.get('cursor'), { scope: url.searchParams.get('scope') || 'title', search: url.searchParams.get('search') || '', archived: url.searchParams.get('archived') === '1' })); return;
+        const project = url.searchParams.get('cwd') || cwd;
+        let organization, organizationError;
+        try { organization = await threadOrganization.list(project); }
+        catch (error) { organizationError = error.message; }
+        const result = await workspace.list(project, url.searchParams.get('cursor'), { scope: url.searchParams.get('scope') || 'title', search: url.searchParams.get('search') || '', archived: url.searchParams.get('archived') === '1', includeIds: organization?.threads.filter(item => item.pinned || item.folderId).map(item => item.id) });
+        json({ ...result, organization, organizationError }); return;
       }
       if (url.pathname === '/api/connections' && req.method === 'GET') { json(await workbench.connections(Object.fromEntries(url.searchParams))); return; }
       if (url.pathname === '/api/usage' && req.method === 'GET') { json(await bridge.request('account/rateLimits/read', {})); return; }
@@ -329,7 +355,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
   server.headersTimeout = 15_000;
 
   return {
-    server, workspace, bridge, workbench, modelConnections,
+    server, workspace, bridge, workbench, modelConnections, projectFavorites, threadOrganization,
     async start(port = Number(process.env.PORT || 4317)) {
       check(Number.isInteger(port) && port >= 0 && port <= 65535, 'PORT 必须是有效端口。');
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });

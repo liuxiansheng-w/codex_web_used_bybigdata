@@ -1,18 +1,17 @@
 import { markdown } from './markdown.js';
+import { requestSegments, currentRequest } from './message-timing.js';
+import { excludedProjectPart } from './project-paths.js';
 // Project files for the on-demand changes and artifacts panels.
 export function projectPath(value, cwd) {
   if (typeof value !== 'string' || !cwd) return null;
   let path = value.replace(/^(?:<)|(?:>)$/g, '').replace(/(?::\d+|#L\d+)$/, '');
   if (path.startsWith(cwd.replace(/\/$/, '') + '/')) path = path.slice(cwd.replace(/\/$/, '').length + 1);
-  if (!path || path.startsWith('/') || /^[a-z][\w+.-]*:/i.test(path) || path.includes('\\') || path.split('/').some(p => !p || p === '..' || p.startsWith('.'))) return null;
+  if (!path || path.startsWith('/') || /^[a-z][\w+.-]*:/i.test(path) || path.includes('\\') || path.split('/').some((p, i) => !p || p === '.' || p === '..' || excludedProjectPart(p, i, true) && !(i === 0 && p === 'AIdata' && /\.(xlsx|xls|xlsm)$/i.test(path)))) return null;
   return path;
 }
 
 export function taskResult(thread) {
-  const all = thread?.items || [];
-  const latest = thread?.latestTurnId;
-  const lastUser = all.map(item => item.type).lastIndexOf('userMessage');
-  const items = latest && all.some(item => item.turnId) ? all.filter(item => item.turnId === latest) : all.slice(Math.max(0, lastUser));
+  const request = currentRequest(thread), items = request.user?.pending ? [] : request.items;
   const changes = [], artifacts = new Map();
   for (const item of items) {
     if (item.type === 'fileChange') for (const change of item.changes || []) {
@@ -24,9 +23,11 @@ export function taskResult(thread) {
       if (path) artifacts.set(path, { path, source: '回复中提及，打开时核对文件' });
     }
   }
-  return { changes, artifacts: [...artifacts.values()].slice(0, 50) };
+  return { changes, artifacts: [...artifacts.values()].slice(0, 50), totalArtifacts: artifacts.size };
 }
 
+const changeCounts = new WeakMap();
+function cachedCounts(change) { const cached = changeCounts.get(change); if (cached?.diff === change.diff) return cached.value; const value = diffCounts(change.diff); changeCounts.set(change, { diff: change.diff, value }); return value; }
 function diffCounts(diff) {
   let added = 0, removed = 0, hunk = false, known = false;
   for (const line of String(diff || '').split('\n')) {
@@ -40,29 +41,33 @@ function diffCounts(diff) {
 
 // Only confirmed changes from this turn, never the whole dirty Git workspace.
 export function completedChangeSummaries(thread) {
-  const turns = new Map(); let key = 'history';
-  for (const item of thread?.items || []) {
-    key = item.turnId || (item.type === 'userMessage' ? item.id : key);
-    if (!turns.has(key)) turns.set(key, { key, cwd: thread.cwd, itemIds: [], changes: [], files: new Map(), seen: new Set() });
-    const turn = turns.get(key); turn.itemIds.push(item.id);
-    if (item.type !== 'fileChange' || item.status !== 'completed' || turn.seen.has(item.id)) continue;
-    turn.seen.add(item.id);
-    for (const raw of item.changes || []) {
-      const path = projectPath(raw.path, thread.cwd); if (!path) continue;
-      const movePath = raw.movePath ? projectPath(raw.movePath, thread.cwd) : null;
-      if (raw.movePath && !movePath) continue;
-      const change = { ...raw, path, ...(movePath ? { movePath } : {}), itemId: item.id, status: item.status };
-      const destination = movePath || path, file = turn.files.get(path) || turn.files.get(destination) || { path: destination, originalPath: path, added: 0, removed: 0, known: true, edits: 0 };
-      if (movePath) turn.files.delete(path);
-      Object.assign(file, { path: destination, kind: raw.kind || 'update' });
-      const counts = diffCounts(raw.diff); file.added += counts.added; file.removed += counts.removed; file.known &&= counts.known; file.edits++;
-      turn.files.set(destination, file); turn.changes.push(change);
-    }
+  const turns = new Map();
+  const segments = requestSegments(thread);
+  for (const segment of segments) {
+    if (segment.user?.pending) continue;
+    const key = segment.user ? segment.key : segment.turnId || segment.key;
+    const turn = { key, turnId: segment.turnId, cwd: thread.cwd, itemIds: [segment.user?.id, ...segment.items.map(item => item.id)].filter(Boolean), changes: [], files: new Map(), seen: new Set() };
+    turns.set(key, turn);
+    for (const item of segment.items) {
+      if (item.type !== 'fileChange' || item.status !== 'completed' || turn.seen.has(item.id)) continue;
+      turn.seen.add(item.id);
+      for (const raw of item.changes || []) {
+        const path = projectPath(raw.path, thread.cwd); if (!path) continue;
+        const movePath = raw.movePath ? projectPath(raw.movePath, thread.cwd) : null;
+        if (raw.movePath && !movePath) continue;
+        const change = { ...raw, path, ...(movePath ? { movePath } : {}), itemId: item.id, status: item.status };
+        const destination = movePath || path, file = turn.files.get(path) || turn.files.get(destination) || { path: destination, originalPath: path, added: 0, removed: 0, known: true, edits: 0 };
+        if (movePath) turn.files.delete(path);
+        Object.assign(file, { path: destination, kind: raw.kind || 'update' });
+        const counts = cachedCounts(raw); file.added += counts.added; file.removed += counts.removed; file.known &&= counts.known; file.edits++;
+        turn.files.set(destination, file); turn.changes.push(change);
+      }
   }
-  const latest = [...turns.keys()].at(-1);
+  }
+  const latest = [...turns.values()].at(-1)?.turnId;
   return [...turns.values()].filter(turn => {
-    if (thread.busy && turn.key === (thread.turnId || latest)) return false;
-    const status = thread.turnTimings?.find(timing => timing.id === turn.key)?.status || (turn.key === thread.latestTurnId || (!thread.latestTurnId && turn.key === latest) ? thread.completion : null);
+    if (thread.busy && turn.turnId === (thread.turnId || latest)) return false;
+    const status = thread.turnTimings?.find(timing => timing.id === turn.turnId)?.status || (turn.turnId === thread.latestTurnId || (!thread.latestTurnId && turn.turnId === latest) ? thread.completion : null);
     return ['completed', 'interrupted', 'failed'].includes(status) && turn.files.size;
   }).map(({ seen, ...turn }) => ({ ...turn, files: [...turn.files.values()] }));
 }
@@ -88,7 +93,7 @@ export function createChangeSummary({ onOpen, onReview, onError = () => {} }) {
   review.addEventListener('click', () => act(review, () => onReview(current)));
   function update(summary) {
     current = summary; const next = JSON.stringify(summary); if (next === signature) return; signature = next;
-    el.dataset.turnId = summary.key; el.setAttribute('aria-label', '本轮文件修改');
+    el.dataset.turnId = summary.key; el.setAttribute('aria-label', '本次提问的文件修改');
     setText(title, `已编辑 ${summary.files.length} 个文件`);
     const known = summary.files.every(file => file.known);
     setCounts(total, known, summary.files.reduce((n, file) => n + file.added, 0), summary.files.reduce((n, file) => n + file.removed, 0), '部分行数未提供');
@@ -110,7 +115,7 @@ export function createChangeSummary({ onOpen, onReview, onError = () => {} }) {
       row.counts.title = '本轮各次修改的累计增删行数';
       if (row.el !== cursor) list.insertBefore(row.el, cursor); cursor = row.el.nextSibling;
     }
-    setText(hint, '本轮已确认的文件修改 · 增删行数按各次修改累计');
+    setText(hint, '本次提问的修改记录 · 增删行数累计 · 打开文件查看当前磁盘版本');
   }
   return { el, update };
 }

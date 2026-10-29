@@ -7,8 +7,10 @@ const parent = path => path.replace(/\/+$/, '').split('/').slice(0, -1).join('/'
 const normalize = path => path === '/' ? path : path.replace(/\/+$/, '');
 
 // Only paths are persisted here. File buffers and conversation drafts have their own stores.
-export function createProjectList({ api, onSelect, onGit = () => {}, getContext, getTabs = () => [], notice, storage = localStorage }) {
+export function createProjectList({ api, onSelect, onGit = () => {}, getContext, getTabs = () => [], notice, storage = localStorage, remote = null }) {
   let projects = [], busy = false, collapsed = false, sequence = 0, location = '', nextOffset = null, loading = false, choosing = false;
+  const selectedFolders = new Set();
+  let remoteQueue = Promise.resolve(), remoteReady = !remote, remoteRevision = 0;
   const actions = document.createElement('div'); actions.id = 'projectActionsPopup'; actions.className = 'project-row-menu'; actions.hidden = true; actions.setAttribute('role', 'menu');
   const git = document.createElement('button'); git.type = 'button'; git.textContent = 'Git 提交与推送'; git.setAttribute('role', 'menuitem'); actions.append(git); document.body.append(actions);
   const pull = document.createElement('button'); pull.type = 'button'; pull.textContent = '拉取远程更新…'; pull.setAttribute('role', 'menuitem'); actions.append(pull);
@@ -55,10 +57,37 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   window.addEventListener('resize', () => closeActions());
   try { const saved = JSON.parse(storage.getItem('codex-desk:projects') || '[]'); if (Array.isArray(saved)) projects = [...new Set(saved.filter(path => typeof path === 'string' && path.startsWith('/')).map(normalize))]; } catch {}
   const persist = () => { try { storage.setItem('codex-desk:projects', JSON.stringify(projects)); } catch { notice('浏览器无法保存项目列表，本页仍可使用。'); } };
-  function remember(cwd) { if (!cwd?.startsWith('/')) return; cwd = normalize(cwd); if (!projects.includes(cwd)) { projects.push(cwd); persist(); } render(); }
+  function syncRemote() {
+    if (!remote) return;
+    const value = [...projects];
+    remoteQueue = remoteQueue.then(() => remote.save(value)).catch(() => {
+      if (remoteReady) notice('项目已保存在本机，但暂未同步到服务端；稍后会自动重试。');
+    });
+  }
+  async function loadRemote() {
+    if (!remote) return;
+    const revision = remoteRevision;
+    try {
+      const result = await remote.load();
+      if (!Array.isArray(result?.projects)) return;
+      const serverProjects = [...new Set(result.projects.filter(path => typeof path === 'string' && path.startsWith('/')).map(normalize))];
+      const merged = [...new Set([...serverProjects, ...projects])];
+      if (revision !== remoteRevision && merged.length === projects.length && merged.every((cwd, index) => cwd === projects[index])) return;
+      projects = merged;
+      persist(); render();
+      if (JSON.stringify(serverProjects) !== JSON.stringify(projects)) syncRemote();
+    } catch {}
+    finally { remoteReady = true; }
+  }
+  function remember(cwd) {
+    if (!cwd?.startsWith('/')) return;
+    cwd = normalize(cwd);
+    if (!projects.includes(cwd)) { projects.push(cwd); persist(); remoteRevision++; syncRemote(); }
+    render();
+  }
   function forget(cwd) {
     if (cwd === getContext().cwd) throw new Error('请先切换到其他项目，再从列表移除此项目。');
-    projects = projects.filter(path => path !== cwd); persist(); render();
+    projects = projects.filter(path => path !== cwd); persist(); remoteRevision++; syncRemote(); render();
   }
   function render() {
     closeActions();
@@ -84,7 +113,10 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   }
   function pickerState() {
     $('projectPicker').setAttribute('aria-busy', String(loading || choosing));
-    $('chooseProject').disabled = loading || choosing || !location || normalize($('projectLocation').value.trim()) !== location;
+    const currentLocation = normalize($('projectLocation').value.trim()) === location;
+    const hasSelection = selectedFolders.size > 0;
+    $('chooseProject').disabled = loading || choosing || (!hasSelection && (!location || !currentLocation));
+    $('chooseProject').textContent = hasSelection ? `添加并打开 ${selectedFolders.size} 个项目` : '添加并打开项目';
     $('projectUp').disabled = choosing || !location || location === '/';
     $('projectBrowse').disabled = choosing; $('projectLocation').readOnly = choosing;
     $('closeProjectPicker').disabled = choosing; $('cancelProjectPicker').disabled = choosing;
@@ -92,28 +124,43 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   }
   async function browse(path, append = false) {
     if (choosing) return;
+    if (!append) selectedFolders.clear();
     const generation = ++sequence; loading = true; $('projectPickerError').textContent = ''; pickerState();
     try {
       if (!path.startsWith('/')) throw new Error('请输入本机文件夹的绝对路径，例如 /Users/你的名字/Desktop。');
       const result = await api(`/api/project/files?cwd=${encodeURIComponent(path)}${append ? `&offset=${nextOffset}` : ''}`);
       if (generation !== sequence || !$('projectPicker').open) return;
-      location = result.cwd; nextOffset = result.nextOffset; $('projectLocation').value = location; $('projectChosenPath').textContent = location;
+      location = result.cwd; nextOffset = result.nextOffset; $('projectLocation').value = location;
       if (!append) $('projectFolders').replaceChildren();
       for (const entry of result.entries.filter(item => item.kind === 'folder')) {
-        const button = document.createElement('button'); button.type = 'button'; button.className = 'project-folder'; button.innerHTML = folderIcon;
-        const label = document.createElement('span'); label.textContent = entry.name; button.append(label); button.title = `打开文件夹 ${entry.name}`;
-        button.addEventListener('click', () => browse(`${location === '/' ? '' : location}/${entry.name}`)); $('projectFolders').append(button);
+        const relative = entry.path || entry.name;
+        const absolute = `${result.cwd === '/' ? '' : result.cwd}/${relative}`;
+        const row = document.createElement('div'); row.className = 'project-folder'; row.dataset.cwd = absolute;
+        const check = document.createElement('input'); check.type = 'checkbox'; check.className = 'project-folder-check'; check.checked = selectedFolders.has(absolute); check.setAttribute('aria-label', `选择项目 ${entry.name}`);
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'project-folder-open'; button.innerHTML = folderIcon;
+        const label = document.createElement('span'); label.textContent = entry.name; button.append(label); button.title = `进入文件夹 ${entry.name}`;
+        check.addEventListener('click', event => event.stopPropagation());
+        check.addEventListener('change', () => { if (check.checked) selectedFolders.add(absolute); else selectedFolders.delete(absolute); pickerState(); renderChosen(); });
+        button.addEventListener('click', () => browse(absolute));
+        row.addEventListener('click', event => { if (event.target.closest('input,button')) return; browse(absolute); });
+        row.append(check, button); $('projectFolders').append(row);
       }
-      $('projectPickerHint').textContent = result.limited ? '目录条目过多，列表已截断；可直接输入目标文件夹的绝对路径。' : '单击文件夹进入；点击下方按钮，将当前文件夹加入项目列表。隐藏项、依赖及排除目录不显示。';
+      renderChosen();
+      $('projectPickerHint').textContent = result.limited ? '目录条目过多，列表已截断；可直接输入目标文件夹的绝对路径。' : '单击文件夹进入；勾选多个文件夹后可一次加入项目列表。隐藏项、依赖及排除目录不显示。';
       $('projectFoldersEmpty').hidden = $('projectFolders').children.length > 0;
     } catch (error) { if (generation === sequence) { location = ''; nextOffset = null; $('projectChosenPath').textContent = '尚未选择有效文件夹'; $('projectFolders').replaceChildren(); $('projectPickerError').textContent = error.message; } }
     finally { if (generation === sequence) { loading = false; pickerState(); } }
   }
+  function renderChosen() {
+    const paths = [...selectedFolders];
+    $('projectChosenLabel').textContent = paths.length ? `已选 ${paths.length} 个项目` : '将添加此文件夹';
+    $('projectChosenPath').textContent = paths.length ? paths.map(basename).join('、') : location;
+  }
   function showPicker() {
-    if (busy) return; location = ''; nextOffset = null; $('projectFolders').replaceChildren(); $('projectChosenPath').textContent = '读取中…';
+    if (busy) return; location = ''; nextOffset = null; selectedFolders.clear(); $('projectFolders').replaceChildren(); $('projectChosenPath').textContent = '读取中…';
     $('projectPicker').showModal(); $('projectLocation').value = parent(getContext().cwd || '/'); browse($('projectLocation').value); $('projectLocation').focus();
   }
-  const close = () => { if (!choosing) { sequence++; loading = false; $('projectPicker').close(); $('addProjectButton').focus(); } };
+  const close = () => { if (!choosing) { sequence++; loading = false; selectedFolders.clear(); $('projectPicker').close(); $('addProjectButton').focus(); } };
   $('addProjectButton').addEventListener('click', showPicker);
   $('collapseProjects').addEventListener('click', () => { collapsed = !collapsed; $('collapseProjects').textContent = collapsed ? '+' : '−'; $('collapseProjects').setAttribute('aria-expanded', String(!collapsed)); render(); });
   $('projectLocationForm').addEventListener('submit', event => { event.preventDefault(); browse($('projectLocation').value.trim()); });
@@ -124,10 +171,15 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   $('projectPicker').addEventListener('cancel', event => { event.preventDefault(); close(); });
   $('chooseProject').addEventListener('click', async () => {
     if ($('chooseProject').disabled) return; choosing = true; pickerState(); $('projectPickerError').textContent = '';
-    try { if (await onSelect(location)) { remember(getContext().cwd); $('projectPicker').close(); } }
+    try {
+      const targets = selectedFolders.size ? [...selectedFolders] : [location];
+      for (const target of targets) { if (!await onSelect(target)) throw new Error(`无法打开项目：${target}`); remember(target); }
+      selectedFolders.clear(); $('projectPicker').close();
+    }
     catch (error) { $('projectPickerError').textContent = error.message; }
     finally { choosing = false; pickerState(); }
   });
   render();
+  void loadRemote();
   return { remember, forget, list: () => [...projects], refresh: render, showPicker, setBusy(value) { if (busy !== value) { busy = value; render(); } } };
 }

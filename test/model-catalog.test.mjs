@@ -55,3 +55,20 @@ test('model catalog refresh throttles, coalesces and discards stale responses wi
   clock += 60_000; const failed = control.refresh(); await Promise.resolve(); reject(new Error('offline')); await failed;
   assert.equal(errors, 1); assert.deepEqual(current, ['old', 'new']); assert.equal(calls, 3);
 });
+
+test('model catalog refresh can force an immediate chooser refresh while keeping requests coalesced', async () => {
+  let clock = 10_000, calls = 0, resolve, current = ['old'], started = 0, finished = 0;
+  const control = createModelCatalogRefresh({
+    now: () => clock,
+    load: () => { calls++; return new Promise(ok => { resolve = ok; }); },
+    onStart: () => { started++; },
+    onFinish: () => { finished++; },
+    apply: models => { current = models; },
+  });
+  control.markLoaded();
+  const first = control.refresh({ force: true }), second = control.refresh({ force: true });
+  assert.equal(first, second); assert.equal(calls, 0); await Promise.resolve();
+  assert.equal(calls, 1); assert.equal(started, 1); resolve({ models: ['old', 'new'] }); await first;
+  assert.deepEqual(current, ['old', 'new']); assert.equal(finished, 1);
+  clock += 1_000; await control.refresh(); assert.equal(calls, 1);
+});

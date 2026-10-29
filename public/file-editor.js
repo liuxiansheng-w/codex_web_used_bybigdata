@@ -447,6 +447,9 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     $('undoFileSync').hidden = !active?.mergeUndo || !!active?.conflict;
     $('undoFileSync').disabled = !active || active.view.input.value !== active.mergeUndo?.after || loading || saving || uiLocked();
     $('editorStatus').textContent = loading ? '正在读取文件…' : saving ? '正在写入磁盘…' : !active?.file ? '尚未读取文件' : !sameProject(active) ? '请切回原项目' : active.diskChanged ? '磁盘有更新 · 草稿已保留' : active.syncError ? '自动同步暂不可用' : !active.file.writable ? active.file.readOnlyReason : changed ? active.mergeUndo ? '已合并磁盘更新 · 未保存' : '未保存' : active.syncedAt ? '已自动同步' : '已同步';
+    $('editorVersionBadge').textContent = loading ? '读取中' : changed ? '未保存草稿' : active?.preview ? '磁盘预览' : '当前磁盘';
+    $('editorVersionBadge').dataset.versionKind = changed ? 'draft' : 'disk';
+    $('editorDiskVersion').hidden = !changed || !!active?.preview; $('editorDiskVersion').disabled = !active || loading || saving || uiLocked();
     $('editorStatus').title = active?.syncError || (active?.syncedAt ? `最近同步：${new Date(active.syncedAt).toLocaleTimeString('zh-CN')}` : '自动检查磁盘更新；未保存的编辑不会被覆盖');
     $('fileEditor').classList.toggle('preview-active', !!active?.preview);
     if (active?.preview) { $('editorStatus').textContent = loading ? '正在读取文档…' : active.error || (active.syncError ? '文档自动同步暂不可用' : active.diskChanged ? '文件已更新，可重新读取' : '文档预览 · 自动检查文件更新'); $('editorFormat').textContent = ''; $('editorCursor').textContent = ''; }
@@ -818,6 +821,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     setError(doc, '已撤销最近一次自动合并，未保存编辑已保留。可查看磁盘最新代码。', true);
   });
   $('keepLocalVersion').addEventListener('click', () => { comparison = null; $('fileConflictDialog').close(); });
+  $('editorDiskVersion').addEventListener('click', () => showFileVersions(true));
   $('loadDiskVersion').addEventListener('click', async () => {
     const doc = comparison; comparison = null; $('fileConflictDialog').close();
     if (doc && exists(doc)) await reload(doc);
@@ -847,7 +851,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     inspect(entry) { const doc = documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd)); return doc?.file ? { ...doc.file, content: doc.view.input.value, dirty: dirty(doc), saving: doc.saving, loading: doc.loading } : null; },
     saveFile(entry) { return save(documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd))); },
     hide() { rememberSource(active); $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); onChange(); queueSession(); },
-    get current() { return active?.file ? { ...active.file, id: active.id, content: active.view.input.value, start: active.view.input.selectionStart, end: active.view.input.selectionEnd, composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
+    get current() { return active?.file ? { ...active.file, id: active.id, content: active.view.input.value, dirty: dirty(active), start: active.view.input.selectionStart, end: active.view.input.selectionEnd, composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
     previewCompletion(text = '', snapshot) {
       if (text && (!matches(snapshot) || snapshot.language !== 'sql' || snapshot.content.length > 200000)) return false;
       for (const doc of documents) { if (doc.view.ghost) { doc.view.ghost = null; doc.view.lastText = null; } }
@@ -865,6 +869,14 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       update(); revealCaret(active); return true;
     },
     replace(content, expected) { if (!active?.file || active.id !== expected.id || active.view.input.value !== expected.content || !writable(active) || uiLocked()) return false; active.view.input.setRangeText(content, 0, active.view.input.value.length, 'preserve'); update(); return true; },
+    applyToolboxResult(text, expected, { wholeFile = false } = {}) {
+      if (typeof text !== 'string' || !matches(expected)) return false;
+      const from = wholeFile ? 0 : expected.start, to = wholeFile ? active.view.input.value.length : expected.end;
+      if (active.view.input.value.length - (to - from) + text.length > active.view.input.maxLength) throw new Error('处理结果超过当前文件的编辑大小上限，请下载结果。');
+      active.view.input.focus({ preventScroll: true });
+      applyKeyboardEdit(active, { from, to, text, start: from, end: from + text.length }, { reveal: true });
+      return true;
+    },
     setSearch(query, direction = 0) {
       if (query) setMarkdownMode('source');
       searchQuery = query;

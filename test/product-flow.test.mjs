@@ -5,6 +5,43 @@ import { EventEmitter } from 'node:events';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { taskResult, projectPath } from '../public/task-results.js';
 import { Workspace } from '../lib/workspace.mjs';
+import { createDraftJournal } from '../public/draft-journal.js';
+import { createDraftStore } from '../public/interactions.js';
+import { runTool } from '../public/toolbox-core.js';
+
+test('test preview follows real streamed tool image references and never submits actions or disturbs drafts', async t => {
+  const { $, window, document, events, thread, settle, input, open, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  await open('a.py'); input('fileEditorText', 'keep unsaved code'); input('prompt', 'keep unsent message');
+  const before = requests.length, previewUrl = '/api/attachments/images/12345678-1234-1234-1234-123456789abc';
+  const items = [{ id: 'u1', type: 'userMessage', turnId: 'turn1', text: '只测试虚构页面' }, { id: 'shot', type: 'mcpToolCall', title: 'cua_repl / js', turnId: 'turn1', status: 'completed', surface: { kind: 'browser', label: '内置浏览器' }, attachments: [{ kind: 'image', name: '工具图片', previewUrl }] }];
+  events.emit('thread', { ...thread, revision: 3, busy: true, turnId: 'turn1', latestTurnId: 'turn1', items });
+  assert.equal($('testPreviewWindow').hidden, false); const image = $('testPreviewImage').querySelector('img'); assert.equal(image.getAttribute('src'), previewUrl);
+  events.emit('connection', { connected: false }); assert.match($('testPreviewStatus').textContent, /同步/); assert.equal($('testPreviewImage').querySelector('img'), image);
+  assert.equal($('prompt').value, 'keep unsent message'); assert.equal($('fileEditorText').value, 'keep unsaved code');
+  $('testPreviewMinimize').click(); $('testPreviewClose').click(); assert.equal($('testPreviewWindow').hidden, true);
+  assert.equal(requests.slice(before).some(request => request.body), false);
+  $('testPreviewToggle').click(); $('testPreviewWindow').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); assert.equal($('testPreviewWindow').hidden, true);
+});
+
+test('global toolbox sits beside More Tools, processes editor drafts locally and preserves chat and tabs', async t => {
+  const { $, document, window, input, open, settle, requests } = await page(t);
+  window.Worker = class {
+    postMessage(payload) { runTool(payload).then(result => { if (!this.stopped) this.onmessage({ data: { result } }); }); }
+    terminate() { this.stopped = true; }
+  };
+  assert.equal($('toolboxButton').parentElement.classList.contains('workspace-shortcuts'), true);
+  assert.equal($('toolboxButton').nextElementSibling.textContent, '更多工具');
+  await open('a.py'); input('fileEditorText', '{"id":9007199254740993}'); input('prompt', 'keep chat draft');
+  const originalTextarea = $('fileEditorText'); originalTextarea.setSelectionRange(0, originalTextarea.value.length);
+  $('editorMoreToggle').click(); $('editorToolbox').click(); assert.equal($('toolboxInput').value, '{"id":9007199254740993}');
+  $('toolboxRun').click(); await settle(() => !$('toolboxInsert').disabled); $('toolboxInsert').click();
+  assert.equal($('toolboxPanel').hidden, true); assert.equal($('fileEditorText'), originalTextarea); assert.match(originalTextarea.value, /\n  "id": 9007199254740993/);
+  assert.equal($('prompt').value, 'keep chat draft'); assert.equal(requests.some(request => /\/api\/(send|followup|project\/save|sql\/query|terminal\/start)/.test(request.route)), false);
+  $('toolboxButton').click(); assert.equal($('toolboxInput').value, '{"id":9007199254740993}');
+  const before = $('threadTitle').textContent; $('toolboxInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true })); assert.equal($('threadTitle').textContent, before);
+  $('toolboxInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); assert.equal($('toolboxPanel').hidden, true);
+});
 test('schedule settings preserve their form and chat drafts across closing, refresh and navigation', async t => {
   const { $, document, window, input, settle } = await page(t);
   const originalFetch = globalThis.fetch;
@@ -308,7 +345,7 @@ test('live patches update replies and approvals; manual reconnect preserves the 
   assert.equal(requests.some(request => request.body), false);
 });
 
-async function page(t, stored = {}, terminalProcesses = [], features = false, appApprovalPersistence = true) {
+async function page(t, stored = {}, terminalProcesses = [], features = false, appApprovalPersistence = true, organization = null) {
   const errors = [], vc = new VirtualConsole(); vc.on('jsdomError', error => errors.push(error.message));
   const dom = new JSDOM(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'), { url: 'http://localhost:4318', pretendToBeVisual: true, virtualConsole: vc });
   const { window } = dom, document = window.document, $ = id => document.getElementById(id);
@@ -330,9 +367,11 @@ async function page(t, stored = {}, terminalProcesses = [], features = false, ap
   globalThis.fetch = async (route, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null; requests.push({ route, body }); const url = new URL(route, 'http://localhost'); let data;
     switch (url.pathname) {
-      case '/api/bootstrap': data = { connected: true, csrf: 'test', cwd: '/project', models: [], workbenchFeatures: features, mcpAppApprovalPersistence: appApprovalPersistence, computerUseAppApprovals: true, questionInputs: true, memorySettings: true, auth: { loggedIn: true }, permissions: { options: [{ id: 'workspace-write', enabled: true }] } }; break;
+      case '/api/bootstrap': data = { connected: true, csrf: 'test', cwd: '/project', models: [], workbenchFeatures: features, mcpAppApprovalPersistence: appApprovalPersistence, computerUseAppApprovals: true, questionInputs: true, memorySettings: true, threadOrganization: !!organization, threadOrganizationBatch: !!organization && organization.batch !== false, auth: { loggedIn: true }, permissions: { options: [{ id: 'workspace-write', enabled: true }] } }; break;
       case '/api/usage': data = { rateLimits: { primary: { usedPercent: 54, windowDurationMins: 10080 } } }; break;
-      case '/api/threads': data = { cwd: '/project', threads: [thread] }; break;
+      case '/api/projects': data = { projects: ['/project'] }; break;
+      case '/api/threads': data = { cwd: '/project', threads: [thread], organization: organization?.snapshot }; break;
+      case '/api/thread-organization': data = body ? await organization.action(body) : organization.snapshot; break;
       case '/api/threads/t1': data = thread; break;
       case '/api/project/files': {
         const folder = url.searchParams.get('path') || '', prefix = folder ? folder + '/' : '', entries = new Map();
@@ -440,7 +479,7 @@ test('long text composer sends file references, retains failed drafts and suppor
   assert.equal($('prompt').value, '核对附件完整内容'); assert.equal(document.querySelectorAll('.pasted-text-chip').length, 1);
   assert.deepEqual(sends[0].body.attachments, ['long-file']); assert.equal(sends[0].body.text, '核对附件完整内容');
   assert.ok(JSON.stringify(sends[0]).length < 1500); assert.equal(sends.length, 1);
-  failSend = false; $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  failSend = false; $('submissionDismiss').click(); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await settle(() => $('threadTitle').textContent === 'Task' && !document.querySelector('.pasted-text-chip'));
   events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'running' });
   input('prompt', ''); paste(); await settle(() => !$('sendButton').disabled);
@@ -619,7 +658,7 @@ test('startup restores file layout with the active conversation and preserves pe
   await settle(() => !$('fileEditorText').readOnly);
   assert.equal($('workSurface').dataset.mode, 'files'); assert.equal($('threadTitle').textContent, 'Task'); assert.equal($('fileEditorText').value, 'x=1\n');
   window.dispatchEvent(new window.Event('pagehide'));
-  assert.deepEqual(JSON.parse(window.localStorage.getItem('codex-desk:editorDrafts')), [draft], 'metadata recovery must not clear a pending draft');
+  assert.deepEqual(createDraftJournal({ storage: window.localStorage, name: 'editorDrafts' }).latest().map(record => record.value), [draft], 'metadata recovery must not clear a migrated pending draft');
   $('recoverDraftsNow').click(); await settle(() => $('fileEditorText').value === 'x=99\n');
   assert.equal($('editorDirty').hidden, false); assert.equal($('draftRecovery').hidden, true);
   assert.equal(requests.filter(request => /\/save|\/send|\/sql\/query|\/completion/.test(request.route)).length, 0);
@@ -738,7 +777,7 @@ test('unsent prompt exit protection, unified settings, full-project search and c
   input('prompt', '尚未发送的长需求'); assert.equal($('draftChoice').hidden, false);
   $('newThread').click(); assert.equal($('prompt').value, '尚未发送的长需求', 'repeating new conversation must not silently erase the unsent draft');
   const unload = new window.Event('beforeunload', { cancelable: true }); window.dispatchEvent(unload); assert.equal(unload.defaultPrevented, true);
-  $('enableDraftRecovery').click(); assert.equal(localStorage.getItem('codex-desk:persistDrafts'), 'true'); assert.match(localStorage.getItem('codex-desk:promptDrafts'), /尚未发送/);
+  $('enableDraftRecovery').click(); assert.equal(localStorage.getItem('codex-desk:persistDrafts'), 'true'); assert.match(createDraftStore({ storage: localStorage }).read('/project', null).text, /尚未发送/);
   $('settingsButton').click(); assert.equal(document.querySelector('[data-panel=preferences]').hidden, false); assert.equal($('workbenchDialog').tagName, 'SECTION');
   assert.equal($('prompt').readOnly, false); assert.equal(document.querySelector('[data-tab=search]').hidden, true);
   $('closeWorkbench').click(); input('fileSearch', 'nested');
@@ -810,6 +849,119 @@ test('chat shows a file summary without restoring the result dashboard, and revi
   assert.equal($('currentThreadStatus').textContent, '需检查'); events.emit('error'); assert.equal($('currentThreadStatus').textContent, '待核实');
   document.querySelector('[data-tab=files]').click(); input('managePath', 'nested/example.py');
   assert.equal($('manageCreateParent').textContent, '新建位置：nested');
+});
+
+test('live editing popup follows native snapshots in tabs without file reads, draft changes or stale conversation content', async t => {
+  const { $, document, window, settle, events, thread, requests, open, input } = await page(t);
+  await open('a.py'); input('fileEditorText', 'my unsaved code');
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  input('prompt', 'my unsent message');
+  assert.equal($('liveEditsWindow').hidden, true); $('liveEditsToggle').click(); assert.equal($('liveEditsWindow').hidden, false);
+  const before = requests.length, item = { id: 'edit', type: 'fileChange', turnId: 'turn', status: 'inProgress', patchStreaming: true, changes: [{ path: '/project/a.py', kind: 'update', diff: '@@ -1 +1,2 @@\n-x=1\n+x=2\n+print(x)' }] };
+  let revision = 1; const emit = (extra = {}) => events.emit('thread', { ...thread, revision: ++revision, busy: true, turnId: 'turn', latestTurnId: 'turn', items: [item], ...extra });
+  emit(); assert.equal($('liveEditsTabs').children.length, 1); assert.match($('liveEditsLines').textContent, /x=2/); assert.doesNotMatch($('liveEditsLines').textContent, /x=1/);
+  const originalRow = $('liveEditsLines').querySelector('[data-kind=add] .live-edit-code');
+  item.changes[0].diff += '\n'; emit(); assert.equal($('liveEditsLines').querySelector('[data-kind=add] .live-edit-code'), originalRow);
+  item.changes.push({ path: '/project/b.py', kind: 'add', diff: '@@ -0,0 +1 @@\n+<script>inert</script>' }); emit();
+  assert.equal($('liveEditsTabs').children.length, 2); assert.equal($('liveEditsTabs').querySelector('[aria-selected=true]').textContent, 'b.py');
+  assert.equal($('liveEditsLines').querySelector('script'), null);
+  $('liveEditsTabs').querySelector('[role=tab]').click(); assert.equal($('liveEditsFollow').getAttribute('aria-pressed'), 'false');
+  const range = document.createRange(); range.selectNodeContents($('liveEditsLines').querySelector('[data-kind=add] .live-edit-code')); window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+  item.changes[0].diff = '@@ -1 +1,2 @@\n-x=1\n+x=200\n+print(x)'; emit();
+  assert.equal(window.getSelection().toString(), 'x=2'); assert.match($('liveEditsHint').textContent, /取消文本选区/);
+  window.getSelection().removeAllRanges(); document.dispatchEvent(new window.Event('selectionchange')); assert.match($('liveEditsLines').textContent, /x=200/);
+  item.changes[1].diff += '\n'; emit(); assert.equal($('liveEditsTabs').querySelector('[aria-selected=true]').textContent, 'a.py');
+  $('liveEditsDiff').click(); assert.match($('liveEditsLines').textContent, /x=1/);
+  item.changes[0].diff += '\n'; emit();
+  $('liveEditsTabs').lastElementChild.querySelector('[role=tab]').click(); $('liveEditsFollow').click();
+  assert.equal($('liveEditsTabs').querySelector('[aria-selected=true]').textContent, 'a.py', 'resume follows the most recently updated file');
+  $('liveEditsTabs').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  assert.equal($('liveEditsTabs').querySelector('[aria-selected=true]').textContent, 'b.py');
+  $('liveEditsTabs').querySelector('[role=tab]').click();
+  emit({ requests: [{ key: 'approve', method: 'item/fileChange/requestApproval', params: { itemId: 'edit', threadId: 't1' } }] }); assert.match($('liveEditsStatus').textContent, /等待审批/);
+  events.emit('connection', { connected: false }); assert.equal($('liveEditsWindow').dataset.executionState, 'unknown');
+  const nativeSnapshot = JSON.stringify(item);
+  document.querySelector('[aria-label="关闭文件标签：a.py"]').click();
+  assert.equal($('liveEditsTabs').querySelector('[aria-selected=true]').textContent, 'b.py');
+  document.querySelector('[aria-label="关闭文件标签：b.py"]').click();
+  assert.equal($('liveEditsTabs').children.length, 0);
+  document.querySelector('#liveEditsTree [data-path="/project/a.py"]').click();
+  assert.match($('liveEditsLines').textContent, /x=200/); assert.equal(JSON.stringify(item), nativeSnapshot);
+  emit({ turnId: 'next', latestTurnId: 'next' }); assert.equal($('liveEditsTabs').children.length, 0); assert.equal($('liveEditsLines').textContent, '');
+  assert.equal($('liveEditsTree').children.length, 0);
+  assert.equal($('fileEditorText').value, 'my unsaved code'); assert.equal($('prompt').value, 'my unsent message');
+  assert.equal(requests.length, before, 'floating preview makes no data or model requests');
+  assert.equal(JSON.stringify(window.localStorage).includes('x=200'), false);
+  $('liveEditsClose').click(); assert.equal($('liveEditsWindow').hidden, true); assert.equal($('liveEditsToggle').getAttribute('aria-pressed'), 'false');
+});
+
+test('followup clocks and the editing popup share the current question without changing drafts or requesting data', async t => {
+  const { $, document, settle, events, thread, requests, open, input } = await page(t);
+  await open('a.py'); input('fileEditorText', 'unsaved code');
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  input('prompt', 'unsent message'); $('liveEditsToggle').click();
+  const originalNow = Date.now, start = originalNow() - 881000; Date.now = () => start + 881000;
+  t.after(() => { Date.now = originalNow; });
+  const before = requests.length;
+  const items = [
+    { id: 'u1', type: 'userMessage', turnId: 'turn', timestamp: start, text: 'first question' },
+    { id: 'a1', type: 'agentMessage', turnId: 'turn', timestamp: start + 1000, text: 'first reply' },
+    { id: 'old-edit', type: 'fileChange', turnId: 'turn', status: 'inProgress', changes: [{ path: '/project/old.py', kind: 'add', diff: '@@ -0,0 +1 @@\n+old = 1' }] },
+  ];
+  let revision = 1;
+  const emit = (extra = {}) => events.emit('thread', { ...thread, revision: ++revision, busy: true, turnId: 'turn', latestTurnId: 'turn', turnTimings: [{ id: 'turn', status: 'inProgress', startedAt: start }], items: structuredClone(items), ...extra });
+  emit(); assert.match($('runStatusText').textContent, /14 分钟 41 秒/); assert.equal($('liveEditsTabs').children.length, 1);
+  items.push({ id: 'u2', type: 'userMessage', turnId: 'turn', timestamp: start + 660000, text: 'followup' }, { id: 'a2', type: 'agentMessage', turnId: 'turn', timestamp: start + 670000, text: 'new reply' }); emit();
+  assert.match($('runStatusText').textContent, /3 分钟 41 秒/);
+  assert.deepEqual([...document.querySelectorAll('.turn-duration:not([hidden])')].map(node => node.textContent), ['本段用时 11 分钟', '已用时 3 分钟 41 秒']);
+  assert.equal($('liveEditsTabs').children.length, 0); assert.equal($('liveEditsLines').textContent, '');
+  items.push({ id: 'new-edit', type: 'fileChange', turnId: 'turn', status: 'inProgress', changes: [{ path: '/project/new.py', kind: 'add', diff: '@@ -0,0 +1 @@\n+current = 1' }] }); emit();
+  assert.equal($('liveEditsTabs').querySelector('[role=tab]').textContent, 'new.py');
+  $('liveEditsClose').click(); $('liveEditsToggle').click(); assert.equal($('liveEditsTabs').children.length, 1);
+  assert.equal($('fileEditorText').value, 'unsaved code'); assert.equal($('prompt').value, 'unsent message');
+  assert.equal(requests.length, before);
+});
+
+test('AI edits show live inline diffs before disk changes and preserve unsaved buffers when confirmed files synchronize', async t => {
+  const { $, document, window, settle, events, thread, requests, files, open, input } = await page(t, {}, [], true);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (route, options) => {
+    const response = await originalFetch(route, options);
+    if (!route.startsWith('/api/project/file?')) return response;
+    const data = await response.json(); return { ...response, json: async () => ({ ...data, version: data.content }) };
+  };
+  await open('a.py'); await open('b.py'); input('fileEditorText', 'y=99 # my draft\n');
+  const editor = $('fileEditorText'); editor.focus(); editor.setSelectionRange(2, 4);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  input('prompt', '保留聊天草稿');
+  editor.focus();
+  const changed = { id: 'file-edit', turnId: 'edit-turn', type: 'fileChange', status: 'inProgress', changes: [
+    { path: '/project/a.py', kind: 'update', diff: '@@ -1 +1 @@\n-x=1\n+x=2\n' },
+    { path: '/project/b.py', kind: 'update', diff: '@@ -1 +1 @@\n-y=1\n+y=3\n' },
+  ] };
+  const reads = () => requests.filter(request => request.route.startsWith('/api/project/file?')).length, before = reads();
+  events.emit('thread', { ...thread, revision: 2, items: [changed], busy: true, turnId: 'edit-turn', latestTurnId: 'edit-turn' });
+  const card = document.querySelector('.file-change-activity'), code = card.querySelector('[data-kind=add] .file-diff-code');
+  assert.equal(card.querySelector('.activity-details').open, true); assert.equal(code.textContent, 'x=2');
+  assert.equal(reads(), before, 'proposed diffs render without reading or writing files');
+  assert.equal($('fileEditorText'), editor); assert.equal(editor.value, 'y=99 # my draft\n'); assert.equal(document.activeElement, editor);
+  assert.equal(files['a.py'], 'x=1\n'); assert.equal($('workbenchDialog').hidden, true);
+  const selection = window.getSelection(), range = document.createRange(); range.selectNodeContents(code); selection.removeAllRanges(); selection.addRange(range);
+  events.emit('thread', { ...thread, revision: 3, items: [{ ...changed, output: '应用中' }], busy: true, turnId: 'edit-turn', latestTurnId: 'edit-turn' });
+  assert.equal(card.querySelector('[data-kind=add] .file-diff-code'), code); assert.equal(selection.toString(), 'x=2');
+  assert.equal(reads(), before); assert.equal($('prompt').value, '保留聊天草稿');
+  events.emit('connection', { connected: false }); assert.equal(card.dataset.executionState, 'unknown'); assert.match(card.textContent, /状态待同步/);
+  assert.equal(code.textContent, 'x=2'); assert.equal(card.querySelector('.file-change-path').disabled, false);
+  events.emit('snapshot', { connected: true, threads: [{ ...thread, revision: 4, items: [changed], busy: true, turnId: 'edit-turn', latestTurnId: 'edit-turn' }] });
+  files['a.py'] = 'x=2\n'; files['b.py'] = 'y=3\n';
+  events.emit('thread', { ...thread, revision: 5, items: [{ ...changed, status: 'completed' }], busy: true, turnId: 'edit-turn', latestTurnId: 'edit-turn' });
+  await settle(() => !$('fileConflict').hidden);
+  assert.equal(card.dataset.executionState, 'completed'); assert.equal(editor.value, 'y=99 # my draft\n');
+  assert.equal(selection.toString(), 'x=2'); assert.equal($('prompt').value, '保留聊天草稿');
+  card.querySelector('.file-change-path').click(); await settle(() => $('editorFilename').textContent === 'a.py');
+  assert.equal($('fileEditorText').value, 'x=2\n'); assert.equal($('workbenchDialog').hidden, true);
+  await open('b.py'); assert.equal($('fileEditorText'), editor); assert.equal(editor.value, 'y=99 # my draft\n');
+  assert.equal(requests.some(request => request.body), false);
 });
 
 test('file summaries follow each completed turn and never collect files from the running turn', async t => {
@@ -921,6 +1073,120 @@ test('right-side conversation navigation preserves reading, drafts and running w
   await settle(() => $('prompt').value === '保留这条未发送的消息');
   assert.equal(editor.value, 'x=123\n');
   assert.equal(requests.some(r => /\/send|\/turn|\/stop|\/interrupt|\/sql\/query|\/terminal\/start/.test(r.route)), false);
+});
+
+test('batch conversation moves preserve selection on failure, commit once, and retain drafts and pinned state', async t => {
+  let failSave = true, release;
+  const organization = { snapshot: { cwd: '/project', revision: 0, folders: [{ id: 'a', name: '分析' }, { id: 'b', name: '开发' }], threads: [{ id: 't1', folderId: 'a', pinned: true }] }, async action(body) {
+    assert.equal(body.action, 'move-many'); assert.equal(body.cwd, '/project'); assert.equal(body.revision, this.snapshot.revision);
+    if (failSave) throw new Error('模拟批量保存失败');
+    await new Promise(resolve => { release = resolve; });
+    const next = structuredClone(this.snapshot);
+    for (const id of body.threadIds) { let entry = next.threads.find(thread => thread.id === id); if (!entry) { entry = { id, pinned: false }; next.threads.push(entry); } entry.folderId = body.folderId; }
+    next.revision++; this.snapshot = next; return next;
+  } };
+  const { $, document, window, input, open, events, thread, settle, requests } = await page(t, {}, [], false, true, organization);
+  $('threadList').querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  await open('a.py'); input('fileEditorText', 'keep = 123'); input('prompt', '保留批量操作前的草稿');
+  events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'running' });
+  events.emit('thread', { ...thread, id: 't2', title: '第二个会话' }); events.emit('thread', { ...thread, id: 't3', title: '第三个会话' });
+  await settle(() => document.querySelector('[data-thread-id=t3]')); $('chatHistoryButton').click(); $('threadBatchToggle').click();
+  const choose = id => { const box = document.querySelector(`#threadList [data-thread-id=${id}]`).parentElement.querySelector('.thread-select'); box.focus(); box.click(); };
+  choose('t1'); choose('t2'); assert.equal($('threadBatchCount').textContent, '已选 2 个');
+  events.emit('thread', { ...thread, revision: 3, busy: true, turnId: 'running' });
+  assert.equal(document.activeElement.getAttribute('aria-label'), '选择会话 第二个会话');
+  assert.equal($('threadTitle').textContent, 'Task'); assert.equal($('threadBatchMove').disabled, true);
+  $('threadBatchFolder').value = 'b'; $('threadBatchFolder').dispatchEvent(new window.Event('change'));
+  $('threadBatchMove').click(); await settle(() => $('threadBatchError').textContent.includes('模拟批量保存失败'));
+  assert.equal($('threadBatchCount').textContent, '已选 2 个'); assert.equal($('threadBatchFolder').value, 'b');
+  failSave = false; $('threadBatchMove').click(); $('threadBatchMove').click(); await settle(() => !!release);
+  assert.equal(requests.filter(request => request.body?.action === 'move-many').length, 2, 'one failed attempt and one pending save, never a duplicate');
+  assert.equal(document.querySelector('.thread-select').disabled, true); release(); await settle(() => $('threadBatchPanel').hidden);
+  assert.deepEqual(organization.snapshot.threads.map(({ id, folderId, pinned }) => ({ id, folderId, pinned })), [{ id: 't1', folderId: 'b', pinned: true }, { id: 't2', folderId: 'b', pinned: false }]);
+  assert.ok(document.querySelector('[data-group=b] [data-thread-id=t2]')); assert.ok(document.querySelector('[data-group=pinned] [data-thread-id=t1]'));
+  assert.equal($('prompt').value, '保留批量操作前的草稿'); assert.equal($('fileEditorText').value, 'keep = 123'); assert.equal($('stopButton').hidden, false);
+  assert.equal(requests.some(request => /\/send|\/turn|\/stop|\/sql\/query|\/terminal\/start/.test(request.route)), false);
+});
+
+test('batch selection follows loaded results, does not select arriving threads, and clears on filter changes', async t => {
+  const organization = { snapshot: { cwd: '/project', revision: 0, folders: [], threads: [] } };
+  const { $, document, input, events, thread, settle, window } = await page(t, {}, [], false, true, organization);
+  events.emit('thread', { ...thread, id: 't2', title: '第二个会话' }); await settle(() => document.querySelector('[data-thread-id=t2]'));
+  $('chatHistoryButton').click(); $('threadBatchToggle').click(); $('threadBatchAll').click(); assert.equal($('threadBatchCount').textContent, '已选 2 个');
+  events.emit('thread', { ...thread, id: 't3', title: '第三个会话' }); await settle(() => document.querySelector('[data-thread-id=t3]'));
+  assert.equal($('threadBatchCount').textContent, '已选 2 个'); assert.equal(document.querySelector('[data-thread-id=t3]').parentElement.querySelector('.thread-select').checked, false);
+  input('search', '第三'); assert.equal($('threadBatchPanel').hidden, true);
+  $('threadBatchToggle').click(); $('threadBatchAll').click(); assert.equal($('threadBatchCount').textContent, '已选 1 个');
+  $('threadBatchClear').click(); assert.equal($('threadBatchCount').textContent, '已选 0 个');
+  $('archivedThreads').checked = true; $('archivedThreads').dispatchEvent(new window.Event('change')); await settle(() => $('threadBatchPanel').hidden);
+});
+
+test('older services keep individual organization available without offering unsupported batch writes', async t => {
+  const organization = { batch: false, snapshot: { cwd: '/project', revision: 0, folders: [], threads: [] } };
+  const { $, document } = await page(t, {}, [], false, true, organization);
+  assert.equal($('threadBatchToggle').hidden, true); assert.equal($('newThreadFolder').hidden, false); assert.equal(document.querySelector('.thread-select'), null);
+});
+
+test('new scheduled conversations refresh their saved folder while retaining the active chat draft', async t => {
+  const organization = { snapshot: { cwd: '/project', revision: 0, folders: [{ id: 'scheduled-folder', name: '每日检查' }], threads: [] } };
+  const { $, document, input, events, thread, settle } = await page(t, {}, [], false, true, organization);
+  input('prompt', '正在编辑的聊天草稿');
+  organization.snapshot = { ...organization.snapshot, revision: 1, threads: [{ id: 'automatic-thread', folderId: 'scheduled-folder', pinned: false }] };
+  events.emit('thread', { ...thread, id: 'automatic-thread', title: '定时检查会话', revision: 1, busy: true, turnId: 'automatic-turn', items: [] });
+  await settle(() => !!document.querySelector('[data-group=scheduled-folder] [data-thread-id=automatic-thread]'));
+  assert.equal($('prompt').value, '正在编辑的聊天草稿');
+});
+
+test('conversation folders and direct pinning preserve active work, drafts, legacy pins and refreshed grouping', async t => {
+  let failSave = false;
+  const organization = { snapshot: { cwd: '/project', revision: 0, folders: [], threads: [] }, async action(body) {
+    if (failSave) throw new Error('模拟保存失败');
+    assert.equal(body.revision, this.snapshot.revision);
+    const next = structuredClone(this.snapshot);
+    if (body.action === 'create-folder') next.folders.push({ id: 'folder-' + (next.folders.length + 1), name: body.name.trim() });
+    if (body.action === 'import-pins') for (const id of body.threadIds) next.threads.push({ id, folderId: null, pinned: true });
+    if (body.action === 'move') next.threads.find(item => item.id === body.threadId).folderId = body.folderId;
+    if (body.action === 'pin') next.threads.find(item => item.id === body.threadId).pinned = body.pinned;
+    next.revision++; this.snapshot = next; return next;
+  } };
+  const { $, document, window, settle, input, open, events, thread, requests } = await page(t, { 'codex-desk:pinnedThreads': '["t1"]' }, [], false, true, organization);
+  await settle(() => organization.snapshot.threads.length === 1 && !$('newThreadFolder').disabled);
+  await open('a.py'); $('threadList').querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  input('prompt', '保留聊天草稿'); input('fileEditorText', 'x=123 # 未保存');
+  events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'running', items: [{ id: 'reply', type: 'agentMessage', text: '正在执行', turnId: 'running' }] });
+  const editor = $('fileEditorText'), composer = $('composer'), message = document.querySelector('.message.assistant');
+  $('chatHistoryButton').click();
+  assert.equal($('newThreadFolder').hidden, false);
+  for (const name of ['数据分析', '项目开发']) {
+    $('newThreadFolder').click(); input('threadFolderName', name);
+    $('threadFolderForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(() => $('threadFolderForm').hidden);
+  }
+  assert.equal(document.querySelectorAll('.thread-group[data-group^=folder]').length, 2);
+  for (const id of ['folder-1', 'folder-2']) {
+    $('threadList').querySelector('.thread-menu').click(); $('threadFolderSelect').value = id;
+    document.querySelector('[data-thread-action=move]').click(); await settle(() => !$('threadActionsDialog').open);
+    assert.equal(organization.snapshot.threads[0].folderId, id);
+  }
+  assert.equal(document.querySelector('[data-group=pinned] .thread-folder-badge').textContent, '项目开发');
+  $('threadList').querySelector('.thread-pin').click(); await settle(() => !!document.querySelector('[data-group=folder-2] [data-thread-id=t1]'));
+  assert.ok(document.querySelector('[data-group=folder-2] [data-thread-id=t1]'));
+  const fold = document.querySelector('[data-group-toggle=folder-2]'); fold.click();
+  events.emit('thread', { ...thread, revision: 3, busy: true, turnId: 'running', items: [{ id: 'reply', type: 'agentMessage', text: '继续执行', turnId: 'running' }] });
+  assert.equal(document.querySelector('[data-group=folder-2] .thread-group-items').hidden, true);
+  assert.equal(document.querySelector('.message.assistant'), message);
+  $('newThreadFolder').click(); input('threadFolderName', '保留文件夹草稿'); failSave = true;
+  $('threadFolderForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => $('threadFolderError').textContent.includes('模拟保存失败'));
+  assert.equal($('threadFolderName').value, '保留文件夹草稿'); assert.equal(organization.snapshot.folders.length, 2);
+  $('threadFolderCancel').click(); failSave = false;
+  const reads = requests.filter(request => request.route.startsWith('/api/threads?')).length;
+  $('refreshThreads').click(); await settle(() => requests.filter(request => request.route.startsWith('/api/threads?')).length > reads);
+  await new Promise(setImmediate);
+  assert.equal(organization.snapshot.threads[0].pinned, false, 'refresh must not restore an old browser pin');
+  assert.equal($('prompt').value, '保留聊天草稿'); assert.equal($('fileEditorText'), editor); assert.equal(editor.value, 'x=123 # 未保存'); assert.equal($('composer'), composer);
+  assert.equal($('mainPanel').dataset.chatView, 'history');
+  assert.equal(requests.some(request => /\/api\/(send|followup|interrupt|project\/save|sql\/query|terminal\/start)/.test(request.route)), false);
 });
 
 test('AI angle-delimited file citations open project files at the cited line without losing edits or executing SQL', async t => {
@@ -1066,4 +1332,71 @@ test('execution motion pauses on disconnect and matching approvals while preserv
   events.emit('thread', { ...running, revision: 4, requests: [approval] }); assert.equal(group.dataset.executionState, 'waiting'); assert.equal(activity.dataset.executionState, 'waiting');
   events.emit('thread', { ...running, revision: 5, busy: false, turnId: null, completion: 'interrupted', items: [{ ...running.items[0], status: 'inProgress' }] });
   assert.equal(group.dataset.executionState, 'interrupted'); assert.equal(activity.dataset.executionState, 'interrupted'); assert.equal(details.open, true); assert.equal($('prompt').value, '保留动效验收草稿'); assert.equal(requests.some(request => request.body), false);
+});
+
+test('starter tasks append to unsent requirements, persist and undo without discarding later typing', async t => {
+  const { $, document, input } = await page(t);
+  input('prompt', '必须保留的具体要求');
+  const button = document.querySelector('[data-prompt]'); button.click();
+  assert.equal($('prompt').value, '必须保留的具体要求\n\n' + button.dataset.prompt); assert.equal($('undoStarterPrompt').hidden, false);
+  $('undoStarterPrompt').click(); assert.equal($('prompt').value, '必须保留的具体要求');
+  button.click(); input('prompt', $('prompt').value + '\n后来补充');
+  assert.equal($('undoStarterPrompt').hidden, true); $('undoStarterPrompt').click(); assert.match($('prompt').value, /后来补充$/);
+});
+
+test('lost send acknowledgement blocks resubmission and read-only receipt recovery keeps newly typed draft text', async t => {
+  const { $, document, input, settle, events } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  const original = globalThis.fetch, sends = [], reads = []; let bootstrapped = false;
+  // Reconnect advertises server receipt support before the next user send.
+  globalThis.fetch = async (route, options = {}) => {
+    if (route === '/api/bootstrap') { const result = await (await original(route, options)).json(); return { ok: true, json: async () => { bootstrapped = true; return { ...result, submissionRecovery: true, submissionEpoch: 'fictional-epoch' }; } }; }
+    if (route === '/api/send') { sends.push(JSON.parse(options.body)); throw new Error('response lost'); }
+    if (String(route).startsWith('/api/submissions/')) { reads.push(route); return { ok: true, json: async () => ({ state: 'accepted', threadId: 't1' }) }; }
+    return original(route, options);
+  };
+  events.emit('connection', { connected: true }); await settle(() => bootstrapped); await new Promise(setImmediate);
+  input('prompt', '原始提交'); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(() => !$('submissionStatus').hidden); assert.equal($('sendButton').disabled, true);
+  input('prompt', '发送之后新写的草稿'); $('composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); assert.equal(sends.length, 1);
+  $('submissionCheck').click(); await settle(() => $('submissionStatus').hidden && !$('sendButton').disabled);
+  assert.equal(reads.length, 1); assert.equal(sends.length, 1); assert.ok(sends[0].submissionId); assert.equal($('prompt').value, '发送之后新写的草稿');
+});
+
+test('execution send controls describe their consequence and old Git commit entry opens the unified selector', async t => {
+  const { $, document, settle, input, events, thread, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task'); input('prompt', '保留草稿');
+  events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'running' });
+  for (const [value, label] of [['steer', '追加指令'], ['queue', '加入队列'], ['interrupt', '停止并发送']]) {
+    $('followupBehavior').value = value; $('followupBehavior').dispatchEvent(new window.Event('change')); assert.equal($('sendButtonLabel').textContent, label); assert.equal($('followupHint').hidden, false);
+  }
+  const original = globalThis.fetch;
+  globalThis.fetch = async (route, options) => route.startsWith('/api/git/submit?') ? { ok: true, json: async () => ({ cwd: '/project', head: 'abc', branch: 'main', files: [], version: 'v1' }) } : original(route, options);
+  $('quickGit').click(); $('review-tab-git').click(); await settle(() => !$('gitSubmitOpen').hidden);
+  assert.equal(document.querySelector('[data-git=commit]'), null); $('gitSubmitOpen').click();
+  await settle(() => document.querySelector('#gitSubmitDialog')?.open); assert.equal($('prompt').value, '保留草稿');
+  assert.equal(requests.filter(request => request.route === '/api/git/action' && request.body?.action === 'commit').length, 0);
+});
+
+test('large conversations initially mount recent records and load earlier history without replacing visible replies', async t => {
+  const { $, document, thread, settle, events } = await page(t);
+  thread.items = Array.from({ length: 300 }, (_, i) => ({ id: 'message-' + i, turnId: 'turn-' + i, type: i % 2 ? 'agentMessage' : 'userMessage', text: 'record ' + i }));
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('messages').querySelectorAll('article').length === 120);
+  const latest = [...$('messages').querySelectorAll('article')].at(-1); assert.equal($('loadEarlierMessages').hidden, false);
+  $('loadEarlierMessages').click(); assert.equal($('messages').querySelectorAll('article').length, 240); assert.equal([...$('messages').querySelectorAll('article')].at(-1), latest);
+  events.emit('thread', { ...thread, revision: 2, items: [...thread.items, { id: 'new', turnId: 'new', type: 'agentMessage', text: 'new record' }] });
+  assert.equal($('messages').querySelectorAll('article').length, 241, 'new activity does not evict a record while reading');
+  assert.equal([...$('messages').querySelectorAll('article')].at(-2), latest);
+});
+
+test('file version identity distinguishes drafts and edit snippets, and opening the current file remains explicit', async t => {
+  const { $, document, open, input, settle, events, thread, requests } = await page(t);
+  await open('a.py'); assert.equal($('editorVersionBadge').textContent, '当前磁盘'); input('fileEditorText', 'local draft'); assert.equal($('editorVersionBadge').textContent, '未保存草稿');
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  events.emit('thread', { ...thread, revision: 2, busy: true, turnId: 'turn', latestTurnId: 'turn', items: [{ id: 'u', turnId: 'turn', type: 'userMessage', text: 'edit' }, { id: 'f', turnId: 'turn', type: 'fileChange', status: 'inProgress', changes: [{ path: 'b.py', kind: 'update', diff: '@@ -1 +1 @@\n-y=1\n+y=2' }] }] });
+  const before = requests.filter(request => request.route.startsWith('/api/project/file?')).length;
+  $('liveEditsToggle').click(); assert.equal(requests.filter(request => request.route.startsWith('/api/project/file?')).length, before);
+  assert.match($('liveEditsWindow').textContent, /修改片段/); $('liveEditsOpen').click(); await settle(() => $('editorFilename').textContent === 'b.py' && $('editorVersionBadge').textContent === '当前磁盘');
+  assert.equal($('editorVersionBadge').textContent, '当前磁盘'); assert.equal($('fileEditorText').value, 'y=1\n');
+  assert.equal(requests.filter(request => request.route === '/api/project/save').length, 0);
 });

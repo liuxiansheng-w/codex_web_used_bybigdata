@@ -107,8 +107,11 @@ export function columnOptions(result, column, filter = '', filters = []) {
   return [...options.values()].sort((a, b) => a.label.localeCompare(b.label, 'zh-CN', { numeric: true }));
 }
 
-export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) {
+export function createSqlQuery({ editor, api, onContext, onChartContext = onContext, notice, bottomPanel }) {
   const states = new Map(), projects = new Map();
+  const chartStates = new WeakMap();
+  let activeChart, chartModule, chartGeneration = 0;
+  const chartState = state => { if (!chartStates.has(state)) chartStates.set(state, { view: 'table' }); return chartStates.get(state); };
   let activeId = null, running = null, checked = false, available = null, pending = null, sequence = 0;
   let storage; try { storage = window.localStorage; } catch { /* Private browsing may disable storage. */ }
   const parameters = createParameterMemory(storage), historyStore = createQueryHistory(storage), archived = []; let persistTimer;
@@ -119,6 +122,20 @@ export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) 
   }
   $('sqlTools').innerHTML = `<select id="sqlEngine" aria-label="查询引擎"><option value="huawei">华为 DLI</option><option value="aliyun">阿里 DataWorks</option></select><button id="sqlRun" class="primary-button" type="button" title="⌘ / Ctrl + Enter">查询</button><button id="sqlShowResults" class="text-button" type="button" hidden>结果</button><button id="sqlHistory" class="text-button" type="button">历史</button><button id="sqlConnection" class="sql-connection" type="button" aria-label="检查查询服务连接">●</button><span id="sqlScope" class="sr-only"></span>`;
   $('sqlResults').innerHTML = `<header id="sqlResultHandle" class="sql-result-header"><strong>查询结果</strong><span id="sqlSummary" role="status"></span><button id="sqlLayoutToggle" class="text-button" type="button">独立浮窗</button><button id="sqlWindowReset" class="icon-button" type="button" aria-label="重置结果窗口" title="重置窗口位置和大小" hidden>↺</button><button id="sqlWindowMaximize" class="icon-button" type="button" aria-label="最大化结果窗口" hidden>□</button><button id="sqlExpand" class="text-button" type="button" aria-expanded="false">展开</button><button id="sqlCollapse" class="icon-button" type="button" aria-label="收起查询结果">×</button></header><div id="sqlResultTabs" class="sql-result-tabs" role="tablist" aria-label="查询结果标签"></div><p id="sqlResultNote" class="sql-result-note"></p><div id="sqlResultActions" class="sql-result-actions"><input id="sqlFilter" type="search" placeholder="搜索所有列…" aria-label="筛选查询结果"><button id="sqlCopy" class="text-button" type="button">复制表格</button><button id="sqlCopyHeaders" class="text-button" type="button">复制表头</button><button id="sqlExportAll" class="text-button" type="button">下载全部</button><button id="sqlExport" class="text-button" type="button" hidden>下载筛选</button><button id="sqlRename" class="text-button" type="button">命名</button><button id="sqlRepeat" class="text-button" type="button">再次查询…</button><button id="sqlContext" class="text-button" type="button">加入对话</button><a id="sqlDownload" target="_blank" rel="noopener noreferrer" hidden>云端完整文件</a></div><div id="sqlFilterChips" class="sql-filter-chips" hidden></div><p id="sqlFeedback" role="status" class="sql-result-note"></p><div id="sqlResultBody" role="tabpanel" class="sql-result-body" tabindex="0" aria-label="查询数据表"></div><footer id="sqlPagination" class="sql-pagination"><label><select id="sqlPageSize" aria-label="每页行数"><option value="50">50 行 / 页</option><option value="100">100 行 / 页</option><option value="200">200 行 / 页</option></select></label><button id="sqlPrev" class="text-button" type="button">上一页</button><span id="sqlPage"></span><button id="sqlNext" class="text-button" type="button">下一页</button><div id="sqlSelectionStats" class="sql-selection-stats" role="status" aria-live="polite" aria-atomic="true" hidden></div></footer><details id="sqlSnapshot" class="sql-snapshot"><summary>本次查询 SQL</summary><pre id="sqlExecuted"></pre></details><span class="editor-resize sql-result-resize" data-edge="n" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="s" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="e" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="w" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="ne" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="nw" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="se" aria-hidden="true"></span><span class="editor-resize sql-result-resize" data-edge="sw" aria-hidden="true"></span>`;
+  const viewSwitch = document.createElement('div'); viewSwitch.className = 'sql-view-switch'; viewSwitch.setAttribute('role', 'group'); viewSwitch.setAttribute('aria-label', '结果展示方式');
+  viewSwitch.innerHTML = '<button id="sqlTableView" type="button" class="text-button" aria-pressed="true">表格</button><button id="sqlChartView" type="button" class="text-button" aria-pressed="false">图表</button>';
+  $('sqlFilter').after(viewSwitch);
+  for (const [id, view] of [['sqlTableView', 'table'], ['sqlChartView', 'chart']]) $(id).addEventListener('click', () => { const state = current(); if (!state?.result?.ok || !state.result.rows.length) return; chartState(state).view = view; closeColumnMenu(); render(); });
+  async function renderChart(state, rows) {
+    const token = chartGeneration, body = $('sqlResultBody'); body.textContent = '正在加载本机图表…';
+    try {
+      const module = await (chartModule ||= import('./vendor/toolbox.js'));
+      if (token !== chartGeneration || current() !== state || chartState(state).view !== 'chart') return;
+      body.replaceChildren(); const container = document.createElement('div'); body.append(container);
+      activeChart = module.createChartPanel(container, { onContext: onChartContext, onChange: settings => { chartState(state).settings = settings; } });
+      activeChart.setData({ columns: state.result.columns, rows }, { settings: chartState(state).settings, note: `当前筛选后的全部已加载行（${rows.length} / ${state.result.rows.length} 行），不受表格分页影响`, truncated: state.result.truncated });
+    } catch { if (token === chartGeneration) { chartModule = null; body.textContent = '图表模块无法加载，请刷新页面后重试。'; } }
+  }
   const selection = createResultSelection({ body: $('sqlResultBody'), stats: $('sqlSelectionStats'), copyText });
   const columnMenu = document.createElement('section'); columnMenu.id = 'sqlColumnMenu'; columnMenu.className = 'sql-column-menu'; columnMenu.hidden = true;
   columnMenu.setAttribute('role', 'dialog'); columnMenu.setAttribute('aria-labelledby', 'sqlColumnName');
@@ -177,7 +194,7 @@ export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) 
   function renameResult(tab) { renameTarget = tab; $('sqlResultName').value = tab.name || `结果 ${tab.id}`; renameDialog.showModal(); }
   $('sqlRename').onclick = () => { if (current()) renameResult(current()); }; $('sqlRenameCancel').onclick = () => renameDialog.close(); $('sqlRenameForm').onsubmit = event => { event.preventDefault(); if (renameTarget) renameTarget.name = $('sqlResultName').value.trim().slice(0, 60); renameDialog.close(); render(); };
   const elapsedTimer = window.setInterval(() => { const result = current()?.result; if (result?.loading) $('sqlSummary').textContent = `${resultStatus(result)} · 已用 ${Math.floor((Date.now() - result.startedAt) / 1000)} 秒`; }, 1000);
-  window.addEventListener('pagehide', () => { window.clearInterval(elapsedTimer); clearTimeout(persistTimer); try { historyStore.write(allHistory()); } catch {} });
+  window.addEventListener('pagehide', () => { chartGeneration++; activeChart?.destroy(); activeChart = null; window.clearInterval(elapsedTimer); clearTimeout(persistTimer); try { historyStore.write(allHistory()); } catch {} });
   const current = () => { const project = projectFor(); return project.tabs.find(tab => tab.id === project.active); };
   const engineName = engine => engine === 'aliyun' ? '阿里云' : '华为云';
   const filteredRows = state => filterRows(state.result, state.filter, state.sort, state.filters);
@@ -339,6 +356,7 @@ export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) 
   }
   function render() {
     const state = current(), result = state?.result;
+    chartGeneration++; activeChart?.destroy(); activeChart = null;
     selection.unmount();
     syncLayout(state); renderTabs();
     if (!result) return;
@@ -358,6 +376,10 @@ export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) 
     $('sqlExportAll').title = result.downloadUrl ? '下载云端完整结果文件' : result.truncated ? '当前是截断预览，请重新查询获取完整结果' : `下载全部 ${result.rowCount || 0} 行，不受筛选和分页影响`;
     $('sqlExport').hidden = !hasFilters(state);
     $('sqlFilter').disabled = !result.ok || !result.rows.length;
+    const chartMode = chartState(state).view === 'chart';
+    $('sqlTableView').disabled = $('sqlChartView').disabled = !result.ok || !result.rows.length;
+    $('sqlTableView').setAttribute('aria-pressed', String(!chartMode)); $('sqlChartView').setAttribute('aria-pressed', String(chartMode));
+    body.classList.toggle('showing-chart', chartMode); body.setAttribute('aria-label', chartMode ? '查询图表' : '查询数据表');
     $('sqlContext').disabled = !!result.loading; $('sqlRepeat').disabled = !!running || !!pending; $('sqlRename').disabled = !!result.loading;
     $('sqlRepeat').textContent = isExecution(result) ? '再次执行…' : '再次查询…';
     $('sqlSnapshot').querySelector('summary').textContent = isExecution(result) ? '本次执行 SQL' : '本次查询 SQL';
@@ -375,6 +397,7 @@ export function createSqlQuery({ editor, api, onContext, notice, bottomPanel }) 
     $('sqlPrev').disabled = state.page === 0; $('sqlNext').disabled = state.page + 1 >= pageCount;
     let empty;
     if (!rows.length) { empty = document.createElement('p'); empty.className = 'sql-empty'; empty.textContent = isExecution(result) ? `${resultKind(result)} 执行成功，没有返回数据表格。` : hasFilters(state) ? '没有匹配的结果，调整或清空筛选后重试。' : result.downloadUrl ? '结果已生成，请点击「下载全部」。' : result.truncated ? '本机仅保留了查询记录，没有保存数据行；可核对后再次查询。' : '查询完成，没有返回数据。'; if (!result.rows.length) { body.append(empty); return; } }
+    if (chartMode) { $('sqlPagination').hidden = true; void renderChart(state, rows); return; }
     const table = document.createElement('table'), head = table.createTHead().insertRow(); table.className = 'sql-table';
     table.tabIndex = 0; table.setAttribute('role', 'grid'); table.setAttribute('aria-multiselectable', 'true'); table.setAttribute('aria-label', '查询结果，拖动选择单元格查看统计；Shift 扩选，Ctrl 或 Command 加 C 复制选区');
     const number = document.createElement('th'); number.textContent = '#'; number.scope = 'col'; head.append(number);

@@ -1,15 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { Workbench } from '../lib/workbench.mjs';
+import { PermissionPolicy } from '../lib/permissions.mjs';
+import { ThreadOrganization } from '../lib/thread-organization.mjs';
+import { permissionPresets } from '../public/permission-presets.js';
 import { createSchedules } from '../public/schedules.js';
 import { nextScheduleAt, normalizeSchedule, upcomingSchedule, describeSchedule, formatScheduleTime } from '../public/schedule-time.js';
 
 const at = text => Date.parse(`${text}+08:00`), rule = (kind, extra = {}) => ({ kind, time: '09:00', ...extra });
+const models = [{ id: 'test-model', name: '测试模型', isDefault: true, efforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }], defaultEffort: 'low' }, { id: 'other-model', name: '另一个测试模型', efforts: [{ reasoningEffort: 'medium' }] }];
+const settingsOptions = { models, permissions: { options: permissionPresets.map(preset => ({ id: preset.id, enabled: true })) }, folders: [{ id: 'folder-a', name: '日常检查' }] };
 test('calendar rules use Beijing time, strict future dates, Monday-first weeks and missing-month skips', () => {
   assert.equal(nextScheduleAt(rule('daily'), at('2026-10-19T08:59:59')), at('2026-10-19T09:00:00'));
   assert.equal(nextScheduleAt(rule('daily'), at('2026-10-19T09:00:00')), at('2026-10-20T09:00:00'));
@@ -27,16 +32,18 @@ test('calendar rules use Beijing time, strict future dates, Monday-first weeks a
 });
 
 async function fixture(t) {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'lemon-schedules-')), bridge = Object.assign(new EventEmitter(), { ready: true }), calls = [];
-  const workspace = { bridge, threads: new Map(), send: async body => { calls.push(body); const threadId = `scheduled-${calls.length}`; workspace.threads.set(threadId, { busy: true, latestTurnId: 'scheduled-turn' }); return { threadId }; } };
-  const desk = new Workbench(workspace, {}, cwd); t.after(() => desk.close());
+  const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'lemon-schedules-'))), bridge = Object.assign(new EventEmitter(), { ready: true, request: async () => ({ requirements: null }) }), calls = [];
+  const workspace = { bridge, threads: new Map(), permissions: new PermissionPolicy(bridge), readModels: async () => structuredClone(models), modelCatalog: () => models, send: async (body, hooks) => { calls.push(body); const threadId = `scheduled-${calls.length}`, thread = { id: threadId, cwd, busy: true, latestTurnId: 'scheduled-turn' }; workspace.threads.set(threadId, thread); await hooks?.onThreadReady?.(thread); return { threadId }; } };
+  const organization = new ThreadOrganization(cwd, { verifyThread: async (id, project) => workspace.threads.get(id)?.cwd === project });
+  const desk = new Workbench(workspace, {}, cwd, { threadOrganization: organization }); t.after(() => desk.close());
   const action = body => desk.scheduleAction({ confirmed: true, ...body });
-  return { cwd, desk, workspace, bridge, calls, action };
+  return { cwd, desk, workspace, bridge, calls, action, organization };
 }
 test('legacy intervals migrate without changing their frequency, restart paused, and persist with private permissions', async t => {
   const { cwd, desk, action, calls } = await fixture(t);
   await writeFile(path.join(cwd, 'schedules.json'), JSON.stringify([{ id: 'old', cwd, text: '原有任务', minutes: 90, enabled: true, nextAt: Date.now(), history: [] }]));
   const job = (await desk.schedules()).jobs[0]; assert.equal(job.enabled, false); assert.equal(job.pauseReason, 'restart'); assert.equal(job.schedule.minutes, 90);
+  assert.equal(job.mode, 'read-only'); assert.equal(job.model, ''); assert.equal(job.folderId, null);
   await action({ action: 'setEnabled', id: job.id, version: job.version, enabled: true });
   assert.equal(calls.length, 0); assert.equal((await stat(path.join(cwd, 'schedules.json'))).mode & 0o777, 0o600);
   assert.equal(JSON.parse(await readFile(path.join(cwd, 'schedules.json'), 'utf8'))[0].enabled, true);
@@ -56,11 +63,11 @@ test('create/edit validation, stale versions, archive restoration and failed dis
   t.mock.method(desk, 'persistJobs', async () => { throw Error('disk full'); });
   await assert.rejects(action({ action: 'setEnabled', id: job.id, enabled: true }), /disk full/); assert.deepEqual(desk.jobs, previous);
 });
-test('manual runs do not move the schedule, use readonly policy, and show only observed completion', async t => {
+test('manual runs do not move the schedule, default to auto review, and show only observed completion', async t => {
   const { cwd, desk, action, calls, workspace, bridge } = await fixture(t);
   await action({ action: 'create', cwd, name: '检查', text: '仅读取', schedule: rule('daily') });
   const job = desk.jobs[0], next = job.nextAt;
-  await action({ action: 'run', id: job.id }); assert.equal(job.nextAt, next); assert.equal(calls[0].mode, 'read-only'); assert.equal((await desk.schedules()).jobs[0].history[0].status, 'running');
+  await action({ action: 'run', id: job.id }); assert.equal(job.nextAt, next); assert.equal(calls[0].mode, 'auto-review'); assert.equal((await desk.schedules()).jobs[0].history[0].status, 'running');
   await assert.rejects(action({ action: 'run', id: job.id }), /尚未完成/);
   await assert.rejects(action({ action: 'update', id: job.id, text: 'change', schedule: rule('daily') }), /结束/);
   await action({ action: 'setEnabled', id: job.id, enabled: false }); assert.equal(workspace.threads.get(job.lastThreadId).busy, true);
@@ -90,13 +97,13 @@ test('pending task creation blocks tick and duplicate writes until persistence c
   await finish(); await creating;
 });
 
-function ui(t, handler = async () => ({ jobs: [] })) {
+function ui(t, handler = async () => ({ jobs: [] }), optionsHandler = async () => structuredClone(settingsOptions)) {
   const dom = new JSDOM('<section id="schedules"></section>', { pretendToBeVisual: true }); t.after(() => dom.window.close());
   const root = dom.window.document.querySelector('section'), requests = [], context = { cwd: '/project-a' }, threads = [];
-  const controller = createSchedules({ root, api: async (url, body) => { requests.push({ url, body }); return handler(url, body); }, getContext: () => context, onThread: async id => threads.push(id), close() {} }); t.after(() => controller.dispose());
+  const controller = createSchedules({ root, api: async (url, body) => { requests.push({ url, body }); return url.startsWith('/api/schedules/options?') ? optionsHandler(url) : handler(url, body); }, getContext: () => context, onThread: async id => threads.push(id), close() {} }); t.after(() => controller.dispose());
   const $ = id => root.querySelector(`#${id}`), input = (id, value) => { $(id).value = value; $(id).dispatchEvent(new dom.window.Event('input', { bubbles: true })); };
   const choose = value => { const radio = root.querySelector(`[name=scheduleMode][value=${value === 'once' ? 'once' : 'repeat'}]`); radio.checked = true; if (value !== 'once') $('scheduleCycle').value = value; radio.dispatchEvent(new dom.window.Event('change', { bubbles: true })); };
-  const submit = () => $('scheduleForm').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  const submit = async () => { await settle(() => !$('scheduleSave').disabled); $('scheduleForm').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); };
   const settle = async check => { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(setImmediate); } assert.fail('UI did not settle'); };
   return { root, $, input, choose, submit, settle, requests, controller, context, threads, dom };
 }
@@ -185,4 +192,31 @@ test('saving an unchanged legacy interval from the form preserves seconds, count
   const job = { id: 'legacy', version: 'v1', cwd: '/project-a', name: '原名称', text: '任务', enabled: false, schedule, scheduleRuns: 3, history: [] };
   const { root, $, input, controller, submit, settle, requests } = ui(t, async () => ({ jobs: [job] })); await controller.load(); [...root.querySelectorAll('button')].find(el => el.textContent === '编辑').click();
   input('scheduleName', '新名称'); assert.match($('schedulePreview').textContent, /3 \/ 8/); submit(); await settle(() => $('scheduleForm').hidden); assert.deepEqual(requests.at(-1).body.schedule, schedule);
+});
+
+test('execution form defaults to auto review, saves task-specific model/effort/folder and confirms full access', async t => {
+  const { $, input, submit, settle, requests, context, dom } = ui(t);
+  context.model = 'other-model'; $('scheduleNew').click(); await settle(() => !$('scheduleSave').disabled);
+  assert.equal($('schedulePermission').value, 'auto-review'); assert.equal($('scheduleModel').value, 'other-model');
+  assert.deepEqual([...$('scheduleEffort').options].map(option => option.value), ['', 'medium']);
+  const change = (id, value) => { $(id).value = value; $(id).dispatchEvent(new dom.window.Event('change', { bubbles: true })); };
+  change('scheduleEffort', 'medium'); change('scheduleModel', 'test-model'); assert.equal($('scheduleEffort').value, '');
+  change('scheduleEffort', 'high'); change('scheduleFolder', 'folder-a');
+  input('scheduleName', '独立配置'); input('scheduleText', '使用指定配置执行'); const date = $('scheduleDate').value;
+  change('schedulePermission', 'danger-full-access'); assert.equal($('scheduleFullAccessRow').hidden, false); assert.equal($('scheduleFullAccess').checked, false);
+  await submit(); assert.match($('scheduleNotice').textContent, /确认完全访问/); assert.equal(requests.filter(request => request.body).length, 0);
+  $('scheduleFullAccess').checked = true; await submit(); await settle(() => $('scheduleForm').hidden);
+  const body = requests.at(-1).body; assert.equal(body.mode, 'danger-full-access'); assert.equal(body.fullAccessConfirmed, true); assert.equal(body.model, 'test-model'); assert.equal(body.effort, 'high'); assert.equal(body.folderId, 'folder-a'); assert.equal(body.schedule.startDate, date);
+});
+
+test('execution option reads cannot cross forms and unavailable choices do not silently change', async t => {
+  const pending = [], { $, context, settle, dom, root, controller } = ui(t, async () => ({ jobs: [] }), url => new Promise(resolve => pending.push({ url, resolve })));
+  $('scheduleNew').click(); assert.equal($('scheduleSave').disabled, true); $('scheduleCancel').click();
+  context.cwd = '/project-b'; $('scheduleNew').click(); pending[1].resolve({ ...settingsOptions, folders: [{ id: 'folder-b', name: 'B 项目文件夹' }] });
+  await settle(() => !$('scheduleSave').disabled); pending[0].resolve(settingsOptions); await new Promise(setImmediate);
+  assert.match(pending[1].url, /project-b/); assert.equal($('scheduleFolder').querySelector('[value="folder-a"]'), null); assert.ok($('scheduleFolder').querySelector('[value="folder-b"]'));
+  $('scheduleFolder').value = 'folder-b'; $('scheduleFolder').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  $('scheduleOptionsRefresh').click(); pending[2].resolve({ ...settingsOptions, folders: [] }); await settle(() => !$('scheduleSave').disabled);
+  assert.equal($('scheduleFolder').value, 'folder-b'); assert.equal($('scheduleFolder').selectedOptions[0].disabled, true); assert.equal(controller.hasDraft(), true);
+  root.querySelector('#scheduleForm').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); assert.match($('scheduleNotice').textContent, /不可用/);
 });

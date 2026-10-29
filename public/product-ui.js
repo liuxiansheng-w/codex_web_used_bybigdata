@@ -1,4 +1,142 @@
+import { createImageAttachment } from './interactions.js';
+import { currentRequest } from './message-timing.js';
+
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; };
+
+const previewUrl = value => typeof value === 'string' && /^\/api\/attachments\/images\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+
+// Only actual tool-returned image references from this user request. Generated
+// images, user attachments and paths mentioned in prose never become previews.
+export function latestTestImage(thread, request = currentRequest(thread)) {
+  if (!thread || request.user?.pending) return null;
+  let unavailable = false;
+  for (const item of [...request.items].reverse()) {
+    if (!['mcpToolCall', 'dynamicToolCall'].includes(item.type)) continue;
+    const images = (item.attachments || []).filter(image => image?.kind === 'image');
+    if (!images.length) continue;
+    const attachment = images.findLast(image => !image.unavailable && previewUrl(image.previewUrl));
+    if (attachment) return { item, attachment, count: images.length, unavailable };
+    unavailable = true;
+  }
+  return unavailable ? { unavailable: true, attachment: null } : null;
+}
+
+export function createTestPreview({ document = globalThis.document, getContext = () => ({}), now = Date.now } = {}) {
+  const win = document.defaultView, make = (tag, text, className) => { const node = document.createElement(tag); if (text != null) node.textContent = text; if (className) node.className = className; return node; };
+  const button = (text, id, className = 'icon-button') => { const node = make('button', text, className); node.type = 'button'; node.id = id; return node; };
+  const trigger = button('测试预览', 'testPreviewToggle', 'text-button'); trigger.setAttribute('aria-controls', 'testPreviewWindow'); trigger.setAttribute('aria-expanded', 'false');
+  trigger.title = '查看当前提问中工具实际返回的最新图片';
+  const toolbar = document.querySelector('.workspace-bar .topbar-actions');
+  const shortcuts = toolbar || document.querySelector('.workspace-shortcuts') || document.querySelector('.conversation-actions');
+  shortcuts.insertBefore(trigger, toolbar ? toolbar.firstChild : document.getElementById('toolboxButton') || [...shortcuts.children].find(node => node.textContent === '更多工具') || null);
+  const pane = make('section', null, 'test-preview-window'); pane.id = 'testPreviewWindow'; pane.hidden = true;
+  pane.setAttribute('role', 'region'); pane.setAttribute('aria-labelledby', 'testPreviewTitle');
+  const header = make('header', null, 'test-preview-header'); header.id = 'testPreviewHandle'; header.tabIndex = 0;
+  header.title = '拖动调整位置 · 方向键移动 · 右下角可调整大小';
+  const title = make('strong', '测试预览'); title.id = 'testPreviewTitle';
+  const actions = make('div', null, 'test-preview-actions');
+  const zoom = button('↗', 'testPreviewZoom'); zoom.setAttribute('aria-label', '放大测试截图'); zoom.title = '查看大图与原尺寸'; zoom.disabled = true;
+  const minimize = button('−', 'testPreviewMinimize'); minimize.setAttribute('aria-label', '收起测试预览'); minimize.setAttribute('aria-expanded', 'true'); minimize.title = '收起测试预览';
+  const close = button('×', 'testPreviewClose'); close.setAttribute('aria-label', '关闭测试预览'); close.title = '关闭，本次提问不再自动弹出';
+  actions.append(zoom, minimize, close); header.append(title, actions);
+  const status = make('p', '等待工具返回截图', 'test-preview-status'); status.id = 'testPreviewStatus'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const body = make('div', null, 'test-preview-body'); body.id = 'testPreviewBody';
+  const empty = make('p', '本次提问还没有返回图片。浏览器仅返回文字状态时，这里会继续等待。', 'test-preview-empty');
+  const imageHost = make('div', null, 'test-preview-image'); imageHost.id = 'testPreviewImage'; imageHost.hidden = true;
+  body.append(empty, imageHost);
+  const footer = make('footer', null, 'test-preview-footer'), source = make('span'), clock = make('span'); source.id = 'testPreviewSource'; clock.id = 'testPreviewTime';
+  const download = make('a', '下载截图', 'text-button'); download.id = 'testPreviewDownload'; download.hidden = true;
+  const note = make('span', '仅显示工具返回的图片，不是实时视频。', 'test-preview-note'); footer.append(source, clock, download, note);
+  pane.append(header, status, body, footer); document.body.append(pane);
+  let scope = '', suppressed = false, frame = null, imageRecord = null, image, pictureButton, pictureError, collapsed = false, failedImage = false, drag;
+  const set = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+  function expanded() { trigger.setAttribute('aria-expanded', String(!pane.hidden)); }
+  function clear() {
+    const dialog = document.querySelector('.image-preview-dialog');
+    if (imageRecord && dialog?.open && dialog.querySelector('img')?.getAttribute('src') === imageRecord.previewUrl) dialog.close();
+    imageHost.replaceChildren(); imageHost.hidden = true; empty.hidden = false;
+    imageRecord = image = pictureButton = pictureError = frame = null; failedImage = false;
+    zoom.disabled = true; download.hidden = true; download.removeAttribute('href'); set(source, ''); set(clock, '');
+  }
+  function show() { pane.hidden = false; suppressed = false; expanded(); clamp(); }
+  function hide() { pane.hidden = true; suppressed = true; drag = null; expanded(); }
+  function paintFrame(candidate, thread, live) {
+    const key = `${candidate.item.id}:${candidate.attachment.previewUrl}`;
+    if (frame?.key === key) return;
+    const received = now(), history = !(live && thread.busy);
+    const surface = candidate.item.surface;
+    const label = surface?.kind === 'browser' ? `${surface.label || '浏览器'} · 浏览器截图` : surface?.kind === 'app' ? `${surface.label || '应用'} · 电脑操作截图` : '工具返回图片';
+    frame = { key, received, history, itemId: candidate.item.id }; failedImage = false;
+    const name = `${label} · ${history ? '历史记录' : '本页接收 ' + new Date(received).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`;
+    if (!imageRecord) {
+      imageRecord = { ...candidate.attachment, name };
+      const figure = createImageAttachment(imageRecord, { compact: true, document });
+      image = figure.querySelector('img'); pictureButton = figure.querySelector('button'); pictureError = figure.querySelector('.attachment-image-error');
+      image.addEventListener('error', () => { failedImage = true; zoom.disabled = true; download.hidden = true; set(status, '图片已失效或无法读取，请重新打开会话核对。'); pane.dataset.state = 'unavailable'; });
+      imageHost.append(figure);
+    } else {
+      Object.assign(imageRecord, candidate.attachment, { name }); image.alt = name;
+      const caption = imageHost.querySelector('figcaption'); caption.textContent = name; caption.hidden = true;
+      pictureButton.setAttribute('aria-label', `查看图片：${name}`); image.hidden = pictureButton.hidden = false; pictureError.hidden = true;
+      if (image.getAttribute('src') !== imageRecord.previewUrl) image.src = imageRecord.previewUrl;
+    }
+    imageHost.hidden = false; empty.hidden = true; zoom.disabled = false;
+    download.hidden = false; download.href = imageRecord.previewUrl; download.download = 'test-preview';
+    set(source, label + (candidate.count > 1 ? ` · 本步骤 ${candidate.count} 张，显示最后一张` : ''));
+    set(clock, history ? '历史图片 · 拍摄时间未记录' : `本页接收 ${new Date(received).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`);
+    clock.title = '运行时未提供拍摄时间；接收时间仅表示本页首次收到这张图片的时间。';
+  }
+  function sync() {
+    const context = getContext(), thread = context.cwd && context.thread?.cwd !== context.cwd ? null : context.thread;
+    const request = currentRequest(thread), nextScope = JSON.stringify([thread?.id, thread?.cwd, request.key]);
+    if (scope !== nextScope) { scope = nextScope; suppressed = false; clear(); }
+    const candidate = latestTestImage(thread, request), live = context.live !== false && !thread?.runtimeStale;
+    if (candidate?.attachment) paintFrame(candidate, thread, live);
+    trigger.dataset.hasImage = String(!!frame); trigger.title = frame ? '查看当前提问中最新返回的工具图片' : '当前提问还没有工具图片，点击打开等待窗口';
+    const timing = thread?.turnTimings?.find(turn => turn.id === request.turnId);
+    const completion = timing?.status || thread?.completion;
+    const waiting = thread?.requests?.length > 0;
+    let text = !thread ? '选择会话后等待截图' : request.user?.pending ? '新提问发送中 · 等待截图' : !live ? '连接待同步' : waiting ? '等待确认' : thread.busy ? '正在执行' : completion === 'failed' || thread.error ? '任务未完成' : completion === 'interrupted' ? '任务已停止' : frame ? completion === 'completed' ? '本次任务已结束' : '任务状态待核对' : '等待工具返回截图';
+    pane.dataset.state = !live ? 'stale' : waiting ? 'waiting' : thread?.busy ? 'running' : 'idle';
+    if (frame) text += candidate?.unavailable ? ' · 新图片不可用，保留上一张' : !live ? ' · 保留最近截图' : ' · 最近返回的图片';
+    else if (candidate?.unavailable) text = '工具返回的图片暂不可预览';
+    if (failedImage) { text = '图片已失效或无法读取，请重新打开会话核对。'; pane.dataset.state = 'unavailable'; }
+    set(status, text);
+    if (candidate?.attachment && thread?.busy && live && !suppressed) show();
+    expanded();
+  }
+  trigger.addEventListener('click', () => { if (pane.hidden) { show(); sync(); } else hide(); });
+  close.addEventListener('click', () => { hide(); trigger.focus({ preventScroll: true }); });
+  minimize.addEventListener('click', () => {
+    collapsed = !collapsed; pane.classList.toggle('is-collapsed', collapsed); minimize.textContent = collapsed ? '+' : '−';
+    minimize.setAttribute('aria-expanded', String(!collapsed)); minimize.setAttribute('aria-label', collapsed ? '展开测试预览' : '收起测试预览'); minimize.title = collapsed ? '展开测试预览' : '收起测试预览';
+    body.hidden = footer.hidden = collapsed; clamp();
+  });
+  zoom.addEventListener('click', () => { if (!failedImage) pictureButton?.click(); });
+  pane.addEventListener('keydown', event => { if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); hide(); trigger.focus({ preventScroll: true }); } });
+  function clamp() {
+    if (pane.hidden || !pane.style.left) return;
+    const rect = pane.getBoundingClientRect();
+    pane.style.left = Math.max(8, Math.min(parseFloat(pane.style.left), win.innerWidth - Math.min(rect.width, win.innerWidth - 16) - 8)) + 'px';
+    pane.style.top = Math.max(8, Math.min(parseFloat(pane.style.top), win.innerHeight - Math.min(rect.height, win.innerHeight - 16) - 8)) + 'px';
+  }
+  function move(left, top) { pane.style.left = left + 'px'; pane.style.top = top + 'px'; pane.style.right = 'auto'; clamp(); }
+  header.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button,a')) return;
+    const rect = pane.getBoundingClientRect(); drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+    header.setPointerCapture?.(event.pointerId); event.preventDefault();
+  });
+  header.addEventListener('pointermove', event => { if (drag?.id === event.pointerId) move(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y); });
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) header.addEventListener(type, () => { drag = null; });
+  header.addEventListener('keydown', event => {
+    if (event.target !== header) return;
+    const delta = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }[event.key];
+    if (delta) { event.preventDefault(); const rect = pane.getBoundingClientRect(); move(rect.left + delta[0], rect.top + delta[1]); }
+  });
+  const observer = win.ResizeObserver ? new win.ResizeObserver(clamp) : null; observer?.observe(pane); win.addEventListener('resize', clamp);
+  sync();
+  return { sync, show() { show(); sync(); }, hide, destroy() { observer?.disconnect(); win.removeEventListener('resize', clamp); clear(); pane.remove(); trigger.remove(); } };
+}
 
 export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled = () => {} }) {
   const menu = el('details', null, 'project-actions-menu');
@@ -150,7 +288,7 @@ export function createProductUI() {
   preferences.prepend(node('p', '自动记住打开的文件标签和阅读位置。未保存内容是否恢复，由下方的本机草稿选项控制。', 'field-hint'));
   const appearance = node('div', '', 'appearance-settings'); appearance.append(node('strong', '外观'));
   appearance.append(document.querySelector('.appearance-picker'), $('themeToggle')); preferences.prepend(appearance);
-  const menu = node('button', '工具', 'text-button'); menu.type = 'button'; menu.onclick = () => $('workbenchButton').click(); shortcuts.append(menu);
+  const menu = node('button', '更多工具', 'text-button'); menu.type = 'button'; menu.onclick = () => $('workbenchButton').click(); shortcuts.append(menu);
   $('workbenchButton').hidden = true;
   function setMode(value, persist = true) {
     mode = value; if (persist) try { localStorage.setItem('lemon:workspaceMode', value); } catch {}

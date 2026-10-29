@@ -8,6 +8,31 @@ import { createApplication } from '../server.mjs';
 import { extractParams, substituteParams, createParameterMemory, yesterdayBusinessDate, calendarDate } from '../public/sql-parameters.js';
 import { createSqlQuery, resultText, filterRows, sqlFileFromRunnerLink, columnValueKey, columnOptions } from '../public/sql-query.js';
 import { createBottomPanel } from '../public/editor-window.js';
+test('query charts use every filtered loaded row, isolate tab settings and never rerun SQL', async t => {
+  const { $, finish, settle, requests, files } = await ui(t);
+  const waitFor = async check => { for (let i = 0; i < 200; i++) { if (check()) return; await settle(); } assert.fail('chart did not settle'); };
+  $('sqlRun').click();
+  finish({ ok: true, columns: ['day', 'amount', 'segment'], rows: Array.from({ length: 130 }, (_, i) => [`d${i}`, String(i + 1), i < 8 ? 'pick' : 'other']), rowCount: 200, truncated: true, durationMs: 50 }); await settle();
+  const before = requests.length, original = files[0].content;
+  $('sqlChartView').click(); await waitFor(() => $('sqlResultBody').querySelector('.chart-surface')?.dataset.pointCount === '130');
+  assert.equal($('sqlPagination').hidden, true); assert.match($('sqlResultBody').querySelector('.chart-scope').textContent, /截断预览/);
+  const selectChart = type => { const select = $('sqlResultBody').querySelector('[data-chart-control=type]'); select.value = type; select.dispatchEvent(new window.Event('change')); };
+  selectChart('bar'); assert.equal($('sqlResultBody').querySelector('.chart-surface').dataset.chartType, 'bar');
+  $('sqlFilter').value = 'pick'; $('sqlFilter').dispatchEvent(new window.Event('input'));
+  await waitFor(() => $('sqlResultBody').querySelector('.chart-surface')?.dataset.pointCount === '8');
+  assert.match($('sqlResultBody').querySelector('.chart-scope').textContent, /8 \/ 130/);
+  for (const type of ['pie', 'donut']) { selectChart(type); assert.equal($('sqlResultBody').querySelector('.chart-status').dataset.error, 'false'); }
+  $('sqlTableView').click(); assert.equal($('sqlResultBody').querySelectorAll('tbody tr').length, 8); assert.equal($('sqlFilter').value, 'pick');
+  assert.equal(requests.length, before); assert.equal(files[0].content, original);
+  $('sqlRun').click(); finish({ ok: true, columns: ['month', 'value'], rows: [['Jan', 3], ['Feb', 4]], rowCount: 2, durationMs: 3 }); await settle();
+  $('sqlChartView').click(); await waitFor(() => $('sqlResultBody').querySelector('.chart-surface')?.dataset.pointCount === '2');
+  assert.equal($('sqlResultBody').querySelector('[data-chart-control=type]').value, 'line');
+  $('sqlResultTabs').querySelector('[role=tab]').click(); $('sqlChartView').click();
+  await waitFor(() => $('sqlResultBody').querySelector('.chart-surface')?.dataset.pointCount === '8');
+  assert.equal($('sqlResultBody').querySelector('[data-chart-control=type]').value, 'donut');
+  $('sqlTableView').click(); $('sqlChartView').click(); $('sqlTableView').click(); await settle();
+  assert.ok($('sqlResultBody').querySelector('table')); assert.equal($('sqlResultBody').querySelector('.chart-panel'), null);
+});
 test('query history requires confirmation before retry and reuses its original parameters without editing files', async t => {
   const { $, select, requests, settle, finish, files } = await ui(t);
   select(1); $('sqlRun').click(); $('sqlParamsFields').querySelector('input').value = '20260918';

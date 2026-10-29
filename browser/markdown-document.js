@@ -5,6 +5,25 @@ import hljs from 'highlight.js/lib/common';
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const escape = md.utils.escapeHtml;
+
+// Reuse the already bundled lexer for read-only file previews. Balance spans
+// at each newline so multiline comments/strings keep their color in line rows.
+export function highlightFileLines(source, filename = '') {
+  const extension = filename.toLowerCase().split('/').at(-1).split('.').at(-1);
+  const language = ({ sql: 'sql', hql: 'sql', ddl: 'sql', dml: 'sql', py: 'python', pyi: 'python', pyw: 'python', js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', css: 'css', json: 'json', html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml', yaml: 'yaml', yml: 'yaml', sh: 'bash', bash: 'bash', md: 'markdown', java: 'java', go: 'go', rs: 'rust', rb: 'ruby', c: 'c', h: 'c', cpp: 'cpp' })[extension] || 'text';
+  const limited = source.length > 100_000 && language !== 'text';
+  let html = escape(source);
+  if (!limited && hljs.getLanguage(language)) {
+    try { html = hljs.highlight(source, { language, ignoreIllegals: true }).value; } catch { /* incomplete code stays readable */ }
+  }
+  const lines = [''], spans = [];
+  for (const token of html.split(/(<span class="[^"]+">|<\/span>|\n)/)) {
+    if (token === '\n') { lines[lines.length - 1] += '</span>'.repeat(spans.length); lines.push(spans.join('')); }
+    else { lines[lines.length - 1] += token; if (token.startsWith('<span class="')) spans.push(token); else if (token === '</span>') spans.pop(); }
+  }
+  return { lines, language, limited };
+}
+
 md.use(footnote).use(katexPlugin.default || katexPlugin, { output: 'mathml', trust: false, throwOnError: false, maxExpand: 1000, maxSize: 20, enableFencedBlocks: true });
 const mathFence = md.renderer.rules.fence;
 const codeBlock = (code, language = '') => {

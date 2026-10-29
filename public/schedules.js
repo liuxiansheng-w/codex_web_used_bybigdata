@@ -1,4 +1,7 @@
 import { beijingDate, beijingTime, describeSchedule, formatScheduleTime, normalizeSchedule, upcomingSchedule } from './schedule-time.js';
+import { permissionPresets } from './permission-presets.js';
+
+const effortNames = { none: '无', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高', ultra: 'Ultra' };
 
 // Local, Monday-first calendar. The text field is still editable and stores YYYY-MM-DD.
 function createDatePicker(input) {
@@ -57,12 +60,23 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
   const button = (label, action, className = 'secondary-button') => { const el = node('button', label, className); el.type = 'button'; el.addEventListener('click', action); return el; };
   const projectName = cwd => cwd?.split('/').filter(Boolean).at(-1) || cwd || '未选择项目';
   let jobs = [], connected = true, editor = null, dirty = false, writing = false, readVersion = 0, timer, listSignature = '', originalRule = null, originalDraft = '', originalRuns = 0;
+  let optionVersion = 0, optionsReady = false, modelOptions = [], permissionOptions = [];
   root.innerHTML = `
     <div class="schedule-heading"><div><h3>定时任务</h3><p class="field-hint">把重复的事交给助手，按你设定的时间执行。</p></div><button id="scheduleNew" type="button" class="primary-button">＋ 新建任务</button></div>
     <div class="schedule-service"><span>北京时间 · 24 小时制</span><button id="scheduleRefresh" type="button" class="text-button">刷新</button></div>
     <p id="scheduleNotice" class="schedule-notice" role="status"></p>
     <form id="scheduleForm" hidden><fieldset id="scheduleFields"><div class="schedule-form-title"><h4 id="scheduleFormTitle">新建任务</h4><span id="scheduleProject" title=""></span></div>
       <label for="scheduleName">任务名称<input id="scheduleName" required maxlength="80" placeholder="例如：每日项目检查"></label>
+      <fieldset class="schedule-plan schedule-execution"><legend>运行设置</legend>
+        <label class="schedule-setting"><span>审批模式</span><select id="schedulePermission"></select></label>
+        <p id="schedulePermissionHint" class="field-hint"></p>
+        <label id="scheduleFullAccessRow" class="schedule-enable" hidden><input id="scheduleFullAccess" type="checkbox">我确认此任务可访问网络和电脑文件，脚本不受沙箱限制</label>
+        <label class="schedule-setting"><span>使用模型</span><select id="scheduleModel"></select></label>
+        <label class="schedule-setting"><span>推理强度</span><select id="scheduleEffort"></select></label>
+        <label class="schedule-setting"><span>会话文件夹</span><select id="scheduleFolder"></select></label>
+        <p class="field-hint">每次创建的新会话会放入所选分组。可先在右侧会话列表新建文件夹，再刷新选项。</p>
+        <div class="schedule-options-status"><span id="scheduleOptionsStatus" class="field-hint" role="status"></span><button id="scheduleOptionsRefresh" type="button" class="text-button">刷新选项</button></div>
+      </fieldset>
       <fieldset class="schedule-plan"><legend>执行计划</legend>
         <div class="schedule-setting"><span class="schedule-field-label">执行方式</span><div class="schedule-frequency-options"><label><input type="radio" name="scheduleMode" value="once">仅一次</label><label><input type="radio" name="scheduleMode" value="repeat" checked>周期执行</label></div></div>
         <label id="scheduleCycleRow" class="schedule-setting"><span>执行周期</span><select id="scheduleCycle"><option value="daily">每天</option><option value="weekdays">周一至周五</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option></select></label>
@@ -77,7 +91,7 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
       </fieldset>
       <label for="scheduleText">任务内容<textarea id="scheduleText" rows="4" required maxlength="10000" placeholder="写清楚要检查的内容，以及希望得到的结果。"></textarea></label>
       <label class="schedule-enable"><input id="scheduleEnabled" type="checkbox" checked>保存后启用，到了时间自动执行</label>
-      <p class="field-hint">任务以只读、无网络权限执行，每次运行会消耗模型额度。</p>
+      <p class="field-hint">每次运行使用以上设置并消耗模型额度。需要你批准或回答问题时，会在新会话中等待。</p>
       <div class="schedule-form-actions"><button id="scheduleSave" class="primary-button">创建并启用</button><button id="scheduleCancel" type="button" class="secondary-button">取消</button></div>
     </fieldset></form>
     <div class="schedule-list-toolbar"><label class="sr-only" for="scheduleScope">项目范围</label><select id="scheduleScope"><option value="current">当前项目</option><option value="all">全部项目</option></select><label class="sr-only" for="scheduleFilter">任务状态</label><select id="scheduleFilter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="paused">已暂停 / 已结束</option><option value="archived">已归档</option></select><span id="scheduleCount"></span></div>
@@ -88,6 +102,50 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
   const lastDay = node('option', '最后一天'); lastDay.value = 'last'; $('scheduleMonthDay').append(lastDay);
   const calendars = [$('scheduleDate'), $('scheduleEndDate')].map(input => createDatePicker(input));
   const say = (text = '', error = false) => { $('scheduleNotice').textContent = text; $('scheduleNotice').classList.toggle('is-error', error); };
+  function selectOptions(id, values, selected) {
+    const select = $(id); select.replaceChildren();
+    for (const value of values) { const option = node('option', value.name); option.value = value.id; option.disabled = !!value.disabled; select.append(option); }
+    if (!values.some(value => value.id === selected)) { const missing = node('option', `${selected}（已不可用，请重新选择）`); missing.value = selected; missing.disabled = true; select.append(missing); }
+    select.value = selected;
+  }
+  function permissionHint() {
+    const mode = $('schedulePermission').value, full = mode === 'danger-full-access';
+    $('scheduleFullAccessRow').hidden = !full; $('scheduleFullAccess').required = full;
+    $('schedulePermissionHint').textContent = permissionOptions.find(option => option.id === mode)?.reason || ({
+      'auto-review': '可以修改项目文件。联网或脱离沙箱的请求由助手自动审查，未获批准的操作不会执行。',
+      'workspace-write': '可以修改项目文件。联网或脱离沙箱时会等待你批准。',
+      'danger-full-access': '无需审批即可执行脚本、联网及读写电脑文件，仍受系统和组织策略限制。',
+      'read-only': '仅允许读取，不能写入、联网或申请脱离沙箱。',
+    })[mode] || '';
+  }
+  function renderEfforts(selected = $('scheduleEffort').value) {
+    const model = modelOptions.find(item => item.id === $('scheduleModel').value);
+    selectOptions('scheduleEffort', [{ id: '', name: '模型默认强度' }, ...(model?.efforts || []).map(item => ({ id: item.reasoningEffort, name: effortNames[item.reasoningEffort] || item.reasoningEffort }))], selected);
+  }
+  function executionState(loading = false) {
+    for (const id of ['schedulePermission', 'scheduleModel', 'scheduleEffort', 'scheduleFolder', 'scheduleFullAccess']) $(id).disabled = !optionsReady || loading;
+    $('scheduleSave').disabled = !optionsReady || loading;
+    $('scheduleOptionsRefresh').disabled = loading;
+  }
+  async function loadOptions(selection) {
+    if (!editor || writing) return;
+    const target = editor, version = ++optionVersion;
+    const current = selection || { model: $('scheduleModel').value, effort: $('scheduleEffort').value, folderId: $('scheduleFolder').value };
+    optionsReady = false; executionState(true); $('scheduleOptionsStatus').textContent = '正在读取模型、权限和文件夹…';
+    try {
+      const data = await api(`/api/schedules/options?cwd=${encodeURIComponent(target.cwd)}`);
+      if (version !== optionVersion || editor !== target) return;
+      if (!Array.isArray(data.models) || !Array.isArray(data.permissions?.options) || !Array.isArray(data.folders)) throw Error('运行设置暂不可用，请加载新版服务后刷新选项。');
+      modelOptions = data.models; permissionOptions = data.permissions.options;
+      selectOptions('schedulePermission', permissionPresets.map(preset => ({ id: preset.id, name: preset.title, disabled: !permissionOptions.find(option => option.id === preset.id)?.enabled })), $('schedulePermission').value);
+      const selectedModel = current.model === undefined ? modelOptions.find(item => item.id === target.initialModel)?.id || modelOptions.find(item => item.isDefault)?.id || modelOptions[0]?.id || '' : current.model;
+      selectOptions('scheduleModel', [{ id: '', name: '跟随运行时默认模型' }, ...modelOptions], selectedModel);
+      renderEfforts(current.effort || '');
+      selectOptions('scheduleFolder', [{ id: '', name: '未分组' }, ...data.folders], current.folderId || '');
+      optionsReady = true; permissionHint(); $('scheduleOptionsStatus').textContent = data.models.length ? '设置仅用于此定时任务。' : '当前没有可选模型，可刷新后重新选择。';
+    } catch (error) { if (version === optionVersion && editor === target) $('scheduleOptionsStatus').textContent = error.message; }
+    finally { if (version === optionVersion && editor === target) executionState(); }
+  }
   const kind = () => root.querySelector('[name="scheduleMode"]:checked').value === 'once' ? 'once' : $('scheduleCycle').value;
   function readRule() {
     const selected = kind(), time = $('scheduleTime').value.trim(), date = $('scheduleDate').value.trim();
@@ -125,8 +183,14 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
   function edit(job) {
     if (writing || dirty && !confirm('放弃当前未保存的任务修改？')) return;
     calendars.forEach(calendar => calendar.close());
-    editor = job ? { id: job.id, version: job.version, cwd: job.cwd } : { cwd: getContext().cwd }; dirty = false; originalRule = null; originalDraft = ''; originalRuns = job?.scheduleRuns || 0;
+    editor = job ? { id: job.id, version: job.version, cwd: job.cwd } : { cwd: getContext().cwd, initialModel: getContext().model }; dirty = false; originalRule = null; originalDraft = ''; originalRuns = job?.scheduleRuns || 0;
     $('scheduleForm').reset(); $('scheduleName').value = job?.name || ''; $('scheduleText').value = job?.text || '';
+    selectOptions('schedulePermission', permissionPresets.map(preset => ({ id: preset.id, name: preset.title })), job?.mode || (job ? 'read-only' : 'auto-review'));
+    selectOptions('scheduleModel', [{ id: '', name: '正在读取…' }], job?.model || '');
+    selectOptions('scheduleEffort', [{ id: '', name: '模型默认强度' }], job?.effort || '');
+    selectOptions('scheduleFolder', [{ id: '', name: '未分组' }], job?.folderId || '');
+    $('scheduleFullAccess').checked = job?.fullAccessConfirmed === true; permissionHint();
+    void loadOptions({ model: job ? job.model || '' : undefined, effort: job?.effort || '', folderId: job?.folderId || '' });
     const value = job?.schedule || { kind: 'daily', time: '09:00', startDate: beijingDate(Date.now() + (beijingTime() >= '09:00' ? 86400000 : 0)) };
     const selected = value.kind === 'weekly' && value.days.join(',') === '1,2,3,4,5' ? 'weekdays' : value.kind;
     root.querySelector(`[name="scheduleMode"][value="${selected === 'once' ? 'once' : 'repeat'}"]`).checked = true; $('scheduleCycle').value = selected === 'once' ? 'daily' : selected;
@@ -162,6 +226,8 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
       if (job.schedule.endDate) card.append(node('p', `有效至 ${job.schedule.endDate}（含当天）`, 'field-hint'));
       if (job.schedule.maxRuns) card.append(node('p', `本计划已自动执行 ${job.scheduleRuns || 0} / ${job.schedule.maxRuns} 次`, 'field-hint'));
       const project = node('p', `所属项目：${projectName(job.cwd)}`, 'field-hint'); project.title = job.cwd; card.append(project);
+      card.append(node('p', `${permissionPresets.find(option => option.id === (job.mode || 'read-only'))?.title || '未知权限'} · ${job.modelName || job.model || '跟随运行时默认模型'} · ${job.effort ? effortNames[job.effort] || job.effort : '模型默认强度'}`, 'field-hint'));
+      card.append(node('p', `会话文件夹：${job.folderId ? job.folderName || '文件夹已不可用，请编辑重新选择' : '未分组'}`, 'field-hint'));
       const detail = node('details'); detail.dataset.job = job.id; detail.open = expanded.has(job.id); detail.append(node('summary', `任务内容与运行记录${job.history.length ? `（${job.history.length}）` : ''}`), node('p', job.text, 'schedule-prompt'));
       if (!job.history.length) detail.append(node('p', '尚未运行，到时会自动新建会话。', 'field-hint'));
       for (const record of job.history) { const row = node('div', null, 'schedule-history'); row.append(node('span', `${formatScheduleTime(record.at)} · ${runLabel(record)}`)); if (record.error) row.append(node('p', record.error, 'schedule-error')); if (record.threadId) row.append(button('查看结果', async () => { try { await onThread(record.threadId); close(); } catch (error) { say(error.message, true); } }, 'text-button')); detail.append(row); }
@@ -194,18 +260,26 @@ export function createSchedules({ root, api, getContext, onThread, close }) {
     finally { writing = false; $('scheduleFields').disabled = false; $('scheduleNew').disabled = false; render(); }
   }
   $('scheduleNew').addEventListener('click', () => edit()); $('scheduleRefresh').addEventListener('click', () => load());
+  $('scheduleOptionsRefresh').addEventListener('click', () => loadOptions());
+  $('scheduleModel').addEventListener('change', () => renderEfforts(''));
+  $('schedulePermission').addEventListener('change', () => { $('scheduleFullAccess').checked = false; permissionHint(); });
   $('scheduleScope').addEventListener('change', render); $('scheduleFilter').addEventListener('change', render);
   $('scheduleForm').addEventListener('input', event => { if (!event.target.closest('.schedule-calendar')) { dirty = true; preview(); } }); $('scheduleForm').addEventListener('change', event => { if (!event.target.closest('.schedule-calendar')) { dirty = true; preview(); } });
-  $('scheduleCancel').addEventListener('click', () => { if (!dirty || confirm('放弃当前未保存的任务修改？')) { calendars.forEach(calendar => calendar.close()); $('scheduleForm').hidden = true; root.classList.remove('is-editing'); editor = null; dirty = false; } });
+  $('scheduleCancel').addEventListener('click', () => { if (!dirty || confirm('放弃当前未保存的任务修改？')) { calendars.forEach(calendar => calendar.close()); $('scheduleForm').hidden = true; root.classList.remove('is-editing'); editor = null; optionVersion++; dirty = false; } });
   $('scheduleForm').addEventListener('submit', async event => {
     event.preventDefault(); if (writing || !editor) return;
     try {
       const value = rule(); if ($('scheduleEnabled').checked && !upcomingSchedule(value, Date.now(), 3, completed(value)).length) throw new Error('已无后续执行时间，请调整执行计划。');
-      const body = { action: editor.id ? 'update' : 'create', ...editor, name: $('scheduleName').value, text: $('scheduleText').value, schedule: value, enabled: $('scheduleEnabled').checked };
+      if (!optionsReady) throw new Error('请先刷新并核对运行设置。');
+      for (const id of ['schedulePermission', 'scheduleModel', 'scheduleEffort', 'scheduleFolder']) if ($(id).selectedOptions[0]?.disabled) throw new Error('部分运行设置已不可用，请重新选择。');
+      const mode = $('schedulePermission').value, fullAccessConfirmed = $('scheduleFullAccess').checked;
+      if (mode === 'danger-full-access' && !fullAccessConfirmed) throw new Error('请先确认完全访问权限。');
+      const { initialModel, ...identity } = editor;
+      const body = { action: editor.id ? 'update' : 'create', ...identity, name: $('scheduleName').value, text: $('scheduleText').value, schedule: value, enabled: $('scheduleEnabled').checked, mode, fullAccessConfirmed, model: $('scheduleModel').value, effort: $('scheduleEffort').value, folderId: $('scheduleFolder').value || null };
       if (!body.name.trim() || !body.text.trim()) throw new Error('请填写任务名称和任务内容。');
       if (await mutate(body, body.action === 'create' ? body.enabled ? '任务已创建并启用。' : '任务已保存，当前暂停。' : '任务修改已保存。')) { calendars.forEach(calendar => calendar.close()); $('scheduleForm').hidden = true; root.classList.remove('is-editing'); editor = null; dirty = false; }
     } catch (error) { say(error.message, true); }
   });
   function setVisible(visible) { if (!visible) calendars.forEach(calendar => calendar.close()); doc.defaultView.clearInterval(timer); if (visible) timer = doc.defaultView.setInterval(() => { if (doc.visibilityState !== 'hidden') void load({ quiet: true }); }, 15000); }
-  return { load, render, setVisible, hasDraft: () => dirty, get pending() { return writing; }, dispose: () => { calendars.forEach(calendar => calendar.dispose()); doc.defaultView.clearInterval(timer); readVersion++; } };
+  return { load, render, setVisible, hasDraft: () => dirty, get pending() { return writing; }, dispose: () => { calendars.forEach(calendar => calendar.dispose()); doc.defaultView.clearInterval(timer); readVersion++; optionVersion++; } };
 }

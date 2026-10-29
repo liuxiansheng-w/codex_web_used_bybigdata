@@ -1,3 +1,4 @@
+import { createDraftJournal } from './draft-journal.js';
 // Error pages are transport failures, not useful user-facing diagnostics.
 // Preserve ordinary service messages; never render or echo a gateway's HTML.
 export function readableNotice(message) {
@@ -334,19 +335,19 @@ export function createAppearanceControl({ root, select, storage }) {
 
 // Keep transient drafts in this page only unless the user opts into persistence.
 export function createDraftStore({ storage, onError = () => {} } = {}) {
-  const drafts = new Map();
+  const drafts = new Map(), persisted = new Map();
   const key = (cwd, threadId) => JSON.stringify([cwd, threadId || null]);
-  const persistedKey = 'codex-desk:promptDrafts';
-  const enabled = () => storage?.getItem('codex-desk:persistDrafts') === 'true';
-  try { if (enabled()) for (const [key, value] of JSON.parse(storage.getItem(persistedKey) || '[]')) drafts.set(key, value); } catch { onError('本机输入草稿读取失败。'); }
-  const persist = () => { try { if (enabled()) { const data = JSON.stringify([...drafts].slice(-30).map(([key, value]) => [key, { text: value.text, model: value.model, context: {} }])); if (data.length > 1000000) throw new Error('草稿过大'); storage.setItem(persistedKey, data); } } catch { onError('浏览器草稿存储失败，请手动备份未发送内容。'); } };
+  const journal = createDraftJournal({ storage, name: 'promptDrafts', onError });
+  for (const record of journal.latest()) { drafts.set(record.id, record.value); persisted.set(record.id, JSON.stringify(record.value)); }
   return {
     hasUnsent(exceptCwd, exceptThread) { return [...drafts.entries()].some(([id, value]) => (exceptCwd === undefined || id !== key(exceptCwd, exceptThread)) && (value.text?.trim() || value.context?.files?.length)); },
-    get persisted() { return enabled(); },
-    save(cwd, threadId, value) { drafts.set(key(cwd, threadId), structuredClone(value)); persist(); },
-    read(cwd, threadId) { const value = drafts.get(key(cwd, threadId)); return value ? structuredClone(value) : null; },
-    clear(cwd, threadId) { drafts.delete(key(cwd, threadId)); persist(); },
-    clearSaved() { storage?.removeItem(persistedKey); },
+    get persisted() { return storage?.getItem('codex-desk:persistDrafts') === 'true'; },
+    save(cwd, threadId, value) { const id = key(cwd, threadId), stored = { text: value.text, model: value.model, context: {} }, data = JSON.stringify(stored); drafts.set(id, structuredClone(value)); if (storage?.getItem('codex-desk:persistDrafts') === 'true' && persisted.get(id) !== data) { if (journal.put(id, stored)) persisted.set(id, data); } },
+    read(cwd, threadId) { const value = drafts.get(key(cwd, threadId)) || journal.latest().find(record => record.id === key(cwd, threadId))?.value; return value ? structuredClone(value) : null; },
+    clear(cwd, threadId, sentText = drafts.get(key(cwd, threadId))?.text) { persisted.delete(key(cwd, threadId)); drafts.delete(key(cwd, threadId)); journal.remove(key(cwd, threadId), value => value.text === sentText); },
+    versions(cwd, threadId) { return journal.list().filter(record => record.id === key(cwd, threadId) && typeof record.value.text === 'string'); },
+    clearSaved() { journal.clear(); persisted.clear(); },
+    matchesStorage(key) { return journal.matches(key); },
   };
 }
 
@@ -380,20 +381,21 @@ export function positionPopover(anchor, popup, width = 380) {
 // Only describe observed state. A history summary without runtime data is not
 // evidence that a task has finished or is idle in another client.
 // Refresh metadata only. Never switch models, send prompts or reset drafts.
-export function createModelCatalogRefresh({ load, apply, onError = () => {}, available = () => true, now = Date.now, interval = 60_000 }) {
+export function createModelCatalogRefresh({ load, apply, onStart = () => {}, onError = () => {}, onFinish = () => {}, available = () => true, now = Date.now, interval = 60_000 }) {
   let lastAttempt = -Infinity, pending = null, revision = 0;
   return {
     markLoaded() { revision++; lastAttempt = now(); },
-    refresh() {
+    refresh({ force = false } = {}) {
       if (!available()) return Promise.resolve();
       if (pending) return pending;
-      if (now() - lastAttempt < interval) return Promise.resolve();
+      if (!force && now() - lastAttempt < interval) return Promise.resolve();
       lastAttempt = now(); const current = ++revision;
+      onStart();
       pending = Promise.resolve().then(load).then(data => {
         if (current !== revision) return;
         if (!Array.isArray(data.models)) throw new Error('模型列表格式无效。');
         apply(data.models);
-      }).catch(error => { if (current === revision) onError(error); }).finally(() => { pending = null; });
+      }).catch(error => { if (current === revision) onError(error); }).finally(() => { pending = null; onFinish(); });
       return pending;
     },
   };
@@ -583,7 +585,7 @@ export function renderGeneratedImage(element, item) {
 // mode; explicit choices survive skin changes, docking and browser reloads.
 export function createModuleThemeControls({ root, storage, bottomPanel }) {
   const doc = root.ownerDocument, $ = id => doc.getElementById(id);
-  const names = { editor: '编辑器', chat: '对话', terminal: '终端', results: '查询结果', tools: '工具面板' };
+  const names = { editor: '编辑器', chat: '对话', liveEdits: 'AI 编辑浮窗', terminal: '终端', results: '查询结果', tools: '工具面板', toolbox: '工具箱', testPreview: '测试预览' };
   let saved = {};
   try { const value = JSON.parse(storage?.getItem('lemon:moduleThemes') || '{}'); if (value && typeof value === 'object' && !Array.isArray(value)) saved = value; } catch {}
   const choices = Object.fromEntries(Object.keys(names).filter(key => ['light', 'dark'].includes(saved[key])).map(key => [key, saved[key]]));
@@ -592,9 +594,12 @@ export function createModuleThemeControls({ root, storage, bottomPanel }) {
   function follow(key, ...nodes) { surfaces.set(key, nodes.filter(Boolean)); }
   follow('editor', $('fileEditor'), $('sqlParamsDialog'), $('sqlHistoryDialog'), $('editorTabMenu'), $('fileConflictDialog'), $('unsavedDialog'));
   follow('chat', $('mainPanel'));
+  follow('liveEdits', $('liveEditsWindow'));
   follow('terminal', $('bottomTerminal'));
   follow('results', $('sqlResults'), $('bottomResultsHost'), $('sqlResultHandle'), $('sqlColumnMenu'), $('sqlReviewDialog'), $('sqlRenameForm')?.closest('dialog'));
   follow('tools', $('workbenchDialog'), $('restoreFileDialog'), $('gitSubmitDialog'));
+  follow('toolbox', $('toolboxPanel'));
+  follow('testPreview', $('testPreviewWindow'));
   function paint(node, key) {
     node.dataset.moduleTheme = key; node.dataset.theme = mode(key);
     node.dataset.skin = root.dataset.skin || 'classic'; node.dataset.appearance = root.dataset.appearance || 'classic';
@@ -624,8 +629,11 @@ export function createModuleThemeControls({ root, storage, bottomPanel }) {
   }
   add('editor', doc.querySelector('.editor-window-actions'), $('editorLayoutToggle'));
   add('chat', doc.querySelector('.conversation-heading'));
+  add('liveEdits', doc.querySelector('.live-edits-actions'), $('liveEditsReset'));
   add('tools', doc.querySelector('.workbench-head'), $('closeWorkbench'));
   add('tools', doc.querySelector('#gitSubmitDialog .dialog-heading'));
+  add('toolbox', doc.querySelector('.toolbox-window-actions'), $('toolboxMaximize'));
+  add('testPreview', doc.querySelector('.test-preview-actions'), $('testPreviewZoom'));
   // The shared header controls the selected bottom tab. A second button travels
   // with the results header and is visible only while that window floats.
   if (bottomPanel) add(() => bottomPanel.activeTab, doc.querySelector('.bottom-panel-header'), $('bottomPanelExpand'));

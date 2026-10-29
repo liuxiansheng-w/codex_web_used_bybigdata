@@ -1,4 +1,5 @@
 import { createImageAttachment } from './interactions.js';
+import { projectPath } from './task-results.js';
 
 export const executionTypes = new Set(['commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageView', 'activitySummary', 'activityPlan']);
 export const statusLabel = status => ({ pending: '待执行', inProgress: '进行中', completed: '已完成', failed: '失败', interrupted: '已中断', declined: '已拒绝', approved: '已批准', denied: '已拒绝' })[status] || status || '';
@@ -37,6 +38,124 @@ const views = new WeakMap();
 const update = (node, value = '') => { const content = String(value ?? ''); if (node.textContent !== content) node.textContent = content; };
 const durationLabel = ms => !Number.isFinite(ms) || ms < 0 ? '' : ms < 1000 ? `${Math.round(ms)} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`;
 
+// Render the patch supplied by the runtime. Never apply it to an editor buffer
+// or infer that an in-progress/failed operation has written its proposed text.
+export function fileChangeLines(value) {
+  const source = String(value || ''), text = source.slice(0, 200_000), lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const truncated = source.length > text.length || lines.length > 3000;
+  let oldLine = null, newLine = null, oldLeft = 0, newLeft = 0, known = false, added = 0, removed = 0;
+  const rows = lines.slice(0, 3000).map(content => {
+    const hunk = content.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunk) {
+      oldLine = Number(hunk[1]); newLine = Number(hunk[3]);
+      oldLeft = Number(hunk[2] ?? 1); newLeft = Number(hunk[4] ?? 1); known = true;
+      return { kind: 'hunk', text: content };
+    }
+    const prefix = content[0];
+    if (oldLine !== null && (oldLeft > 0 || newLeft > 0)) {
+      if (prefix === '+' && newLeft > 0) { added++; newLeft--; return { kind: 'add', newLine: newLine++, text: content.slice(1) }; }
+      if (prefix === '-' && oldLeft > 0) { removed++; oldLeft--; return { kind: 'remove', oldLine: oldLine++, text: content.slice(1) }; }
+      if (prefix === ' ' && oldLeft > 0 && newLeft > 0) { oldLeft--; newLeft--; return { kind: 'context', oldLine: oldLine++, newLine: newLine++, text: content.slice(1) }; }
+    }
+    return { kind: 'meta', text: content };
+  });
+  return { rows, added, removed, known: known && !truncated, truncated };
+}
+
+function renderFileChanges(view, item, { state, cwd, onOpenFile }) {
+  const document = view.files.ownerDocument;
+  const node = (tag, className, parent) => { const value = document.createElement(tag); value.className = className; parent?.append(value); return value; };
+  const changes = Array.isArray(item.changes) ? item.changes : [];
+  update(view.title, `修改文件${changes.length ? ` · ${changes.length}` : ''}`);
+  update(view.fileHint, ({
+    running: '正在修改 · 实时展示本次差异，完成后同步已打开的文件',
+    completed: '已应用的修改记录 · 点击文件名查看当前磁盘内容',
+    waiting: '等待审批 · 以下是待确认的修改',
+    failed: '修改未成功完成 · 以下差异不代表全部已写入',
+    interrupted: '修改已中断 · 写入结果需核对',
+    unknown: '状态待同步 · 保留最后收到的修改内容',
+  })[state] || '等待文件修改结果');
+  const selected = changes.slice(0, view.fileLimit), keys = new Set(selected.map((change, index) => `${index}:${change.path}`));
+  for (const [key, file] of view.fileViews) if (!keys.has(key)) { file.el.remove(); view.fileViews.delete(key); }
+  for (const [index, change] of selected.entries()) {
+    const key = `${index}:${change.path}`; let file = view.fileViews.get(key);
+    if (!file) {
+      const el = node('details', 'file-change-file', view.files); el.open = true;
+      const heading = node('summary', 'file-change-heading', el);
+      file = { el, kind: node('span', 'file-change-kind', heading), path: node('button', 'file-change-path', heading), counts: node('span', 'file-change-counts', heading), rows: [], limit: 160 };
+      file.path.type = 'button';
+      file.scroller = node('div', 'file-diff-scroll', el); file.scroller.tabIndex = 0; file.scroller.setAttribute('role', 'region');
+      file.lines = node('div', 'file-diff-lines', file.scroller);
+      file.hint = node('p', 'file-diff-hint', el);
+      file.more = node('button', 'text-button file-diff-more', el); file.more.type = 'button';
+      file.more.onclick = () => { file.limit += 160; file.paint(); };
+      file.path.onclick = async event => {
+        event.preventDefault(); event.stopPropagation();
+        if (!file.entry || !file.onOpenFile || file.opening) return;
+        file.opening = true;
+        try { await file.onOpenFile(file.entry); }
+        catch (error) { update(view.fileFeedback, error.message); view.fileFeedback.hidden = false; }
+        finally { file.opening = false; }
+      };
+      file.paint = () => {
+        const data = file.parsed, visible = data.rows.slice(0, file.limit);
+        while (file.rows.length > visible.length) file.rows.pop().el.remove();
+        for (const [rowIndex, row] of visible.entries()) {
+          let entry = file.rows[rowIndex];
+          if (!entry) {
+            const el = node('div', 'file-diff-line', file.lines);
+            entry = { el, old: node('span', 'file-diff-number', el), next: node('span', 'file-diff-number', el), sign: node('span', 'file-diff-sign', el), code: node('span', 'file-diff-code', el) };
+            entry.old.setAttribute('aria-hidden', 'true'); entry.next.setAttribute('aria-hidden', 'true'); file.rows.push(entry);
+          }
+          entry.el.dataset.kind = row.kind;
+          update(entry.old, row.oldLine); update(entry.next, row.newLine);
+          update(entry.sign, row.kind === 'add' ? '+' : row.kind === 'remove' ? '−' : '');
+          const code = row.text || ' ';
+          if (code !== entry.codeText) {
+            if (entry.codeText && code.startsWith(entry.codeText)) entry.code.firstChild?.appendData(code.slice(entry.codeText.length));
+            else update(entry.code, code);
+          }
+          entry.codeText = code;
+        }
+        file.more.hidden = visible.length >= data.rows.length;
+        update(file.more, `展开更多（还剩 ${data.rows.length - visible.length} 行）`);
+        update(file.hint, !data.rows.length ? '运行时尚未提供文本差异。' : data.truncated ? '差异较长，此处最多展示前 3,000 行 / 200,000 字符。' : '');
+        file.hint.hidden = !!data.rows.length && !data.truncated;
+      };
+      view.fileViews.set(key, file);
+    }
+    const path = projectPath(change.path, cwd), target = change.movePath ? projectPath(change.movePath, cwd) : path;
+    const destination = item.status === 'completed' ? target : path;
+    file.entry = destination && path && target && change.kind !== 'delete' && (change.kind !== 'add' || item.status === 'completed') ? { cwd, path: destination } : null;
+    file.onOpenFile = onOpenFile;
+    file.path.disabled = !file.entry || !onOpenFile;
+    const label = path || String(change.path || '未提供路径');
+    update(file.path, change.movePath ? `${label} → ${target || change.movePath}` : label);
+    file.path.title = file.path.disabled ? String(change.path || '') : `在编辑器打开当前磁盘版本：${destination}`;
+    file.path.setAttribute('aria-label', file.path.title);
+    update(file.kind, change.movePath ? '重命名' : ({ add: '新增', delete: '删除' })[change.kind] || '编辑');
+    file.scroller.setAttribute('aria-label', `${label} 的修改差异，左侧旧行号，右侧新行号`);
+    if (!file.parsed || file.diff !== change.diff) {
+      file.diff = change.diff; file.parsed = fileChangeLines(change.diff);
+      update(file.counts, file.parsed.known ? `+${file.parsed.added}  −${file.parsed.removed}` : '差异预览');
+      file.paint();
+    }
+  }
+  update(view.fileOverflow, !changes.length ? item.text || '等待运行时返回文件路径和修改内容…' : '');
+  view.fileOverflow.hidden = !!changes.length;
+  view.filesMore.hidden = changes.length <= selected.length;
+  update(view.filesMore, `展开更多文件（另有 ${changes.length - selected.length} 个文件）`);
+  view.filesMore.onclick = () => { view.fileLimit += 12; renderFileChanges(view, item, { state, cwd, onOpenFile }); };
+  const output = String(item.output || '');
+  view.fileLog.hidden = !output;
+  if (output !== view.lastOutput) {
+    if (view.lastOutput && output.startsWith(view.lastOutput)) view.log.append(document.createTextNode(output.slice(view.lastOutput.length)));
+    else update(view.log, output);
+    view.lastOutput = output;
+  }
+}
+
 const markerText = state => ({ completed: '✓', failed: '!', interrupted: 'Ⅱ', waiting: 'Ⅱ', unknown: '·' })[state] || '';
 export function activityState(item, { live = true, waiting = false, active = true } = {}) {
   if (activityFailed(item)) return 'failed';
@@ -69,7 +188,7 @@ export function renderExecutionGroup(group, { items, active, interrupted = false
   update(view.status, `· ${label}${failures ? ` · ${failures} 项需查看` : ''}`);
 }
 
-export function renderActivity(element, item, { live = true, waiting = false, active = true, animate = false } = {}) {
+export function renderActivity(element, item, { live = true, waiting = false, active = true, animate = false, cwd, onOpenFile } = {}) {
   let view = views.get(element);
   const document = element.ownerDocument;
   const motion = animate && live && document.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches !== true;
@@ -83,7 +202,16 @@ export function renderActivity(element, item, { live = true, waiting = false, ac
     view.marker.setAttribute('aria-hidden', 'true');
     if (motion && active && (!item.turnStatus || item.turnStatus === 'inProgress')) element.classList.add('activity-enter');
     element.addEventListener('animationend', event => { if (event.animationName === 'execution-enter') element.classList.remove('activity-enter'); if (event.animationName === 'execution-complete') view.marker.classList.remove('just-completed'); });
-    if (narrative) {
+    if (item.type === 'fileChange') {
+      element.classList.add('file-change-activity'); details.open = true;
+      view.fileHint = node('p', 'file-change-hint', details);
+      view.files = node('div', 'file-change-files', details); view.fileViews = new Map(); view.fileLimit = 12;
+      view.fileOverflow = node('p', 'file-diff-hint', details);
+      view.filesMore = node('button', 'text-button file-diff-more', details); view.filesMore.type = 'button';
+      view.fileFeedback = node('p', 'file-change-feedback', details); view.fileFeedback.hidden = true; view.fileFeedback.setAttribute('role', 'status');
+      view.fileLog = node('details', 'file-change-log', details); update(node('summary', '', view.fileLog), '执行输出');
+      view.log = node('pre', 'activity-log', view.fileLog);
+    } else if (narrative) {
       view.text = node('div', 'activity-narrative-text', details);
       view.steps = node('ol', 'activity-steps', details);
     } else {
@@ -100,7 +228,7 @@ export function renderActivity(element, item, { live = true, waiting = false, ac
     }
     views.set(element, view);
   }
-  update(view.title, activityTitle(item));
+  if (item.type !== 'fileChange') update(view.title, activityTitle(item));
   const turnEnded = item.turnStatus && item.turnStatus !== 'inProgress';
   const state = activityState(item, { live, waiting, active });
   if (motion && view.state === 'running' && state === 'completed') view.marker.classList.add('just-completed');
@@ -109,6 +237,10 @@ export function renderActivity(element, item, { live = true, waiting = false, ac
   update(view.status, item.status === 'inProgress' && turnEnded ? '已结束，状态未返回' : item.status === 'inProgress' && state === 'unknown' ? '状态待同步' : item.status === 'inProgress' && waiting ? '等待你处理' : activityFailed(item) ? statusLabel(['declined', 'denied'].includes(item.status) ? item.status : 'failed') : statusLabel(item.status));
   update(view.duration, durationLabel(item.durationMs));
   element.classList.toggle('has-failures', activityFailed(item));
+  if (item.type === 'fileChange') {
+    renderFileChanges(view, item, { state, cwd, onOpenFile });
+    return;
+  }
   if (narrative) {
     update(view.text, item.text); view.text.hidden = !item.text;
     const steps = item.steps || [];

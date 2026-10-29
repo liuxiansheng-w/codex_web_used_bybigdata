@@ -72,6 +72,22 @@ test('project picker browses folders, validates paths, paginates, ignores stale 
   assert.deepEqual(notices, []);
 });
 
+test('project picker selects multiple sibling folders and opens each project', async t => {
+  const { $, document, window, settle } = await page(t);
+  let cwd = '/one/file'; const opened = [];
+  const api = async route => {
+    const url = new URL(route, 'http://localhost'), path = url.searchParams.get('cwd');
+    if (path === '/one') return { cwd: '/one', entries: [{ kind: 'folder', name: 'two', path: 'two' }, { kind: 'folder', name: 'three', path: 'three' }], nextOffset: null };
+    return { cwd: path, entries: [], nextOffset: null };
+  };
+  const registry = createProjectList({ api, onSelect: async path => { opened.push(path); cwd = path; return true; }, getContext: () => ({ cwd }), notice: assert.fail });
+  registry.remember('/one'); $('addProjectButton').click(); await settle(() => document.querySelectorAll('.project-folder-check').length === 2);
+  const checks = [...document.querySelectorAll('.project-folder-check')]; checks[0].click(); checks[1].click();
+  assert.equal($('projectChosenLabel').textContent, '已选 2 个项目'); assert.equal($('chooseProject').textContent, '添加并打开 2 个项目');
+  $('chooseProject').click(); await settle(() => !$('projectPicker').open);
+  assert.deepEqual(opened, ['/one/two', '/one/three']); assert.deepEqual(registry.list(), ['/one', '/one/two', '/one/three']);
+});
+
 test('app switches projects offline without closing buffers, mixing same-name files, drafts or permissions', async t => {
   const { $, document, input, submit, settle } = await page(t);
   const requests = [], files = new Map([['/one', 'one disk\n'], ['/two', 'two disk\n']]);
