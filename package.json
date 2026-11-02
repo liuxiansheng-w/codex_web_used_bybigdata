@@ -11,6 +11,7 @@
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check.mjs",
+    "build:sql-parser": "node scripts/build-sql-parser.mjs",
     "build:markdown": "node scripts/build-markdown.mjs",
     "build:toolbox": "node scripts/build-toolbox.mjs"
   },

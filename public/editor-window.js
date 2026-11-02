@@ -2,33 +2,35 @@ const margin = 8;
 const viewport = () => ({ width: Math.max(1, window.innerWidth - margin * 2), height: Math.max(1, window.innerHeight - margin * 2) });
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
-export function fitEditorRect(rect, area) {
-  const width = clamp(rect.width, Math.min(420, area.width), area.width);
-  const height = clamp(rect.height, Math.min(360, area.height), area.height);
+export function fitEditorRect(rect, area, minimum = { width: 420, height: 360 }) {
+  const width = clamp(rect.width, Math.min(minimum.width, area.width), area.width);
+  const height = clamp(rect.height, Math.min(minimum.height, area.height), area.height);
   return { x: clamp(rect.x, margin, area.width + margin - width), y: clamp(rect.y, margin, area.height + margin - height), width, height };
 }
 
-export function resizeEditorRect(rect, edge, dx, dy, area) {
+export function resizeEditorRect(rect, edge, dx, dy, area, minimum = { width: 420, height: 360 }) {
   const right = rect.x + rect.width, bottom = rect.y + rect.height;
-  const minWidth = Math.min(420, area.width), minHeight = Math.min(360, area.height);
+  const minWidth = Math.min(minimum.width, area.width), minHeight = Math.min(minimum.height, area.height);
   const next = { ...rect };
   if (edge.includes('w')) { next.x = clamp(rect.x + dx, margin, right - minWidth); next.width = right - next.x; }
   if (edge.includes('n')) { next.y = clamp(rect.y + dy, margin, bottom - minHeight); next.height = bottom - next.y; }
   if (edge.includes('e')) next.width = clamp(rect.width + dx, minWidth, area.width + margin - rect.x);
   if (edge.includes('s')) next.height = clamp(rect.height + dy, minHeight, area.height + margin - rect.y);
-  return fitEditorRect(next, area);
+  return fitEditorRect(next, area, minimum);
 }
 
-export function createEditorWindow({ pane, handle, maximize, reset, resizeHandles, enabled = () => true }) {
+export function createEditorWindow({ pane, handle, maximize, reset, resizeHandles, enabled = () => true, defaultRect, minimum }) {
   let rect = null, maximized = false, gesture = null;
+  const fit = (value, area = viewport()) => fitEditorRect(value, area, minimum);
+  const resize = (value, edge, dx, dy) => resizeEditorRect(value, edge, dx, dy, viewport(), minimum);
   function defaults() {
     const area = viewport(), width = Math.min(920, Math.max(640, area.width * .68));
-    return fitEditorRect({ x: window.innerWidth - width - 24, y: 56, width, height: Math.min(760, window.innerHeight - 100) }, area);
+    return fit(defaultRect ? defaultRect(area) : { x: window.innerWidth - width - 24, y: 56, width, height: Math.min(760, window.innerHeight - 100) }, area);
   }
   function render() {
     if (!enabled()) return;
     rect ||= defaults();
-    const area = viewport(); rect = fitEditorRect(rect, area);
+    const area = viewport(); rect = fit(rect, area);
     const shown = maximized ? { x: margin, y: margin, ...area } : rect;
     pane.style.left = `${shown.x}px`; pane.style.top = `${shown.y}px`;
     pane.style.width = `${shown.width}px`; pane.style.height = `${shown.height}px`;
@@ -61,9 +63,9 @@ export function createEditorWindow({ pane, handle, maximize, reset, resizeHandle
     if (maximized) {
       if (Math.abs(dx) + Math.abs(dy) < 4) return;
       maximized = false;
-      gesture.start = fitEditorRect({ ...rect, x: gesture.x - rect.width * (gesture.x / window.innerWidth), y: gesture.y - 24 }, viewport());
+      gesture.start = fit({ ...rect, x: gesture.x - rect.width * (gesture.x / window.innerWidth), y: gesture.y - 24 });
     }
-    rect = gesture.edge ? resizeEditorRect(gesture.start, gesture.edge, dx, dy, viewport()) : fitEditorRect({ ...gesture.start, x: gesture.start.x + dx, y: gesture.start.y + dy }, viewport());
+    rect = gesture.edge ? resize(gesture.start, gesture.edge, dx, dy) : fit({ ...gesture.start, x: gesture.start.x + dx, y: gesture.start.y + dy });
     render();
   }
   function toggle() { if (!enabled()) return; finish(); maximized = !maximized; render(); }
@@ -82,7 +84,7 @@ export function createEditorWindow({ pane, handle, maximize, reset, resizeHandle
     if (!direction || maximized) return;
     event.preventDefault(); render();
     const [dx, dy] = direction.map(n => n * 10);
-    rect = event.shiftKey ? resizeEditorRect(rect, 'se', dx, dy, viewport()) : fitEditorRect({ ...rect, x: rect.x + dx, y: rect.y + dy }, viewport());
+    rect = event.shiftKey ? resize(rect, 'se', dx, dy) : fit({ ...rect, x: rect.x + dx, y: rect.y + dy });
     render();
   });
   maximize.addEventListener('click', toggle);
@@ -91,6 +93,70 @@ export function createEditorWindow({ pane, handle, maximize, reset, resizeHandle
   window.addEventListener('blur', () => finish());
   document.addEventListener('keydown', event => { if (gesture && event.key === 'Escape') { event.preventDefault(); finish(true); } });
   return { show: render, hide: () => finish() };
+}
+
+// Only change geometry: the conversation, draft, requests and history retain
+// their existing DOM nodes and event subscriptions throughout the switch.
+export function createChatLayout({ pane, container, surface, onDock }) {
+  const doc = pane.ownerDocument, handle = pane.querySelector('.conversation-heading');
+  let mode = 'docked';
+  try { if (localStorage.getItem('lemon:chatLayout') === 'floating') mode = 'floating'; } catch {}
+  const button = (id, text, label, className = 'icon-button') => {
+    const node = doc.createElement('button'); node.id = id; node.type = 'button'; node.className = className;
+    node.textContent = text; node.title = label; node.setAttribute('aria-label', label); return node;
+  };
+  const grip = doc.createElement('span'); grip.className = 'chat-window-grip'; grip.textContent = '⠿'; grip.setAttribute('aria-hidden', 'true'); handle.prepend(grip);
+  handle.id = 'chatDragHandle';
+  const actions = doc.createElement('div'); actions.className = 'chat-window-actions';
+  const toggle = button('chatLayoutToggle', '悬浮', '悬浮对话', 'text-button');
+  const reset = button('chatResetWindow', '↺', '重置对话窗口位置和大小');
+  const maximize = button('chatMaximize', '□', '最大化窗口');
+  actions.append(toggle, reset, maximize); handle.append(actions);
+  const resizeHandles = ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map(edge => {
+    const node = doc.createElement('div'); node.className = 'chat-resize'; node.dataset.edge = edge; node.setAttribute('aria-hidden', 'true'); pane.append(node); return node;
+  });
+  const placeholder = doc.createElement('div'); placeholder.className = 'chat-floating-placeholder';
+  const hint = doc.createElement('p'); hint.textContent = '对话已在浮窗中打开';
+  const dock = button('chatDockFromWorkspace', '放回右侧', '将对话放回右侧', 'text-button');
+  placeholder.append(hint, dock); container.append(placeholder);
+  const floating = createEditorWindow({ pane, handle, maximize, reset, resizeHandles,
+    enabled: () => mode === 'floating', minimum: { width: 480, height: 480 },
+    defaultRect: () => ({ x: window.innerWidth - 644, y: 64, width: 620, height: Math.min(760, window.innerHeight - 100) }),
+  });
+  function syncPlaceholder() {
+    const editor = doc.getElementById('fileEditor');
+    const hasEditor = !editor.hidden && (surface.dataset.mode === 'files' || surface.dataset.mode === 'both' && container.classList.contains('editor-docked'));
+    placeholder.hidden = mode !== 'floating' || hasEditor;
+  }
+  function render() {
+    const active = mode === 'floating';
+    pane.classList.toggle('chat-floating', active); container.classList.toggle('chat-floating', active); surface.classList.toggle('has-floating-chat', active);
+    toggle.textContent = active ? '放回右侧' : '悬浮';
+    toggle.title = active ? '将对话放回右侧' : '悬浮对话，可拖动和调整大小'; toggle.setAttribute('aria-label', toggle.title); toggle.setAttribute('aria-pressed', String(active));
+    reset.hidden = maximize.hidden = !active;
+    handle.tabIndex = active ? 0 : -1;
+    handle.title = active ? '拖动移动 · 双击最大化' : '';
+    handle.setAttribute('aria-label', active ? '悬浮对话标题栏：拖动移动，回车最大化，方向键移动，Shift 加方向键调整大小' : '对话标题栏');
+    if (active) floating.show();
+    else { for (const key of ['left', 'top', 'width', 'height']) pane.style[key] = ''; pane.classList.remove('is-maximized'); }
+    syncPlaceholder();
+  }
+  function change(next) {
+    floating.hide(); mode = next; render();
+    try { localStorage.setItem('lemon:chatLayout', mode); } catch {}
+    if (mode === 'docked') onDock();
+    doc.dispatchEvent(new doc.defaultView.Event('workspace-layout'));
+  }
+  toggle.addEventListener('click', () => change(mode === 'docked' ? 'floating' : 'docked'));
+  dock.addEventListener('click', () => { change('docked'); toggle.focus(); });
+  doc.addEventListener('workspace-layout', syncPlaceholder);
+  if (doc.defaultView.MutationObserver) {
+    const observer = new doc.defaultView.MutationObserver(syncPlaceholder);
+    observer.observe(container, { attributes: true, attributeFilter: ['class'] });
+    observer.observe(doc.getElementById('fileEditor'), { attributes: true, attributeFilter: ['hidden'] });
+  }
+  render();
+  return { sync: syncPlaceholder };
 }
 
 export function dockSplit(length, ratio = .56, stacked = false) {
@@ -122,7 +188,7 @@ export function createEditorLayout({ container, divider, modeButton, ...options 
   function render() {
     const docked = mode === 'docked';
     container.classList.toggle('editor-docked', docked); container.classList.toggle('editor-floating', !docked);
-    pane.dataset.layout = mode; divider.hidden = !docked || pane.hidden;
+    pane.dataset.layout = mode; divider.hidden = !docked || pane.hidden || container.classList.contains('chat-floating');
     modeButton.textContent = docked ? '浮动窗口' : '平铺页面';
     modeButton.title = docked ? '切换为可拖动的浮动窗口，保留文件与编辑' : '切换为左右平铺，保留文件与编辑';
     modeButton.setAttribute('aria-label', modeButton.title);
@@ -152,7 +218,7 @@ export function createEditorLayout({ container, divider, modeButton, ...options 
     container.classList.remove('is-resizing-split'); render(); if (!cancel) persist();
   }
   divider.addEventListener('pointerdown', event => {
-    if (gesture || event.button !== 0 || mode !== 'docked' || pane.hidden) return;
+    if (gesture || event.button !== 0 || mode !== 'docked' || pane.hidden || container.classList.contains('chat-floating')) return;
     event.preventDefault(); const split = measure();
     gesture = { id: event.pointerId, position: stacked ? event.clientY : event.clientX, ratio, size: split.size, total: split.total, stacked };
     divider.setPointerCapture(event.pointerId); container.classList.add('is-resizing-split');
@@ -168,6 +234,7 @@ export function createEditorLayout({ container, divider, modeButton, ...options 
   divider.addEventListener('lostpointercapture', () => finish());
   divider.addEventListener('dblclick', () => { finish(); ratio = .56; render(); persist(); });
   divider.addEventListener('keydown', event => {
+    if (divider.hidden) return;
     const split = measure(), direction = (stacked ? { ArrowUp: -1, ArrowDown: 1 } : { ArrowLeft: -1, ArrowRight: 1 })[event.key];
     if (!direction && !['Home', 'End', 'Enter'].includes(event.key)) return;
     event.preventDefault();
@@ -179,6 +246,7 @@ export function createEditorLayout({ container, divider, modeButton, ...options 
   window.addEventListener('resize', () => { finish(); render(); });
   window.addEventListener('blur', () => finish());
   document.addEventListener('keydown', event => { if (gesture && event.key === 'Escape') { event.preventDefault(); finish(true); } });
+  document.addEventListener('workspace-layout', render);
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => render()).observe(container);
   render();
   return { show: render, hide() { finish(); floating.hide(); divider.hidden = true; }, get mode() { return mode; } };
@@ -316,7 +384,7 @@ export function createBottomPanel({ surface }) {
   try { const saved = JSON.parse(win.localStorage.getItem('lemon:bottomPanel') || 'null'); if (saved) { active = saved.tab === 'results' ? 'results' : 'terminal'; open = saved.open === true; if (Number.isFinite(saved.height) && saved.height >= 140 && saved.height <= 1400) height = saved.height; } } catch {}
   function placement() {
     const panes = $('workspacePanes');
-    const underEditor = surface.dataset.mode === 'both' && !$('fileEditor')?.hidden && panes?.classList.contains('editor-docked') && !panes.classList.contains('editor-stacked');
+    const underEditor = surface.dataset.mode === 'both' && !$('fileEditor')?.hidden && panes?.classList.contains('editor-docked') && !panes.classList.contains('editor-stacked') && !panes.classList.contains('chat-floating');
     surface.classList.toggle('bottom-under-editor', !!underEditor);
     surface.style.setProperty('--bottom-panel-width', underEditor ? panes.style.getPropertyValue('--editor-split-size') || '56%' : '100%');
     return !!underEditor;
@@ -326,7 +394,7 @@ export function createBottomPanel({ surface }) {
     const total = surface.getBoundingClientRect().height || win.innerHeight;
     const bar = surface.querySelector('.workspace-bar')?.getBoundingClientRect().height || 48;
     const available = Math.max(36, total - bar);
-    const sharesChat = !underEditor && surface.dataset.mode !== 'files';
+    const sharesChat = !underEditor && surface.dataset.mode !== 'files' && !$('workspacePanes')?.classList.contains('chat-floating');
     const heading = doc.querySelector('.conversation-heading')?.getBoundingClientRect().height || 48;
     const composer = doc.querySelector('.composer-area')?.getBoundingClientRect().height || 180;
     const chatReserve = Math.max(280, heading + composer + 120);

@@ -1,5 +1,5 @@
 import { createImageAttachment } from './interactions.js';
-import { projectPath } from './task-results.js';
+import { projectPath } from './project-paths.js';
 
 export const executionTypes = new Set(['commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageView', 'activitySummary', 'activityPlan']);
 export const statusLabel = status => ({ pending: '待执行', inProgress: '进行中', completed: '已完成', failed: '失败', interrupted: '已中断', declined: '已拒绝', approved: '已批准', denied: '已拒绝' })[status] || status || '';

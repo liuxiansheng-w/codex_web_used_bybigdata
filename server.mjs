@@ -19,7 +19,7 @@ import { FileHistory } from './lib/file-history.mjs';
 import { SpreadsheetPreview } from './lib/spreadsheet-preview.mjs';
 import { Subagents } from './lib/subagents.mjs';
 import { createEventStream, prepareThread } from './lib/event-stream.mjs';
-import { ModelConnections, COSMOS_MODEL } from './lib/model-connections.mjs';
+import { ModelConnections } from './lib/model-connections.mjs';
 import { AppApprovals } from './lib/app-approvals.mjs';
 import { Memories } from './lib/memories.mjs';
 import { ProjectFavorites } from './lib/project-favorites.mjs';
@@ -59,6 +59,7 @@ const assets = new Map([
   ['/vendor/toolbox.js', ['vendor/toolbox.js', 'text/javascript; charset=utf-8']],
   ['/schedules.js', ['schedules.js', 'text/javascript; charset=utf-8']],
   ['/schedule-time.js', ['schedule-time.js', 'text/javascript; charset=utf-8']],
+  ['/holiday-calendar.js', ['holiday-calendar.js', 'text/javascript; charset=utf-8']],
   ['/git-submit.js', ['git-submit.js', 'text/javascript; charset=utf-8']],
   ['/artifact-viewer.js', ['artifact-viewer.js', 'text/javascript; charset=utf-8']],
   ['/project-list.js', ['project-list.js', 'text/javascript; charset=utf-8']],
@@ -74,6 +75,7 @@ const assets = new Map([
   ['/message-timing.js', ['message-timing.js', 'text/javascript; charset=utf-8']],
   ['/sql-query.js', ['sql-query.js', 'text/javascript; charset=utf-8']],
   ['/sql-parameters.js', ['sql-parameters.js', 'text/javascript; charset=utf-8']],
+  ['/sql-parser.js', ['sql-parser.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
 ]);
@@ -300,6 +302,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         if (url.pathname === '/api/terminal') { json({ processes: workbench.terminalList() }); return; }
       }
       if (req.method === 'POST' && url.pathname === '/api/git/submit') { json(await gitSubmit.action(await readBody(req))); return; }
+      if (req.method === 'POST' && url.pathname === '/api/schedules/calendar') { json(await workbench.refreshHolidayCalendar()); return; }
       if (req.method === 'POST' && ['/api/project/mutate', '/api/project/replace-preview', '/api/project/replace-apply', '/api/git/action'].includes(url.pathname)) {
         const body = await readBody(req);
         const action = { '/api/project/mutate': () => fileTools.mutate(body), '/api/project/replace-preview': () => fileTools.previewReplace(body), '/api/project/replace-apply': () => fileTools.applyReplace(body), '/api/git/action': () => workbench.gitAction(body) }[url.pathname];

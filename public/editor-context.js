@@ -5,7 +5,7 @@ const lineAt = (text, offset) => { let line = 1; for (let at = text.indexOf('\n'
 // Only use the already open buffer. Never read files or persist their contents.
 export function editorContextSnapshot(editor, cwd) {
   const file = editor.current;
-  if (!editor.visible || !file || file.cwd !== cwd || file.loading || file.composing || (file.preview && !file.markdownMode) || typeof file.content !== 'string') return null;
+  if (!editor.visible || globalThis.document?.getElementById('workspacePanes')?.classList.contains('toolbox-docked') || !file || file.cwd !== cwd || file.loading || file.composing || (file.preview && !file.markdownMode) || typeof file.content !== 'string') return null;
   const text = file.content, selected = file.end > file.start;
   let start = selected ? file.start : Math.max(0, file.start - MAX_EXCERPT / 2);
   if (!selected && text.length <= MAX_EXCERPT) start = 0;
@@ -36,6 +36,7 @@ export function createEditorContext({ editor, getContext, storage = localStorage
   function schedule(event) { if (event?.target && event.target !== document && event.target.id !== 'fileEditorText') return; clearTimeout(timer); timer = setTimeout(sync, 120); }
   toggle.addEventListener('click', () => { const value = !enabled(); preferences.set(key(), value); try { storage.setItem(key(), String(value)); } catch {} sync(); });
   document.addEventListener('selectionchange', schedule);
+  document.addEventListener('workspace-layout', schedule);
   document.addEventListener('input', schedule);
   document.addEventListener('keyup', schedule);
   sync();

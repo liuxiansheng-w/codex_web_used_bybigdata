@@ -2,7 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
-import { createFileEditor, lineEdit } from '../public/file-editor.js';
+import { createFileEditor, lineEdit, indentationColumns } from '../public/file-editor.js';
+
+test('indent guides use tab stops and continue through empty lines only within a shared block', () => {
+  assert.deepEqual([...indentationColumns('SELECT\n  nested\n    value\n\n    other\nFROM demo')], [0, 2, 4, 4, 4, 0]);
+  assert.deepEqual([...indentationColumns('\n    a\n\n  b\n', 2)], [0, 4, 2, 2, 0]);
+  assert.deepEqual([...indentationColumns(' \tvalue\n\t  other\n    ', 4)], [4, 6, 4]);
+  assert.deepEqual([...indentationColumns('')], [0]);
+});
 
 const apply = (content, edit) => edit ? content.slice(0, edit.from) + edit.text + content.slice(edit.to) : content;
 test('indent/outdent handles selections, next-line boundaries, tabs and reversed selections', () => {
@@ -53,6 +60,31 @@ async function setup(t) {
   };
   return {editor,$,key,calls};
 }
+
+test('indent guides paint only the viewport and track both scroll axes without changing code or selection', async t => {
+  const { editor, $, calls } = await setup(t), input = $('fileEditorText');
+  input.style.lineHeight = '22px'; input.style.paddingTop = '16px'; input.style.paddingLeft = '14px'; input.style.tabSize = '4';
+  Object.defineProperty(input, 'clientWidth', { configurable: true, value: 640 });
+  Object.defineProperty(input, 'clientHeight', { configurable: true, value: 220 });
+  input.value = Array.from({ length: 5000 }, (_, line) => ' '.repeat((line % 3 + 1) * 4) + `SELECT ${line}`).join('\n');
+  input.setSelectionRange(12, 18, 'backward'); input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  input.scrollTop = 500 * 22 + 16; input.scrollLeft = 73; input.dispatchEvent(new window.Event('scroll'));
+  const source = input.value, root = input.parentElement.querySelector('.editor-indent-guides'), content = root.firstElementChild;
+  const rows = [...root.querySelectorAll('.editor-indent-row')];
+  assert.equal(root.getAttribute('aria-hidden'), 'true'); assert.equal(root.style.width, '640px'); assert.equal(root.style.height, '220px');
+  assert.equal(root.style.getPropertyValue('--editor-indent-step'), '4ch');
+  assert.equal(content.style.transform, 'translate(-73px, -11016px)');
+  assert.ok(rows.length <= 16); assert.ok(rows.every(row => Number(row.dataset.line) >= 499 && Number(row.dataset.line) <= 514));
+  assert.ok(rows.every(row => row.style.top === `${(Number(row.dataset.line) - 1) * 22}px`));
+  assert.equal(input.selectionStart, 12); assert.equal(input.selectionEnd, 18); assert.equal(input.selectionDirection, 'backward');
+  input.scrollTop = 0; input.dispatchEvent(new window.Event('scroll'));
+  assert.ok([...root.querySelectorAll('.editor-indent-row')].every(row => Number(row.dataset.line) <= 16));
+  assert.equal(editor.current.content, source); assert.equal(calls.length, 1);
+  await editor.open({ cwd: '/project', path: 'other.sql' });
+  assert.notEqual($('fileEditorText').parentElement.querySelector('.editor-indent-guides'), root);
+  await editor.open({ cwd: '/project', path: 'demo.sql' });
+  assert.equal($('fileEditorText'), input); assert.equal(input.value, source);
+});
 
 test('editor shortcuts preserve selection direction and scrolling, stay local, and allow Esc then Tab to leave', async t=>{
   const {editor,$,key,calls}=await setup(t), input=$('fileEditorText');

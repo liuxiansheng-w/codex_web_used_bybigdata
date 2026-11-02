@@ -1,7 +1,7 @@
 import { createSubmissionState } from './submission-state.js';
 import { createMessageRenderer } from './message-renderer.js';
 import { createDraftJournal } from './draft-journal.js';
-import { markdown, escapeHtml as esc, bindMarkdownTableCopy } from './markdown.js';
+import { markdown, bindMarkdownTableCopy } from './markdown.js';
 import { createComposerTools } from './composer.js';
 import { createPermissionControl, createApprovalBatch, createQuestionCard } from './permissions.js';
 import { createDraftStore, positionPopover, createThemeControl, createAppearanceControl, createModuleThemeControls, threadDisplayState, createImageAttachment, createSidebarResize, userMessagePresentation, createFileAttachment, attachmentProjectEntry, createQuotaIndicator, applyThreadPatch, createModelSwitch, readableNotice } from './interactions.js';
@@ -136,7 +136,7 @@ inlineCompletion = createInlineCompletion({ editor: fileEditor, api, getConfig: 
 createEditorTools({ editor: fileEditor, api, notice, completion: inlineCompletion, onContext: addContext, onPreview: entry => workbench.previewArtifact(entry) });
 sqlQuery = createSqlQuery({ editor: fileEditor, api, onContext: addContext, onChartContext: addChartContext, notice, bottomPanel });
 productUI = createProductUI();
-toolbox = createToolbox?.({ editor: fileEditor, notify: toast, onContext: addChartContext, getContextKey: () => JSON.stringify([state.cwd, state.active]) });
+toolbox = createToolbox?.({ editor: fileEditor, notify: toast, onContext: addChartContext, getContextKey: () => JSON.stringify([state.cwd, state.active]), formatSql: (content, dialect, signal) => api('/api/project/language', { content, language: 'sql', dialect, action: 'format' }, { signal }) });
 if (!toolbox) {
   $('toolboxButton').title = '工具箱模块暂时无法加载，点击查看说明';
   $('toolboxButton').onclick = () => notice('工具箱模块暂时无法加载，请刷新页面。若仍不可用，请检查服务是否已加载最新的工具箱资源。');
@@ -271,15 +271,18 @@ function syncThreadNotice(thread, previous = null, force = false) {
 }
 
 async function api(route, body, { signal } = {}) {
-  const response = await fetch(route, {
+  let response;
+  try { response = await fetch(route, {
     method: body === undefined ? 'GET' : 'POST',
     credentials: 'same-origin',
     signal,
     headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-Codex-CSRF': state.csrf },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const result = await response.json();
-  if (!response.ok || (route === '/api/sql/query' && result.ok === false)) throw Object.assign(new Error(result.error || `请求失败 (${response.status})`), { status: result.status || response.status });
+  }); } catch (error) { if (route === '/api/sql/query') throw Object.assign(new Error('查询连接中断，远端执行状态待核对；请先确认原任务状态。'), { uncertain: true }); throw error; }
+  let result;
+  try { result = await response.json(); } catch (error) { if (route === '/api/sql/query') throw Object.assign(new Error(`查询响应无法识别${response.status >= 400 ? `（HTTP ${response.status}）` : ''}，远端执行状态待核对。`), { status: response.status, uncertain: true }); throw error; }
+  if (route === '/api/sql/query' && (!result || typeof result !== 'object' || Array.isArray(result))) throw Object.assign(new Error('查询响应无法识别，远端执行状态待核对。'), { status: response.status, uncertain: true });
+  if (!response.ok || (route === '/api/sql/query' && result.ok === false)) throw Object.assign(new Error(result.error || `请求失败 (${response.status})`), { status: result.status || response.status, uncertain: result.uncertain === true });
   return result;
 }
 
@@ -1058,7 +1061,7 @@ for (const button of document.querySelectorAll('[data-thread-action]')) button.a
   } catch (error) { $('threadActionError').textContent = error.message; }
   finally { for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = false; threadOrganization?.sync(); }
 });
-for (const [id, tab] of [['workbenchButton', 'search'], ['quickSearch', 'search'], ['quickGit', 'git'], ['quickTerminal', 'terminal']]) $(id).addEventListener('click', () => workbench.show(tab));
+for (const [id, tab] of [['workbenchButton', 'search'], ['quickSearch', 'search'], ['quickGit', 'git'], ['quickTerminal', 'terminal'], ['quickSchedules', 'schedules']]) $(id).addEventListener('click', () => workbench.show(tab));
 const nativeLink = document.createElement('a'); nativeLink.href = 'codex://'; nativeLink.textContent = '打开本机桌面客户端 ↗'; nativeLink.className = 'secondary-button'; $('recordingDialog').append(nativeLink);
 function notifyTask(text) { if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') { try { const notification = new Notification('柠檬', { body: text, tag: 'codex-desk-task' }); notification.onclick = () => { window.focus(); notification.close(); }; } catch {} } }
 function renderQueue(thread) {

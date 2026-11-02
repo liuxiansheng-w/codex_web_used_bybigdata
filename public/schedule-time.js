@@ -1,3 +1,43 @@
+// Mainland China national workdays. The bundled year is transcribed from the
+// State Council notice; future years must come from a published calendar.
+const daysIn = (first, last, name, isOffDay = true) => {
+  const items = [];
+  for (let at = Date.parse(`${first}T00:00:00Z`), end = Date.parse(`${last}T00:00:00Z`); at <= end; at += 86400000) {
+    items.push({ date: new Date(at).toISOString().slice(0, 10), isOffDay, name });
+  }
+  return items;
+};
+export const BUNDLED_CALENDAR = { years: {
+  2026: { year: 2026, papers: ['https://www.gov.cn/zhengce/content/202511/content_7047090.htm'], source: '国务院办公厅 2026 年通知（内置）', days: [
+    ...daysIn('2026-01-01', '2026-01-03', '元旦'), ...daysIn('2026-02-15', '2026-02-23', '春节'),
+    ...daysIn('2026-04-04', '2026-04-06', '清明'), ...daysIn('2026-05-01', '2026-05-05', '劳动'),
+    ...daysIn('2026-06-19', '2026-06-21', '端午'), ...daysIn('2026-09-25', '2026-09-27', '中秋'),
+    ...daysIn('2026-10-01', '2026-10-07', '国庆'),
+    ...[['2026-01-04', '元旦'], ['2026-02-14', '春节'], ['2026-02-28', '春节'], ['2026-05-09', '劳动'], ['2026-09-20', '国庆'], ['2026-10-10', '国庆']].map(([date, name]) => ({ date, name, isOffDay: false })),
+  ] },
+} };
+
+export function workdayStatus(date, calendar = BUNDLED_CALENDAR) {
+  const year = Number(date.slice(0, 4)), years = calendar?.years || {};
+  const unavailable = () => { throw Object.assign(new Error(`${year} 年或下一年度的节假日数据尚未就绪，请更新日历后再安排。`), { code: 'HOLIDAY_CALENDAR_UNAVAILABLE' }); };
+  if (!/^20\d{2}-\d{2}-\d{2}$/.test(date) || !years[year]) unavailable();
+  // A following year's New Year arrangement can start in December. Do not
+  // assume late December is ordinary until that next notice is available.
+  if (date.slice(5) >= '12-20' && !years[year + 1]) unavailable();
+  const matches = [years[year], years[year + 1]].filter(Boolean).flatMap(value => value.days || []).filter(item => item.date === date);
+  if (matches.some(item => item.isOffDay !== matches[0].isOffDay)) unavailable();
+  if (matches.length) return !matches[0].isOffDay;
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return day !== 0 && day !== 6;
+}
+export function holidayMarker(date, calendar = BUNDLED_CALENDAR) {
+  const year = Number(date.slice(0, 4)), years = calendar?.years || {};
+  if (!years[year] || date.slice(5) >= '12-20' && !years[year + 1]) return null;
+  const matches = [years[year], years[year + 1]].filter(Boolean).flatMap(value => value.days || []).filter(item => item.date === date);
+  if (!matches.length || matches.some(item => item.isOffDay !== matches[0].isOffDay)) return null;
+  return matches[0].isOffDay ? '休' : '班';
+}
+
 // Shared by the browser preview and the local scheduler. All calendar rules use Beijing time.
 export const SCHEDULE_ZONE = 'Asia/Shanghai';
 const OFFSET = 8 * 60 * 60 * 1000, DAY = 24 * 60 * 60 * 1000;
@@ -15,7 +55,7 @@ export function normalizeSchedule(value) {
   assert(value && typeof value === 'object' && !Array.isArray(value), '请选择执行频率。');
   assert(value.timeZone === undefined || value.timeZone === SCHEDULE_ZONE, '执行时间统一使用北京时间。');
   const { kind } = value, result = { kind, timeZone: SCHEDULE_ZONE };
-  assert(['once', 'daily', 'weekly', 'monthly', 'interval'].includes(kind), '执行频率无效。');
+  assert(['once', 'daily', 'weekly', 'monthly', 'interval', 'workday'].includes(kind), '执行频率无效。');
   if (kind !== 'once') {
     assert(!(value.endDate && value.maxRuns != null), '请选择一种结束条件。');
     if (value.startDate && kind !== 'interval') { dateAt(value.startDate, '生效日期'); result.startDate = value.startDate; }
@@ -47,7 +87,7 @@ export function normalizeSchedule(value) {
   assert(!result.startDate || !result.endDate || result.endDate >= result.startDate, '结束日期不能早于生效日期。');
   return result;
 }
-export function nextScheduleAt(value, after = Date.now(), completed = 0) {
+export function nextScheduleAt(value, after = Date.now(), completed = 0, calendar = BUNDLED_CALENDAR) {
   const rule = normalizeSchedule(value);
   if (rule.maxRuns && completed >= rule.maxRuns) return null;
   const end = rule.endDate ? dateAt(rule.endDate, '结束日期') + DAY : Infinity;
@@ -63,15 +103,21 @@ export function nextScheduleAt(value, after = Date.now(), completed = 0) {
     const at = today + offset * DAY, local = new Date(at + OFFSET);
     if (at >= end) return null;
     if (at <= after) continue;
+    if (rule.kind === 'workday' && !workdayStatus(beijingDate(at), calendar)) continue;
     if (rule.kind === 'weekly' && !rule.days.includes(local.getUTCDay() || 7)) continue;
     if (rule.kind === 'monthly' && local.getUTCDate() !== (rule.day === 'last' ? new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth() + 1, 0)).getUTCDate() : rule.day)) continue;
     return at;
   }
   return null;
 }
-export function upcomingSchedule(value, after = Date.now(), count = 3, completed = 0) {
+export function upcomingSchedule(value, after = Date.now(), count = 3, completed = 0, calendar = BUNDLED_CALENDAR) {
   const times = [];
-  for (let index = 0; index < count; index++) { const at = nextScheduleAt(value, after, completed + index); if (at == null) break; times.push(at); after = at; }
+  for (let index = 0; index < count; index++) {
+    let at;
+    try { at = nextScheduleAt(value, after, completed + index, calendar); }
+    catch (error) { if (times.length && error.code === 'HOLIDAY_CALENDAR_UNAVAILABLE') { times.calendarIncomplete = true; break; } throw error; }
+    if (at == null) break; times.push(at); after = at;
+  }
   return times;
 }
 export function formatScheduleTime(at) {
@@ -84,6 +130,7 @@ export function describeSchedule(value) {
   if (rule.kind === 'interval') return `每 ${rule.minutes % 1440 === 0 ? `${rule.minutes / 1440} 天` : rule.minutes % 60 === 0 ? `${rule.minutes / 60} 小时` : `${rule.minutes} 分钟`}执行一次`;
   if (rule.kind === 'once') return `${rule.date.replace(/^(\d+)-(\d+)-(\d+)$/, '$1年$2月$3日')} ${rule.time}，仅一次`;
   if (rule.kind === 'daily') return `每天 ${rule.time}`;
+  if (rule.kind === 'workday') return `中国大陆工作日 ${rule.time}`;
   if (rule.kind === 'monthly') return `每月${rule.day === 'last' ? '最后一天' : ` ${rule.day} 日`} ${rule.time}`;
   const days = rule.days.join(',') === '1,2,3,4,5' ? '每周一至周五' : rule.days.length === 7 ? '每天' : `每周${rule.days.map(day => '一二三四五六日'[day - 1]).join('、周')}`;
   return `${days} ${rule.time}`;

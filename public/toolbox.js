@@ -9,13 +9,28 @@ export const toolboxGroups = [
   { id: 'time', name: '时间日期' },
 ];
 export const toolboxTools = [
-  { id: 'json', group: 'development', category: 'json', name: 'JSON', icon: '{ }', hint: '格式化 · 校验 · 比较', actions: [['format', '格式化'], ['minify', '压缩'], ['validate', '校验'], ['tree', '树形查看'], ['sort', '键排序'], ['escape', '转义为字符串'], ['unescape', '去除转义'], ['compare', 'JSON 比较']] },
+  { id: 'json', group: 'development', category: 'json', name: 'JSON', icon: '{ }', hint: '格式化 · 字段提取 · 比较', actions: [['format', '格式化'], ['tree', '树形查看'], ['compare', 'JSON 比较'], ['extract', '字段提取'], ['minify', '压缩'], ['validate', '校验'], ['sort', '键排序'], ['escape', '转义为字符串'], ['unescape', '去除转义']] },
+  { id: 'sql', group: 'development', category: 'sql', name: 'SQL 格式化', icon: 'SQL', hint: '格式化 · 多方言', keywords: 'sql hive spark mysql', actions: [['format', '格式化']] },
   { id: 'encoding', group: 'development', category: 'encoding', name: '编码转换', icon: '</>', hint: '编码 · 解码 · 转义', actions: [['base64-encode', 'Base64 编码'], ['base64-decode', 'Base64 解码'], ['url-encode', 'URL 编码'], ['url-decode', 'URL 解码'], ['unicode-encode', 'Unicode 编码'], ['unicode-decode', 'Unicode 解码']] },
   { id: 'compare', group: 'text', category: 'text', name: '文本对比', icon: '≠', hint: '两份文本 · 行差异', keywords: 'diff difference 文本比较 SQL 代码对比', actions: [['compare', '文本比较']] },
   { id: 'text', group: 'text', category: 'text', name: '文本整理', icon: 'Aa', hint: '去重 · 转换 · 统计', actions: [['dedup', '按行去重'], ['lines-comma', '换行转逗号'], ['comma-lines', '逗号转换行'], ['stats', '字数与行数统计']] },
   { id: 'data', group: 'data', category: 'data', name: '数据转换', icon: '▦', hint: 'JSON · CSV · Excel', actions: [['json-csv', 'JSON → CSV'], ['csv-json', 'CSV → JSON'], ['json-xlsx', 'JSON → Excel'], ['xlsx-json', 'Excel → JSON']] },
+  { id: 'clean', group: 'data', category: 'data-clean', name: '批量整理', icon: '≡', hint: 'IN 列表 · 字段整理', keywords: 'sql in 引号 字段 批量 去重 列表', actions: [['sql-string', 'SQL 字符串列表'], ['sql-number', 'SQL 数字列表'], ['fields', '字段行转逗号']] },
   { id: 'chart', group: 'data', category: 'chart', name: '图表生成', icon: '▥', hint: 'AI 绘图 · 自由配色 · 图片下载', keywords: 'charts 可视化 图表 柱状图 JSON CSV Excel 折线 柱形 饼图 环形 散点 组合 面积 条形 堆叠', actions: [['auto', '自动识别表格 / JSON'], ['json', 'JSON 数据'], ['csv', 'CSV（首行为表头）'], ['tsv', '表格 / TSV']] },
-  { id: 'time', group: 'time', category: 'time', name: '时间转换', icon: '◷', hint: '时间戳 · 北京时间', actions: [['seconds', 'Unix 秒 → 时间'], ['milliseconds', 'Unix 毫秒 → 时间'], ['date', '北京时间 → 时间戳']] },
+  { id: 'time', group: 'time', category: 'time', name: '时间转换', icon: '◷', hint: '时间戳 · 北京时间', actions: [['auto', '自动识别'], ['seconds', 'Unix 秒'], ['milliseconds', 'Unix 毫秒'], ['date', '北京时间']] },
+];
+
+const quickTasks = [
+  { tool: 'json', action: 'format', title: 'JSON 格式化', detail: '校验、整理和查看结构', icon: '{ }' },
+  { tool: 'compare', action: 'compare', title: '文本对比', detail: '并排查看新增与删除', icon: '≠' },
+  { tool: 'sql', action: 'format', title: 'SQL 格式化', detail: '整理 SQL，支持多种方言', icon: 'SQL' },
+  { tool: 'clean', action: 'sql-string', title: '生成 IN 列表', detail: '每行一个值，快速整理', icon: '≡' },
+  { tool: 'json', action: 'extract', title: 'JSON 字段提取', detail: '按路径提取对象或数组', icon: '↗' },
+  { tool: 'time', action: 'auto', title: '时间转换', detail: '时间戳和北京时间互转', icon: '◷' },
+  { tool: 'data', action: 'csv-json', title: '表格数据转换', detail: 'JSON、CSV 与 Excel', icon: '▦' },
+  { tool: 'chart', action: 'auto', title: '生成图表', detail: '粘贴表格即可预览', icon: '▥' },
+  { tool: 'encoding', action: 'base64-encode', title: '编码转换', detail: 'Base64、URL 与 Unicode', icon: '</>' },
+  { tool: 'text', action: 'dedup', title: '文本整理', detail: '去重、转换与统计', icon: 'Aa' },
 ];
 
 export function createToolRunner(win) {
@@ -38,7 +53,7 @@ export function createToolRunner(win) {
   };
 }
 
-export function createToolbox({ editor, document = globalThis.document, runner, notify = () => {}, onContext, getContextKey = () => '' } = {}) {
+export function createToolbox({ editor, document = globalThis.document, runner, formatSql, notify = () => {}, onContext, getContextKey = () => '' } = {}) {
   const win = document.defaultView, $ = id => document.getElementById(id);
   runner ||= createToolRunner(win);
   const element = (tag, text, className) => { const node = document.createElement(tag); if (text != null) node.textContent = text; if (className) node.className = className; return node; };
@@ -51,41 +66,112 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   const panel = element('section', null, 'toolbox-panel'); panel.id = 'toolboxPanel'; panel.hidden = true; panel.tabIndex = -1;
   panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'false'); panel.setAttribute('aria-labelledby', 'toolboxTitle');
   panel.innerHTML = `
-    <header class="toolbox-header" id="toolboxDrag"><div><strong id="toolboxTitle">工具箱</strong><span>在本机处理 · 无需 AI</span></div><div class="toolbox-window-actions"><button id="toolboxMaximize" type="button" class="icon-button" aria-label="放大工具箱" aria-pressed="false" title="放大工具箱">□</button><button id="toolboxClose" type="button" class="icon-button" aria-label="关闭工具箱" title="关闭工具箱 · Esc">×</button></div></header>
-    <div class="toolbox-layout"><aside class="toolbox-sidebar"><div class="toolbox-search"><label class="sr-only" for="toolboxSearch">搜索工具或分类</label><input id="toolboxSearch" placeholder="搜索工具或分类…" autocomplete="off"><button id="toolboxSearchClear" type="button" class="icon-button" aria-label="清空工具搜索" hidden>×</button></div><p id="toolboxSearchCount" class="toolbox-search-count" role="status" aria-live="polite"></p><nav id="toolboxCategories" aria-label="工具分类"></nav><p id="toolboxSearchEmpty" hidden>没有匹配的工具，试试名称、分类或功能关键词。</p><p class="toolbox-memory-hint">输入仅保留在本页<br>关闭面板后可继续使用</p></aside>
-    <div class="toolbox-main"><p id="toolboxBreadcrumb" class="toolbox-breadcrumb"></p><div class="toolbox-commandbar"><h3 id="toolboxCategoryTitle">JSON</h3><label><span class="sr-only">处理方式</span><select id="toolboxAction" aria-label="处理方式"></select></label><label id="toolboxIndentLabel">缩进 <select id="toolboxIndent" aria-label="JSON 缩进"><option value="2">2 空格</option><option value="4">4 空格</option></select></label><button id="toolboxNow" type="button" class="text-button" hidden>当前时间</button><button id="toolboxRun" type="button" class="primary-button">处理</button><button id="toolboxCancel" type="button" class="text-button" hidden>停止</button></div>
-    <p id="toolboxHint" class="toolbox-hint"></p><div class="toolbox-importbar"><button id="toolboxReadEditor" type="button" class="text-button">读取选区 / 当前文件</button><button id="toolboxImport" type="button" class="text-button">导入文件</button><input id="toolboxFile" type="file" accept=".json,.txt,.csv,.tsv,.log,.sql,.xml,.yaml,.yml,.xlsx,.xls,.xlsm" hidden><label id="toolboxSheetLabel" hidden>工作表 <select id="toolboxSheet" aria-label="Excel 工作表"></select></label><button id="toolboxChartConfig" type="button" class="text-button" hidden>配置 → AI 对话</button><button id="toolboxChartData" type="button" class="text-button" hidden>数据 → AI 对话</button><button id="toolboxChartBoth" type="button" class="text-button" hidden>交给 AI 画图</button><button id="toolboxClear" type="button" class="text-button">清空本工具</button><span id="toolboxSource"></span></div>
-    <div class="toolbox-editors"><section class="toolbox-inputs"><div class="toolbox-editor-label"><label for="toolboxInput" id="toolboxInputLabel">输入</label><span id="toolboxInputCount">0 字符</span></div><textarea id="toolboxInput" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="toolboxHint" placeholder="在这里粘贴内容，或读取编辑器选区…"></textarea><div id="toolboxSecond" class="toolbox-second" hidden><label for="toolboxSecondary">对比内容</label><textarea id="toolboxSecondary" spellcheck="false" placeholder="粘贴另一份内容…"></textarea></div></section><section class="toolbox-result"><div class="toolbox-editor-label"><label for="toolboxOutput">处理结果</label><span id="toolboxOutputState">等待处理</span></div><textarea id="toolboxOutput" readonly spellcheck="false" placeholder="处理结果将显示在这里"></textarea><div id="toolboxTree" class="toolbox-tree" aria-label="JSON 树形结果" hidden></div><pre id="toolboxDiff" class="toolbox-diff" aria-label="文本差异" hidden></pre><div class="toolbox-result-actions"><button id="toolboxCopy" type="button" class="text-button" disabled>复制</button><button id="toolboxDownload" type="button" class="text-button" disabled>下载</button><button id="toolboxInsert" type="button" class="text-button" disabled>插入编辑器草稿</button></div></section></div><p id="toolboxStatus" class="toolbox-status" role="status" aria-live="polite">选择工具后开始处理。</p></div></div>`;
+    <header class="toolbox-header" id="toolboxDrag"><div><strong id="toolboxTitle">工具箱</strong><span>在本机处理 · 无需 AI</span></div><div class="toolbox-window-actions"><button id="toolboxDock" type="button" class="text-button">浮动窗口</button><button id="toolboxMaximize" type="button" class="icon-button" aria-label="放大工具箱" aria-pressed="false" title="放大工具箱">□</button><button id="toolboxClose" type="button" class="icon-button" aria-label="关闭工具箱" title="关闭工具箱 · Esc">×</button></div></header>
+    <div class="toolbox-layout"><aside class="toolbox-sidebar"><div class="toolbox-search"><label class="sr-only" for="toolboxSearch">搜索工具或分类</label><input id="toolboxSearch" placeholder="搜索工具、功能…" autocomplete="off"><button id="toolboxSearchClear" type="button" class="icon-button" aria-label="清空工具搜索" hidden>×</button></div><p id="toolboxSearchCount" class="toolbox-search-count" role="status" aria-live="polite"></p><button id="toolboxHomeButton" type="button" class="toolbox-home-link">⌂ <span>工具总览</span></button><div id="toolboxSavedNavigation" class="toolbox-saved-navigation"></div><nav id="toolboxCategories" aria-label="工具分类"></nav><p id="toolboxSearchEmpty" hidden>没有匹配的工具，试试名称、分类或功能关键词。</p><p class="toolbox-memory-hint">处理内容留在本页<br>收藏只记录工具名称</p></aside>
+    <section id="toolboxHome" class="toolbox-home" aria-label="工具总览"><div class="toolbox-home-intro"><span class="toolbox-eyebrow">LOCAL TOOLBOX</span><h2>随手处理，专注下一步</h2><p>把常用的数据和文本工具放在一起，打开就能用。</p></div><div id="toolboxHomeSaved" class="toolbox-home-saved"></div><div class="toolbox-home-heading"><div><h3>常用任务</h3><p>从你要做的事开始</p></div><span>本机处理</span></div><div id="toolboxHomeGrid" class="toolbox-home-grid"></div><p id="toolboxHomeEmpty" class="toolbox-home-empty" hidden>没有找到匹配的任务，试试其他关键词。</p></section>
+    <div class="toolbox-main" id="toolboxWorkspace" hidden><p id="toolboxBreadcrumb" class="toolbox-breadcrumb"></p><div class="toolbox-commandbar"><h3 id="toolboxCategoryTitle">JSON</h3><button id="toolboxFavorite" type="button" class="toolbox-favorite" aria-label="收藏此工具" title="收藏此工具">☆</button><label id="toolboxActionLabel"><span class="sr-only">处理方式</span><select id="toolboxAction" aria-label="处理方式"></select></label><label id="toolboxIndentLabel">缩进 <select id="toolboxIndent" aria-label="JSON 缩进"><option value="2">2 空格</option><option value="4">4 空格</option></select></label><label id="toolboxDialectLabel" hidden>方言 <select id="toolboxDialect" aria-label="SQL 方言"><option value="sql">标准 SQL</option><option value="hive">Hive</option><option value="spark">Spark</option><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option><option value="transactsql">T-SQL</option><option value="sqlite">SQLite</option></select></label><button id="toolboxNow" type="button" class="text-button" hidden>当前时间</button><button id="toolboxRun" type="button" class="primary-button">处理</button><button id="toolboxCancel" type="button" class="text-button" hidden>停止</button></div><div id="toolboxModes" class="toolbox-modes" role="group" aria-label="常用处理方式"></div>
+    <p id="toolboxHint" class="toolbox-hint"></p><div class="toolbox-importbar"><button id="toolboxReadEditor" type="button" class="text-button">读取选区 / 当前文件</button><button id="toolboxImport" type="button" class="text-button">导入文件</button><input id="toolboxFile" type="file" accept=".json,.txt,.csv,.tsv,.log,.sql,.xml,.yaml,.yml,.xlsx,.xls,.xlsm" hidden><label id="toolboxSheetLabel" hidden>工作表 <select id="toolboxSheet" aria-label="Excel 工作表"></select></label><label id="toolboxPathLabel" class="toolbox-path" hidden>字段路径 <input id="toolboxPath" aria-label="JSON 字段路径" placeholder="例如 $.data[*].id" autocomplete="off"></label><label id="toolboxDeduplicateLabel" class="toolbox-check" hidden><input id="toolboxDeduplicate" type="checkbox">去除重复行</label><button id="toolboxChartConfig" type="button" class="text-button" hidden>配置 → AI 对话</button><button id="toolboxChartData" type="button" class="text-button" hidden>数据 → AI 对话</button><button id="toolboxChartBoth" type="button" class="text-button" hidden>交给 AI 画图</button><button id="toolboxClear" type="button" class="text-button">清空本工具</button><span id="toolboxSource"></span></div>
+    <div class="toolbox-editors"><section class="toolbox-inputs"><div class="toolbox-primary"><div class="toolbox-editor-label"><label for="toolboxInput" id="toolboxInputLabel">输入</label><span id="toolboxInputCount">0 字符</span></div><textarea id="toolboxInput" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="toolboxHint" placeholder="在这里粘贴内容，或读取编辑器选区…"></textarea></div><div id="toolboxSecond" class="toolbox-second" hidden><div class="toolbox-editor-label"><label for="toolboxSecondary">对比内容</label></div><textarea id="toolboxSecondary" spellcheck="false" placeholder="粘贴另一份内容…"></textarea></div></section><section class="toolbox-result"><div class="toolbox-editor-label"><label for="toolboxOutput">处理结果</label><span id="toolboxOutputState">等待处理</span></div><textarea id="toolboxOutput" readonly spellcheck="false" placeholder="处理结果将显示在这里"></textarea><div id="toolboxTree" class="toolbox-tree" aria-label="JSON 树形结果" hidden></div><div id="toolboxDiff" class="toolbox-diff" aria-label="文本差异" hidden></div><div id="toolboxTimeResults" class="toolbox-time-results" hidden></div><div class="toolbox-result-actions"><button id="toolboxCopy" type="button" class="text-button" disabled>复制</button><button id="toolboxDownload" type="button" class="text-button" disabled>下载</button><button id="toolboxInsert" type="button" class="text-button" disabled>插入编辑器草稿</button></div></section></div><p id="toolboxStatus" class="toolbox-status" role="status" aria-live="polite">选择工具后开始处理。</p></div></div>`;
   document.body.append(panel);
+  const panes = $('workspacePanes'); let docked = !!panes;
+  $('toolboxDock').hidden = !panes;
+  function setDocked(value) {
+    docked = !!value && !!panes;
+    panel.classList.toggle('is-workspace', docked);
+    panel.classList.remove('is-maximized'); $('toolboxMaximize').setAttribute('aria-pressed', 'false');
+    $('toolboxMaximize').title = '放大工具箱'; $('toolboxMaximize').setAttribute('aria-label', '放大工具箱');
+    $('toolboxDock').textContent = docked ? '浮动窗口' : '放回工作区';
+    panel.setAttribute('role', docked ? 'region' : 'dialog');
+    if (docked) { panel.removeAttribute('aria-modal'); panes.prepend(panel); }
+    else { panel.setAttribute('aria-modal', 'false'); document.body.append(panel); }
+    panes?.classList.toggle('toolbox-docked', docked && !panel.hidden);
+    document.dispatchEvent(new win.Event('workspace-layout'));
+  }
+  const listDialect = element('label', '转义 ', 'toolbox-list-dialect'); listDialect.id = 'toolboxListDialectLabel';
+  const listDialectSelect = element('select'); listDialectSelect.id = 'toolboxListDialect'; listDialectSelect.setAttribute('aria-label', 'SQL 字符串转义');
+  for (const [value, label] of [['standard', '标准 SQL（双单引号）'], ['backslash', 'Spark / Hive（反斜杠）']]) { const option = element('option', label); option.value = value; listDialectSelect.append(option); }
+  listDialect.append(listDialectSelect); $('toolboxDeduplicateLabel').before(listDialect);
   const chartContainer = element('div', null, 'toolbox-chart'); chartContainer.id = 'toolboxChart'; chartContainer.hidden = true; panel.querySelector('.toolbox-result').prepend(chartContainer);
-  const states = new Map(toolboxTools.map(tool => [tool.id, { input: '', secondary: '', action: tool.actions[0][0], indent: 2, result: null, revision: 0, snapshot: null, wholeFile: false, sheets: [], sheet: 0, source: '' }]));
-  let category = 'json', generation = 0, busy = false, opener, destroyed = false, readSequence = 0;
+  const states = new Map(toolboxTools.map(tool => [tool.id, { input: '', secondary: '', action: tool.actions[0][0], indent: 2, path: '$.data[*].id', deduplicate: false, dialect: 'sql', sqlStyle: 'standard', result: null, revision: 0, snapshot: null, wholeFile: false, sheets: [], sheet: 0, source: '' }]));
+  let category = 'json', generation = 0, busy = false, opener, destroyed = false, readSequence = 0, home = true, autoTimer, sqlController;
+  const toolIds = new Set(toolboxTools.map(tool => tool.id));
+  const validIds = value => Array.isArray(value) ? [...new Set(value.filter(id => typeof id === 'string' && toolIds.has(id)))].slice(0, 9) : [];
+  let favorites = [], recent = [];
+  try { const saved = JSON.parse(win.localStorage.getItem('lemon:toolboxNavigation') || '{}'); favorites = validIds(saved.favorites); recent = validIds(saved.recent); } catch {}
+  function saveNavigation() { try { win.localStorage.setItem('lemon:toolboxNavigation', JSON.stringify({ favorites, recent })); } catch {} }
+  function toolName(id) { return toolboxTools.find(tool => tool.id === id)?.name || ''; }
+  function view() {
+    $('toolboxHome').hidden = !home; $('toolboxWorkspace').hidden = home;
+    panel.classList.toggle('is-home', home); $('toolboxHomeButton').setAttribute('aria-current', home ? 'page' : 'false');
+  }
+  function savedButtons(host, ids) {
+    for (const id of ids) {
+      const item = button(toolName(id), null, 'toolbox-saved-button'); item.dataset.savedTool = id; item.onclick = () => select(id); host.append(item);
+    }
+  }
+  function renderNavigation() {
+    const host = $('toolboxSavedNavigation'); host.replaceChildren();
+    if (favorites.length) { host.append(element('p', '收藏', 'toolbox-saved-label')); const list = element('div', null, 'toolbox-saved-list'); savedButtons(list, favorites); host.append(list); }
+    if (recent.length) { host.append(element('p', '最近使用', 'toolbox-saved-label')); const list = element('div', null, 'toolbox-saved-list'); savedButtons(list, recent.slice(0, 4)); host.append(list); }
+    const saved = $('toolboxHomeSaved'); saved.replaceChildren();
+    for (const [title, ids] of [['我的收藏', favorites], ['最近使用', recent.slice(0, 4)]]) {
+      if (!ids.length) continue;
+      const row = element('section', null, 'toolbox-home-saved-row'); row.append(element('h3', title)); const list = element('div', null, 'toolbox-home-saved-list'); savedButtons(list, ids); row.append(list); saved.append(row);
+    }
+    const favorite = favorites.includes(category); $('toolboxFavorite').textContent = favorite ? '★' : '☆';
+    $('toolboxFavorite').setAttribute('aria-pressed', String(favorite)); $('toolboxFavorite').setAttribute('aria-label', favorite ? '取消收藏此工具' : '收藏此工具');
+    $('toolboxFavorite').title = favorite ? '取消收藏' : '收藏工具';
+  }
+  const cards = quickTasks.map(task => {
+    const item = button('', null, 'toolbox-task-card'); item.dataset.quickTool = task.tool; item.dataset.quickAction = task.action;
+    const config = toolboxTools.find(tool => tool.id === task.tool);
+    const group = toolboxGroups.find(entry => entry.id === config.group);
+    item.dataset.search = `${task.title} ${task.detail} ${group.name} ${config.name} ${config.hint} ${config.keywords || ''} ${config.actions.flat().join(' ')}`.toLowerCase();
+    item.append(element('span', task.icon, 'toolbox-task-icon'));
+    const copy = element('span', null, 'toolbox-task-copy'); copy.append(element('strong', task.title), element('small', task.detail)); item.append(copy, element('span', '↗', 'toolbox-task-arrow'));
+    item.onclick = () => {
+      const query = $('toolboxSearch').value.trim().toLowerCase();
+      const matchesTask = `${task.title} ${task.detail}`.toLowerCase().includes(query);
+      const match = query && !matchesTask && config.actions.find(([value, label]) => `${value} ${label}`.toLowerCase().includes(query));
+      select(task.tool, match ? match[0] : task.action);
+    };
+    $('toolboxHomeGrid').append(item); return item;
+  });
   let chartView, chartSequence = 0, chartModule;
   function clearChart() { chartSequence++; chartView?.destroy(); chartView = null; chartContainer.replaceChildren(); }
   async function renderChart(s) {
     clearChart(); chartContainer.hidden = category !== 'chart';
-    if (category !== 'chart' || !s.result?.table || s.result.stale || panel.hidden) { if (category === 'chart') chartContainer.textContent = '直接粘贴表格后点击生成；也可以点击「交给 AI 画图」，让 AI 整理数据并绘图。'; return; }
+    if (category !== 'chart' || home || !s.result?.table || s.result.stale || panel.hidden) { if (category === 'chart' && !home) chartContainer.textContent = '直接粘贴表格后点击生成；也可以点击「交给 AI 画图」，让 AI 整理数据并绘图。'; return; }
     const token = chartSequence; chartContainer.textContent = '正在加载本机图表…';
     try {
       const module = await (chartModule ||= import('./vendor/toolbox.js'));
       if (token !== chartSequence || destroyed || panel.hidden) return;
       chartContainer.replaceChildren(); chartView = module.createChartPanel(chartContainer, { document, onContext: onContext ? forwardChartContext : undefined, onChange: settings => { s.chartSettings = settings; } });
-      chartView.setData(s.result.table, { settings: s.chartSettings || s.result.settings, note: s.source ? `导入数据：${s.source}` : '工具箱输入数据' });
+      const controls = chartContainer.querySelector('.chart-controls'), advanced = element('details', null, 'toolbox-chart-advanced'), moreControls = element('div', null, 'chart-controls');
+      advanced.append(element('summary', '分组、排序与样式'));
+      for (const key of ['series', 'aggregate', 'order']) moreControls.append(controls.querySelector(`[data-chart-control="${key}"]`).closest('label'));
+      advanced.append(moreControls, chartContainer.querySelector('.chart-customize'));
+      const viewport = chartContainer.querySelector('.chart-viewport'), actions = chartContainer.querySelector('.chart-actions'); viewport.after(advanced); advanced.after(actions);
+      chartView.setData(s.result.table, { settings: s.chartSettings || s.result.settings || { height: 280 }, note: s.source ? `导入数据：${s.source}` : '工具箱输入数据' });
     } catch { if (token === chartSequence) { chartModule = null; chartContainer.textContent = '图表模块无法加载，请刷新页面后重试。'; } }
   }
   const state = () => states.get(category), currentCategory = () => toolboxTools.find(item => item.id === category);
   const message = (text, error = false) => { $('toolboxStatus').textContent = text; $('toolboxStatus').dataset.error = String(error); };
   const usable = file => file && editor?.visible && !file.preview && !file.loading && !file.composing;
-  function stop() { generation++; runner.cancel(); busy = false; $('toolboxRun').disabled = false; $('toolboxCancel').hidden = true; panel.removeAttribute('aria-busy'); }
+  function stop() { generation++; win.clearTimeout(autoTimer); autoTimer = undefined; sqlController?.abort(); sqlController = null; runner.cancel(); busy = false; $('toolboxRun').disabled = false; $('toolboxCancel').hidden = true; panel.removeAttribute('aria-busy'); }
   function invalidate() { stop(); const s = state(); s.revision++; if (s.result) s.result.stale = true; if (category === 'chart') clearChart(); renderActions(); }
   function targetLabel(s) { return s.wholeFile ? '替换原文件草稿' : s.snapshot?.start !== s.snapshot?.end ? '替换原选区' : '插入原光标'; }
   function renderActions() {
     const s = state(), ready = s.result && !s.result.stale && !busy;
     for (const id of ['toolboxCopy', 'toolboxDownload']) $(id).disabled = !ready;
+    for (const control of $('toolboxTimeResults').querySelectorAll('button')) control.disabled = !ready;
     $('toolboxInsert').disabled = !ready || s.result.insertable === false || !s.snapshot?.writable;
     $('toolboxInsert').textContent = s.snapshot ? targetLabel(s) : '插入编辑器草稿';
     $('toolboxOutputState').textContent = busy ? '本机处理中…' : s.result?.stale ? '输入已变化 · 请重新处理' : s.result ? `${s.result.text.length.toLocaleString()} 字符` : '等待处理';
     $('toolboxInputCount').textContent = `${s.input.length.toLocaleString()} 字符`;
+    const chartReady = category === 'chart' && !!s.result?.table && !s.result.stale;
+    for (const id of ['toolboxChartConfig', 'toolboxChartData']) $(id).hidden = category !== 'chart' || !onContext || chartReady;
+    $('toolboxChartBoth').hidden = category !== 'chart' || !onContext;
   }
   function renderTree(root) {
     const host = $('toolboxTree'); host.replaceChildren(); let count = 0;
@@ -107,42 +193,98 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   function renderResult() {
     const s = state(), result = s.result; $('toolboxOutput').value = result?.text || '';
     const chart = category === 'chart'; panel.classList.toggle('has-chart', chart);
-    $('toolboxTree').hidden = chart || !result?.tree; $('toolboxDiff').hidden = chart || !result?.diff; $('toolboxOutput').hidden = chart || !!(result?.tree || result?.diff);
+    $('toolboxTree').hidden = chart || !result?.tree; $('toolboxDiff').hidden = chart || !result?.diff; $('toolboxTimeResults').hidden = chart || category !== 'time' || !result?.fields;
+    $('toolboxOutput').hidden = chart || !!(result?.tree || result?.diff || category === 'time' && result?.fields);
     panel.querySelector('.toolbox-result > .toolbox-editor-label').hidden = chart; panel.querySelector('.toolbox-result-actions').hidden = chart;
     void renderChart(s);
     if (result?.tree) renderTree(result.tree); else $('toolboxTree').replaceChildren();
     const diffHost = $('toolboxDiff'); diffHost.replaceChildren();
-    if (result?.diff) {
-      let lines = 0;
-      for (const part of result.diff) {
-        const text = part.value.split('\n'), left = Math.max(0, 2000 - lines), visible = text.slice(0, left); lines += text.length;
-        if (visible.length) diffHost.append(element('span', visible.map(line => `${part.added ? '+ ' : part.removed ? '- ' : '  '}${line}`).join('\n'), part.added ? 'toolbox-diff-add' : part.removed ? 'toolbox-diff-remove' : ''));
-        if (lines > 2000) { diffHost.append(element('span', '\n差异预览已截断；复制和下载保留完整结果。')); break; }
-      }
+    if (result?.diff) { renderDiff(diffHost, result.diff); if (result.newlineNote) diffHost.append(element('p', result.newlineNote, 'toolbox-diff-truncated')); }
+    const times = $('toolboxTimeResults'); times.replaceChildren();
+    if (category === 'time' && result?.fields) for (const [label, value] of result.fields) {
+      const row = element('div', null, 'toolbox-time-row'); row.append(element('span', label, 'toolbox-time-label'), element('code', value));
+      const copy = button('复制', null, 'text-button'); copy.setAttribute('aria-label', `复制${label}`);
+      copy.onclick = async () => {
+        if (category !== 'time' || state().result !== result || result.stale || busy) return;
+        const token = generation;
+        try { await win.navigator.clipboard.writeText(value); if (token === generation && !panel.hidden) message(`${label}已复制。`); }
+        catch { if (token !== generation || panel.hidden || category !== 'time') return; message('复制失败，可选择下方完整结果复制。', true); $('toolboxOutput').hidden = false; }
+      };
+      row.append(copy); times.append(row);
     }
     renderActions();
   }
+  function renderDiff(host, parts) {
+    const heading = element('div', null, 'toolbox-diff-heading'); heading.append(element('span', '原始内容'), element('span', '对比内容')); host.append(heading);
+    let leftNumber = 0, rightNumber = 0, count = 0, truncated = false, characters = 0;
+    const lines = value => { const result = value.split('\n'); if (result.at(-1) === '') result.pop(); return result; };
+    function row(left, right, changed) {
+      if (count >= 2000 || characters >= 400_000) { truncated = true; return; }
+      const pair = element('div', null, 'toolbox-diff-row');
+      for (const [side, value, prefix] of [['left', left, changed ? '- ' : '  '], ['right', right, changed ? '+ ' : '  ']]) {
+        const cell = element('div', null, `toolbox-diff-cell toolbox-diff-${side}`); const present = value !== undefined;
+        if (present) {
+          const number = side === 'left' ? ++leftNumber : ++rightNumber; cell.dataset.line = String(number);
+          if (changed) cell.classList.add(side === 'left' ? 'toolbox-diff-remove' : 'toolbox-diff-add');
+          const visible = value.length > 4000 ? value.slice(0, 4000) + '…' : value; if (visible.length !== value.length) truncated = true;
+          characters += visible.length; cell.append(element('span', prefix + visible));
+        } else cell.classList.add('is-empty');
+        pair.append(cell);
+      }
+      host.append(pair); count++;
+    }
+    for (let i = 0; i < parts.length && count < 2000 && characters < 400_000; i++) {
+      const part = parts[i], current = lines(part.value), following = parts[i + 1];
+      if ((part.removed && following?.added) || (part.added && following?.removed)) {
+        const other = lines(following.value), removed = part.removed ? current : other, added = part.added ? current : other;
+        for (let n = 0; n < Math.max(removed.length, added.length); n++) row(removed[n], added[n], true);
+        i++;
+      } else if (part.removed) for (const line of current) row(line, undefined, true);
+      else if (part.added) for (const line of current) row(undefined, line, true);
+      else for (const line of current) row(line, line, false);
+      if (count >= 2000 || characters >= 400_000) truncated = true;
+    }
+    if (truncated) host.append(element('p', '差异预览已截断；复制和下载保留完整结果。', 'toolbox-diff-truncated'));
+  }
   function render() {
     const s = state(), config = currentCategory();
+    view(); renderNavigation();
     $('toolboxCategoryTitle').textContent = config.name;
     $('toolboxBreadcrumb').textContent = `${toolboxGroups.find(group => group.id === config.group).name} / ${config.name}`;
     for (const item of $('toolboxCategories').querySelectorAll('[data-category]')) {
-      const active = item.dataset.category === category; item.setAttribute('aria-pressed', String(active));
+      const active = !home && item.dataset.category === category; item.setAttribute('aria-pressed', String(active));
       if (active) item.setAttribute('aria-current', 'true'); else item.removeAttribute('aria-current');
     }
     $('toolboxAction').replaceChildren(...config.actions.map(([value, label]) => { const option = element('option', label); option.value = value; return option; }));
     $('toolboxAction').value = s.action; $('toolboxIndent').value = String(s.indent); $('toolboxIndentLabel').hidden = category !== 'json';
-    $('toolboxAction').setAttribute('aria-label', category === 'chart' ? '输入数据格式' : '处理方式'); $('toolboxRun').textContent = category === 'chart' ? '生成图表' : '处理';
+    const directModes = category !== 'chart' && config.actions.length > 1;
+    $('toolboxActionLabel').hidden = directModes || config.actions.length === 1;
+    $('toolboxModes').hidden = !directModes; $('toolboxModes').replaceChildren();
+    if (directModes) for (const [value, label] of config.actions) {
+      const mode = button(label, null, 'toolbox-mode'); mode.dataset.action = value; mode.setAttribute('aria-pressed', String(value === s.action));
+      mode.onclick = () => { if (value === state().action) return; invalidate(); readSequence++; state().action = value; render(); scheduleAuto(); }; $('toolboxModes').append(mode);
+    }
+    $('toolboxAction').setAttribute('aria-label', category === 'chart' ? '输入数据格式' : '处理方式'); $('toolboxRun').textContent = category === 'chart' ? '生成图表' : category === 'sql' ? '格式化' : '处理';
+    $('toolboxDialectLabel').hidden = category !== 'sql'; $('toolboxDialect').value = s.dialect;
+    $('toolboxPathLabel').hidden = category !== 'json' || s.action !== 'extract'; $('toolboxPath').value = s.path;
+    $('toolboxDeduplicateLabel').hidden = category !== 'clean'; $('toolboxDeduplicate').checked = s.deduplicate;
+    $('toolboxListDialectLabel').hidden = category !== 'clean' || s.action !== 'sql-string'; $('toolboxListDialect').value = s.sqlStyle;
     $('toolboxInput').value = s.input; $('toolboxSecondary').value = s.secondary; $('toolboxSecond').hidden = !['json', 'text'].includes(config.category) || s.action !== 'compare';
+    panel.classList.toggle('is-comparing', !$('toolboxSecond').hidden);
     $('toolboxNow').hidden = category !== 'time';
-    for (const id of ['toolboxChartConfig', 'toolboxChartData', 'toolboxChartBoth']) $(id).hidden = category !== 'chart' || !onContext;
-    $('toolboxInputLabel').textContent = category === 'data' && s.action === 'xlsx-json' ? '工作表内容（CSV，可编辑）' : category === 'compare' ? '原始文本' : '输入';
-    $('toolboxHint').textContent = category === 'chart' ? '可直接粘贴 Excel／查询结果表格、CSV、Markdown 表格或 JSON，也可导入 Excel。无需先改成 JSON；不规则文本可交给 AI 整理绘图。' : category === 'json' ? '严格 JSON；保留数字原文。比较时忽略对象键顺序与空白。' : category === 'data' ? 'JSON 使用对象数组；CSV / Excel 首行为表头，转 JSON 时字段保留为文本。Excel 不运行宏或计算公式。' : category === 'time' ? '日期统一按北京时间（UTC+08:00），格式：YYYY-MM-DD HH:mm:ss。' : category === 'encoding' ? 'Base64 使用 UTF-8 文本；URL 使用百分号编码；Unicode 使用 \\u 转义。' : category === 'compare' ? '粘贴两份文本，按行标记新增和删除；空格和大小写均参与比较。' : '按原文字面处理，去重区分大小写与空格。';
+    $('toolboxInputLabel').textContent = category === 'data' && s.action === 'xlsx-json' ? '工作表内容（CSV，可编辑）' : !$('toolboxSecond').hidden ? '原始内容' : '输入';
+    $('toolboxInput').placeholder = category === 'clean' ? '每行一个值，例如：\n1001\n1002' : category === 'time' ? '例如 1700000000 或 2023-11-15 06:13:20' : category === 'sql' ? '粘贴需要格式化的 SQL…' : '在这里粘贴内容，或读取编辑器选区…';
+    $('toolboxHint').textContent = category === 'chart' ? '粘贴表格、CSV 或 JSON，或导入 Excel；先选择数据，再调整图表。' : category === 'json' && s.action === 'extract' ? '支持 $.字段、[0]、[*] 和 ["字段名"]；重复字段或缺失字段会提示，不忽略项目。' : category === 'json' ? '严格 JSON；数字保留原文。短内容自动预览，比较忽略对象键顺序与空白。' : category === 'data' ? 'JSON 使用对象数组；CSV / Excel 首行为表头，转 JSON 时字段保留为文本。Excel 不运行宏或计算公式。' : category === 'clean' ? '每行一个值，去除首尾空格并跳过空行；请按目标引擎及其转义设置选择，不执行查询。' : category === 'sql' ? '选择 SQL 方言，仅在本机静态格式化，不执行或验证数据库语义。' : category === 'time' ? '自动识别 10 位秒、13 位毫秒和北京时间；其他格式可手动选择。' : category === 'encoding' ? 'Base64 使用 UTF-8 文本；URL 使用百分号编码；Unicode 使用 \\u 转义。' : category === 'compare' ? '两边输入原文和新内容，按行显示差异；空格和大小写均参与比较。' : '按原文字面处理，去重区分大小写与空格。';
     $('toolboxSource').textContent = s.source; $('toolboxSheetLabel').hidden = !s.sheets.length || !(category === 'data' && s.action === 'xlsx-json' || category === 'chart');
     $('toolboxSheet').replaceChildren(...s.sheets.map((sheet, i) => { const option = element('option', sheet.name); option.value = String(i); return option; })); $('toolboxSheet').value = String(s.sheet);
     sync(); renderResult(); message(s.result?.message || '输入仅保留在本页，不自动保存到文件。');
   }
-  function select(id) { stop(); readSequence++; category = id; render(); }
+  function select(id, action) {
+    if (!toolIds.has(id)) return;
+    stop(); readSequence++; category = id; home = false;
+    if (action && currentCategory().actions.some(([value]) => value === action) && state().action !== action) { state().action = action; if (state().result) state().result.stale = true; }
+    recent = [id, ...recent.filter(item => item !== id)].slice(0, 9); saveNavigation(); render(); scheduleAuto();
+  }
   const navigation = toolboxGroups.map(group => {
     const section = element('details', null, 'toolbox-group'); section.dataset.group = group.id; section.open = true;
     const heading = element('summary'), name = element('span', group.name), count = element('span', '', 'toolbox-group-count');
@@ -160,6 +302,9 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   let searchOpenState;
   function filterTools() {
     const query = $('toolboxSearch').value.trim().toLowerCase(); let visible = 0;
+    let cardCount = 0;
+    for (const card of cards) { card.hidden = !!query && !card.dataset.search.includes(query); if (!card.hidden) cardCount++; }
+    $('toolboxHomeSaved').hidden = !!query; $('toolboxSavedNavigation').hidden = !!query; $('toolboxHomeEmpty').hidden = cardCount > 0;
     if (query && !searchOpenState) searchOpenState = navigation.map(({ section }) => section.open);
     for (const [index, { section, group, count, tools }] of navigation.entries()) {
       let matches = 0;
@@ -177,6 +322,8 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   }
   $('toolboxSearch').addEventListener('input', filterTools);
   $('toolboxSearchClear').onclick = () => { $('toolboxSearch').value = ''; filterTools(); $('toolboxSearch').focus(); };
+  $('toolboxHomeButton').onclick = () => { stop(); readSequence++; clearChart(); home = true; render(); filterTools(); };
+  $('toolboxFavorite').onclick = () => { favorites = favorites.includes(category) ? favorites.filter(id => id !== category) : [...favorites, category]; saveNavigation(); renderNavigation(); };
   filterTools();
   function capture() { const file = editor?.current; return usable(file) ? { ...file } : null; }
   function open({ fromEditor = false } = {}) {
@@ -184,12 +331,15 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
     if (fromEditor) {
       const file = capture(); if (!file) return notify('请先打开可读取的文本文件。');
       const json = /\.json$/i.test(file.path) || /^[\s]*[\[{]/.test(file.content.slice(file.start, file.end) || file.content);
-      select(json ? 'json' : /\.csv$/i.test(file.path) ? 'data' : 'text'); state().action = json ? 'format' : category === 'data' ? 'csv-json' : 'dedup';
+      const sql = /\.sql$/i.test(file.path) || file.language === 'sql';
+      select(sql ? 'sql' : json ? 'json' : /\.csv$/i.test(file.path) ? 'data' : 'text');
+      state().action = sql || json ? 'format' : category === 'data' ? 'csv-json' : 'dedup';
+      if (sql && $('sqlDialect')?.value) state().dialect = $('sqlDialect').value;
       readEditor();
     } else if (!state().snapshot) state().snapshot = capture();
-    panel.hidden = false; trigger.setAttribute('aria-expanded', 'true'); render(); $('toolboxInput').focus({ preventScroll: true });
+    panel.hidden = false; setDocked(docked); trigger.setAttribute('aria-expanded', 'true'); render(); (home ? $('toolboxSearch') : $('toolboxInput')).focus({ preventScroll: true }); scheduleAuto();
   }
-  function close({ restoreFocus = true } = {}) { stop(); readSequence++; clearChart(); panel.hidden = true; trigger.setAttribute('aria-expanded', 'false'); if (restoreFocus) opener?.focus?.({ preventScroll: true }); }
+  function close({ restoreFocus = true } = {}) { stop(); readSequence++; clearChart(); panel.hidden = true; panes?.classList.remove('toolbox-docked'); document.dispatchEvent(new win.Event('workspace-layout')); trigger.setAttribute('aria-expanded', 'false'); if (restoreFocus) opener?.focus?.({ preventScroll: true }); }
   function readEditor() {
     const file = capture(); if (!file) return message('请先打开文本文件；PDF、Excel 和预览模式可使用导入文件。', true);
     const selected = file.start !== file.end, input = selected ? file.content.slice(file.start, file.end) : file.content;
@@ -198,23 +348,46 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   }
   trigger.onclick = () => panel.hidden ? open() : close(); shortcut.onclick = () => open({ fromEditor: true });
   $('toolboxClose').onclick = close; $('toolboxReadEditor').onclick = readEditor;
-  $('toolboxAction').onchange = () => { invalidate(); readSequence++; state().action = $('toolboxAction').value; render(); };
-  $('toolboxIndent').onchange = () => { invalidate(); state().indent = Number($('toolboxIndent').value); };
-  for (const [id, key] of [['toolboxInput', 'input'], ['toolboxSecondary', 'secondary']]) $(id).addEventListener('input', () => {
+  $('toolboxAction').onchange = () => { invalidate(); readSequence++; state().action = $('toolboxAction').value; render(); scheduleAuto(); };
+  $('toolboxIndent').onchange = () => { invalidate(); state().indent = Number($('toolboxIndent').value); scheduleAuto(); };
+  $('toolboxDialect').onchange = () => { invalidate(); state().dialect = $('toolboxDialect').value; };
+  $('toolboxPath').addEventListener('input', event => { invalidate(); state().path = $('toolboxPath').value; if (!event.isComposing) scheduleAuto(); });
+  $('toolboxPath').addEventListener('compositionend', scheduleAuto);
+  $('toolboxDeduplicate').onchange = () => { invalidate(); state().deduplicate = $('toolboxDeduplicate').checked; scheduleAuto(); };
+  $('toolboxListDialect').onchange = () => { invalidate(); state().sqlStyle = $('toolboxListDialect').value; scheduleAuto(); };
+  for (const [id, key] of [['toolboxInput', 'input'], ['toolboxSecondary', 'secondary']]) {
+    $(id).addEventListener('input', event => {
     invalidate(); readSequence++; state()[key] = $(id).value;
     if (key === 'input' && state().sheets.length) state().sheets[state().sheet].csv = state().input;
-    renderActions();
-  });
+    renderActions(); if (!event.isComposing) scheduleAuto();
+    });
+    $(id).addEventListener('compositionend', scheduleAuto);
+  }
   $('toolboxClear').onclick = () => { invalidate(); readSequence++; Object.assign(state(), { input: '', secondary: '', result: null, snapshot: null, sheets: [], source: '', chartSettings: null }); render(); };
-  $('toolboxNow').onclick = () => { invalidate(); const s = state(); s.input = s.action === 'date' ? new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 19).replace('T', ' ') : String(s.action === 'seconds' ? Math.floor(Date.now() / 1000) : Date.now()); render(); };
+  $('toolboxNow').onclick = () => { invalidate(); const s = state(); s.input = s.action === 'date' ? new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 19).replace('T', ' ') : String(s.action === 'seconds' ? Math.floor(Date.now() / 1000) : Date.now()); render(); scheduleAuto(); };
+  function scheduleAuto() {
+    win.clearTimeout(autoTimer); autoTimer = undefined;
+    const s = state();
+    if (home || panel.hidden || !['json', 'encoding', 'compare', 'text', 'time', 'clean'].includes(category) || !s.input && !s.secondary || category === 'json' && s.action === 'extract' && !s.path.trim()) return;
+    if (s.input.length + s.secondary.length > 80_000) { message('内容较大，请点击处理。'); return; }
+    const target = category, revision = s.revision;
+    autoTimer = win.setTimeout(() => { autoTimer = undefined; if (!panel.hidden && !home && category === target && state().revision === revision) runCurrent(); }, 300);
+  }
   async function execute(payload, apply) {
-    stop(); const token = ++generation; busy = true; $('toolboxRun').disabled = true; $('toolboxCancel').hidden = false; panel.setAttribute('aria-busy', 'true'); renderActions(); message('正在本机处理…');
+    stop(); const token = ++generation; busy = true; $('toolboxRun').disabled = true; $('toolboxCancel').hidden = false; $('toolboxCancel').textContent = payload.category === 'sql' ? '取消等待' : '停止'; panel.setAttribute('aria-busy', 'true'); renderActions(); message('正在本机处理…');
     try {
-      const result = await runner.run(payload);
+      let result;
+      if (payload.category === 'sql') {
+        if (!formatSql) throw new Error('SQL 格式化暂不可用。');
+        if (payload.input.length > 200_000) throw new Error('SQL 格式化最多支持 20 万字符。');
+        sqlController = new win.AbortController(); const formatted = await formatSql(payload.input, payload.dialect, sqlController.signal);
+        if (typeof formatted?.content !== 'string') throw new Error('SQL 格式化结果无效。');
+        result = { text: formatted.content, filename: 'result.sql', message: 'SQL 已静态格式化；未执行查询。' };
+      } else result = await runner.run(payload);
       if (destroyed || token !== generation) return;
       busy = false; apply(result); renderResult(); message(result.message || '处理完成。');
     } catch (error) { if (token === generation) { if (state().result) state().result.stale = true; message(error.message, true); } }
-    finally { if (token === generation) { busy = false; $('toolboxRun').disabled = false; $('toolboxCancel').hidden = true; panel.removeAttribute('aria-busy'); renderActions(); } }
+    finally { if (token === generation) { sqlController = null; busy = false; $('toolboxRun').disabled = false; $('toolboxCancel').hidden = true; panel.removeAttribute('aria-busy'); renderActions(); } }
   }
   function forwardChartContext(text) {
     const accepted = onContext?.(text); if (accepted === false) return false;
@@ -232,10 +405,10 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
     } catch (error) { if (sequence === readSequence) message(error.message, true); }
   }
   for (const [id, kind] of [['toolboxChartConfig', 'config'], ['toolboxChartData', 'data'], ['toolboxChartBoth', 'both']]) $(id).onclick = () => void sendChartContext(kind);
-  $('toolboxRun').onclick = () => {
+  function runCurrent() {
     const s = state();
     if (category === 'data' && s.action === 'xlsx-json' && !s.sheets.length) return message('请先导入 Excel 文件。', true);
-    void execute({ category: currentCategory().category, action: s.action === 'xlsx-json' ? 'csv-json' : s.action, input: s.input, secondary: s.secondary, indent: s.indent }, result => {
+    void execute({ category: currentCategory().category, action: s.action === 'xlsx-json' ? 'csv-json' : s.action, input: s.input, secondary: s.secondary, indent: s.indent, path: s.path, deduplicate: s.deduplicate, dialect: s.dialect, sqlStyle: s.sqlStyle }, result => {
       s.result = result; if (result.settings) s.chartSettings = result.settings;
       else if (result.table && s.chartSettings) {
         const columns = result.table.columns;
@@ -243,8 +416,9 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
         if (s.chartSettings.ys) s.chartSettings.ys = s.chartSettings.ys.filter(column => columns.includes(column));
       }
     });
-  };
-  $('toolboxCancel').onclick = () => { stop(); renderActions(); message('已停止处理，输入已保留。'); };
+  }
+  $('toolboxRun').onclick = runCurrent;
+  $('toolboxCancel').onclick = () => { const wasSql = category === 'sql'; stop(); renderActions(); message(wasSql ? '已取消等待，输入已保留。' : '已停止处理，输入已保留。'); };
   $('toolboxImport').onclick = () => $('toolboxFile').click();
   $('toolboxFile').onchange = async () => {
     const file = $('toolboxFile').files?.[0]; $('toolboxFile').value = ''; if (!file) return;
@@ -281,18 +455,23 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
     catch (error) { return message(error.message, true); }
     s.snapshot = null; close({ restoreFocus: false }); notify('结果已写入未保存草稿，可撤销；确认后再保存。');
   };
+  $('toolboxDock').onclick = () => setDocked(!docked);
   $('toolboxMaximize').onclick = () => {
+    if (docked) setDocked(false);
     const expanded = panel.classList.toggle('is-maximized'); $('toolboxMaximize').setAttribute('aria-pressed', String(expanded)); $('toolboxMaximize').title = expanded ? '还原工具箱' : '放大工具箱'; $('toolboxMaximize').setAttribute('aria-label', $('toolboxMaximize').title);
   };
-  panel.addEventListener('keydown', event => { if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); close(); } });
+  panel.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); event.stopPropagation(); $('toolboxSearch').focus(); $('toolboxSearch').select(); }
+    if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); close(); }
+  });
   let drag;
   $('toolboxDrag').addEventListener('pointerdown', event => {
-    if (event.button !== 0 || event.target.closest('button') || panel.classList.contains('is-maximized')) return;
+    if (event.button !== 0 || event.target.closest('button') || docked || panel.classList.contains('is-maximized')) return;
     const rect = panel.getBoundingClientRect(); drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
     $('toolboxDrag').setPointerCapture?.(event.pointerId); event.preventDefault();
   });
   function clamp() {
-    if (!panel.style.left || panel.classList.contains('is-maximized')) return;
+    if (docked || !panel.style.left || panel.classList.contains('is-maximized')) return;
     const rect = panel.getBoundingClientRect(); panel.style.left = Math.max(8, Math.min(parseFloat(panel.style.left), win.innerWidth - Math.min(rect.width, win.innerWidth - 16) - 8)) + 'px'; panel.style.top = Math.max(8, Math.min(parseFloat(panel.style.top), win.innerHeight - Math.min(rect.height, win.innerHeight - 16) - 8)) + 'px';
   }
   $('toolboxDrag').addEventListener('pointermove', event => { if (!drag || drag.id !== event.pointerId) return; panel.style.left = drag.left + event.clientX - drag.x + 'px'; panel.style.top = drag.top + event.clientY - drag.y + 'px'; clamp(); });
@@ -301,5 +480,5 @@ export function createToolbox({ editor, document = globalThis.document, runner, 
   const beforeUnload = event => { if ([...states.values()].some(s => s.input || s.secondary || s.sheets.length)) { event.preventDefault(); event.returnValue = ''; } }; win.addEventListener('beforeunload', beforeUnload);
   function sync() { shortcut.disabled = !usable(editor?.current); $('toolboxReadEditor').disabled = !usable(editor?.current); }
   render();
-  return { open, close, sync, destroy() { destroyed = true; stop(); clearChart(); readSequence++; resizeObserver?.disconnect(); win.removeEventListener('resize', clamp); win.removeEventListener('beforeunload', beforeUnload); panel.remove(); if (existingTrigger) { trigger.onclick = null; trigger.setAttribute('aria-expanded', 'false'); } else trigger.remove(); shortcut.remove(); } };
+  return { open, close, sync, destroy() { if (destroyed) return; destroyed = true; stop(); clearChart(); readSequence++; panes?.classList.remove('toolbox-docked'); resizeObserver?.disconnect(); win.removeEventListener('resize', clamp); win.removeEventListener('beforeunload', beforeUnload); panel.remove(); if (existingTrigger) { trigger.onclick = null; trigger.setAttribute('aria-expanded', 'false'); } else trigger.remove(); shortcut.remove(); } };
 }

@@ -9,6 +9,79 @@ import { createDraftJournal } from '../public/draft-journal.js';
 import { createDraftStore } from '../public/interactions.js';
 import { runTool } from '../public/toolbox-core.js';
 
+test('floating conversation preserves live messages, history, selection and unsaved buffers without submitting work', async t => {
+  const { $, document, window, events, thread, input, open, settle, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  await open('a.py'); input('fileEditorText', 'x=123 # unsaved\n'); input('prompt', 'keep this chat draft');
+  const items = [{ id: 'reply', type: 'agentMessage', text: '模拟任务仍在运行', turnId: 'live' }];
+  events.emit('thread', { ...thread, revision: 2, items, busy: true, turnId: 'live', latestTurnId: 'live' });
+  const pane = $('mainPanel'), prompt = $('prompt'), editor = $('fileEditorText'), composer = $('composer'), message = document.querySelector('.message.assistant');
+  prompt.setSelectionRange(2, 8); editor.setSelectionRange(3, 5); $('scrollArea').scrollTop = 73;
+  const before = requests.length, split = $('workspacePanes').style.getPropertyValue('--editor-split-size');
+  $('chatLayoutToggle').click();
+  assert.equal(pane.classList.contains('chat-floating'), true); assert.equal($('editorDivider').hidden, true);
+  assert.equal($('scrollArea').scrollTop, 73); assert.equal(prompt.selectionStart, 2); assert.equal(prompt.selectionEnd, 8);
+  assert.equal(document.querySelector('.message.assistant'), message); assert.equal($('stopButton').hidden, false);
+  $('chatHistoryButton').click();
+  events.emit('thread', { ...thread, revision: 3, items: [...items, { id: 'next', type: 'agentMessage', text: '模拟流式进展', turnId: 'live' }], busy: true, turnId: 'live', latestTurnId: 'live' });
+  assert.equal(pane.dataset.chatView, 'history'); assert.equal(document.querySelector('.message.assistant'), message);
+  $('chatLayoutToggle').click(); $('threadList').querySelector('[data-thread-id=t1]').click();
+  assert.equal(pane.classList.contains('chat-floating'), false); assert.equal(pane.style.width, '');
+  assert.equal($('workSurface').dataset.mode, 'both'); assert.equal($('workspacePanes').style.getPropertyValue('--editor-split-size'), split);
+  assert.equal($('editorDivider').hidden, false); assert.equal($('scrollArea').scrollTop, 73);
+  assert.equal($('prompt'), prompt); assert.equal($('composer'), composer); assert.equal(prompt.value, 'keep this chat draft');
+  assert.equal($('fileEditorText'), editor); assert.equal(editor.value, 'x=123 # unsaved\n'); assert.equal(editor.selectionStart, 3);
+  assert.match($('messages').textContent, /模拟流式进展/); assert.equal($('stopButton').hidden, false);
+  assert.equal(requests.slice(before).some(request => request.body), false);
+  window.dispatchEvent(new window.Event('pagehide'));
+  assert.equal(window.localStorage.getItem('lemon:chatLayout'), 'docked');
+});
+
+test('restored floating chat coexists with file layout and releases the whole bottom panel width until docked', async t => {
+  const { $, document, window, settle, requests } = await page(t, {
+    'lemon:chatLayout': 'floating', 'lemon:workspaceMode': 'files', 'codex-desk:editorSplit': '.63',
+    'lemon:openFiles:v1': JSON.stringify({ version: 1, files: [{ cwd: '/project', path: 'a.py' }], projects: [{ cwd: '/project', active: 'a.py', visible: true }] }),
+    'lemon:bottomPanel': JSON.stringify({ tab: 'results', open: true, height: 300 }),
+  });
+  await settle(() => !$('fileEditorText').readOnly); await new Promise(setImmediate);
+  assert.equal($('workSurface').dataset.mode, 'files'); assert.equal($('mainPanel').classList.contains('chat-floating'), true);
+  assert.equal($('workSurface').style.getPropertyValue('--bottom-panel-width'), '100%');
+  document.querySelector('[data-layout-mode=both]').click(); await new Promise(setImmediate);
+  assert.equal($('workSurface').classList.contains('bottom-under-editor'), false); assert.equal($('editorDivider').hidden, true);
+  $('chatLayoutToggle').click(); await new Promise(setImmediate);
+  assert.equal($('workSurface').classList.contains('bottom-under-editor'), true);
+  assert.equal($('workSurface').style.getPropertyValue('--bottom-panel-width'), $('workspacePanes').style.getPropertyValue('--editor-split-size'));
+  assert.equal(window.localStorage.getItem('codex-desk:editorSplit'), '.63');
+  $('chatLayoutToggle').click(); $('editorLayoutToggle').click(); await new Promise(setImmediate);
+  assert.equal(document.querySelector('.chat-floating-placeholder').hidden, false);
+  $('chatDockFromWorkspace').click(); assert.equal(document.querySelector('.chat-floating-placeholder').hidden, true);
+  assert.equal(document.activeElement, $('chatLayoutToggle'));
+  assert.equal(requests.some(request => request.body), false);
+});
+
+test('desktop floating chat supports pointer cancel, resizing, maximize restore and viewport bounds', async t => {
+  const { $, window, document } = await page(t);
+  Object.defineProperty(window, 'innerWidth', { value: 1440, writable: true }); Object.defineProperty(window, 'innerHeight', { value: 900, writable: true });
+  const handle = $('chatDragHandle'), pane = $('mainPanel'), edge = pane.querySelector('.chat-resize[data-edge=se]');
+  for (const target of [handle, edge]) { let captured; target.setPointerCapture = id => { captured = id; }; target.hasPointerCapture = id => captured === id; target.releasePointerCapture = () => { captured = null; }; }
+  const dispatch = (target, type, data = {}) => { const event = new window.Event(type, { bubbles: true, cancelable: true }); Object.assign(event, data); target.dispatchEvent(event); };
+  const pointer = (target, type, x, y) => dispatch(target, type, { button: 0, pointerId: 1, clientX: x, clientY: y });
+  const rect = () => ['left', 'top', 'width', 'height'].map(key => Number.parseFloat(pane.style[key]));
+  $('chatLayoutToggle').click(); const original = rect();
+  pointer(handle, 'pointerdown', 900, 80); pointer(handle, 'pointermove', 700, 100);
+  assert.equal(rect()[0], original[0] - 200); dispatch(document, 'keydown', { key: 'Escape' }); assert.deepEqual(rect(), original);
+  pointer(handle, 'pointerdown', 900, 80); pointer(handle, 'pointermove', 700, 80); pointer(handle, 'pointerup', 700, 80);
+  pointer(edge, 'pointerdown', 1200, 820); pointer(edge, 'pointermove', 1280, 760); pointer(edge, 'pointerup', 1280, 760);
+  assert.equal(rect()[2], original[2] + 80); assert.equal(rect()[3], original[3] - 60); const resized = rect();
+  $('chatMaximize').click(); assert.deepEqual(rect(), [8, 8, 1424, 884]);
+  $('chatMaximize').click(); assert.deepEqual(rect(), resized);
+  handle.focus(); dispatch(handle, 'keydown', { key: 'ArrowLeft' }); assert.equal(rect()[0], resized[0] - 10);
+  dispatch(handle, 'keydown', { key: 'ArrowDown', shiftKey: true }); assert.equal(rect()[3], resized[3] + 10);
+  window.innerWidth = 1024; window.innerHeight = 700; window.dispatchEvent(new window.Event('resize'));
+  const [x, y, width, height] = rect(); assert.ok(x >= 8 && y >= 8 && x + width <= 1016 && y + height <= 692);
+  $('chatResetWindow').click(); assert.equal(pane.classList.contains('is-maximized'), false); assert.equal(rect()[2], 620);
+});
+
 test('test preview follows real streamed tool image references and never submits actions or disturbs drafts', async t => {
   const { $, window, document, events, thread, settle, input, open, requests } = await page(t);
   document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
@@ -35,8 +108,11 @@ test('global toolbox sits beside More Tools, processes editor drafts locally and
   await open('a.py'); input('fileEditorText', '{"id":9007199254740993}'); input('prompt', 'keep chat draft');
   const originalTextarea = $('fileEditorText'); originalTextarea.setSelectionRange(0, originalTextarea.value.length);
   $('editorMoreToggle').click(); $('editorToolbox').click(); assert.equal($('toolboxInput').value, '{"id":9007199254740993}');
+  assert.equal($('workspacePanes').classList.contains('toolbox-docked'), true);
+  await settle(() => $('editorContextPreview').hidden, 'hidden editor content must not be attached while the toolbox occupies its workspace');
   $('toolboxRun').click(); await settle(() => !$('toolboxInsert').disabled); $('toolboxInsert').click();
   assert.equal($('toolboxPanel').hidden, true); assert.equal($('fileEditorText'), originalTextarea); assert.match(originalTextarea.value, /\n  "id": 9007199254740993/);
+  await settle(() => !$('editorContextPreview').hidden);
   assert.equal($('prompt').value, 'keep chat draft'); assert.equal(requests.some(request => /\/api\/(send|followup|project\/save|sql\/query|terminal\/start)/.test(request.route)), false);
   $('toolboxButton').click(); assert.equal($('toolboxInput').value, '{"id":9007199254740993}');
   const before = $('threadTitle').textContent; $('toolboxInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true })); assert.equal($('threadTitle').textContent, before);
@@ -46,7 +122,7 @@ test('schedule settings preserve their form and chat drafts across closing, refr
   const { $, document, window, input, settle } = await page(t);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (route, options = {}) => route === '/api/schedules' ? { ok: true, json: async () => ({ jobs: [], connected: true }) } : originalFetch(route, options);
-  $('settingsButton').click(); document.querySelector('[data-tab=schedules]').click(); await settle(() => /还没有/.test($('scheduleResults').textContent));
+  $('quickSchedules').click(); await settle(() => /还没有/.test($('scheduleResults').textContent));
   $('scheduleNew').click(); input('scheduleName', '保留这份任务草稿'); input('scheduleText', '只读检查文件');
   const event = new window.Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
   input('prompt', '原来的聊天草稿'); $('scheduleRefresh').click(); await new Promise(setImmediate);
@@ -808,6 +884,11 @@ test('bottom terminal retains output and command drafts across tabs, collapse an
   $('quickTerminal').click(); await settle(() => $('terminal-running-demo'));
   input('terminalCommand', 'pending stdin');
   const output = $('terminal-running-demo'); assert.equal($('terminalCommand').getAttribute('aria-label'), '终端标准输入');
+  $('quickSearch').click(); assert.equal($('workbenchDialog').hidden, false);
+  document.querySelector('#workbenchNav [data-tab=terminal]').click();
+  assert.equal($('workbenchDialog').hidden, true); assert.equal($('bottomTerminal').hidden, false);
+  assert.equal($('terminalResults').closest('[data-panel=terminal]').parentElement, $('bottomTerminal'));
+  assert.equal($('terminal-running-demo'), output); assert.equal($('terminalCommand').value, 'pending stdin');
   $('bottomTabResults').click(); assert.equal($('bottomTerminal').hidden, true); assert.equal($('bottomResultsEmpty').hidden, false);
   $('bottomTabTerminal').click(); await settle(() => !$('bottomTerminal').hidden);
   assert.equal($('terminal-running-demo'), output); assert.equal($('terminalCommand').value, 'pending stdin');

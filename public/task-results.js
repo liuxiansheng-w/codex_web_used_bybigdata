@@ -1,15 +1,8 @@
 import { markdown } from './markdown.js';
 import { requestSegments, currentRequest } from './message-timing.js';
-import { excludedProjectPart } from './project-paths.js';
+import { projectPath } from './project-paths.js';
+export { projectPath } from './project-paths.js';
 // Project files for the on-demand changes and artifacts panels.
-export function projectPath(value, cwd) {
-  if (typeof value !== 'string' || !cwd) return null;
-  let path = value.replace(/^(?:<)|(?:>)$/g, '').replace(/(?::\d+|#L\d+)$/, '');
-  if (path.startsWith(cwd.replace(/\/$/, '') + '/')) path = path.slice(cwd.replace(/\/$/, '').length + 1);
-  if (!path || path.startsWith('/') || /^[a-z][\w+.-]*:/i.test(path) || path.includes('\\') || path.split('/').some((p, i) => !p || p === '.' || p === '..' || excludedProjectPart(p, i, true) && !(i === 0 && p === 'AIdata' && /\.(xlsx|xls|xlsm)$/i.test(path)))) return null;
-  return path;
-}
-
 export function taskResult(thread) {
   const request = currentRequest(thread), items = request.user?.pending ? [] : request.items;
   const changes = [], artifacts = new Map();

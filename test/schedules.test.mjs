@@ -11,10 +11,11 @@ import { ThreadOrganization } from '../lib/thread-organization.mjs';
 import { permissionPresets } from '../public/permission-presets.js';
 import { createSchedules } from '../public/schedules.js';
 import { nextScheduleAt, normalizeSchedule, upcomingSchedule, describeSchedule, formatScheduleTime } from '../public/schedule-time.js';
+import { BUNDLED_CALENDAR } from '../public/holiday-calendar.js';
 
 const at = text => Date.parse(`${text}+08:00`), rule = (kind, extra = {}) => ({ kind, time: '09:00', ...extra });
 const models = [{ id: 'test-model', name: '测试模型', isDefault: true, efforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }], defaultEffort: 'low' }, { id: 'other-model', name: '另一个测试模型', efforts: [{ reasoningEffort: 'medium' }] }];
-const settingsOptions = { models, permissions: { options: permissionPresets.map(preset => ({ id: preset.id, enabled: true })) }, folders: [{ id: 'folder-a', name: '日常检查' }] };
+const settingsOptions = { models, permissions: { options: permissionPresets.map(preset => ({ id: preset.id, enabled: true })) }, folders: [{ id: 'folder-a', name: '日常检查' }], capabilities: { workdayCalendar: true, isolatedWorktrees: true }, calendar: BUNDLED_CALENDAR };
 test('calendar rules use Beijing time, strict future dates, Monday-first weeks and missing-month skips', () => {
   assert.equal(nextScheduleAt(rule('daily'), at('2026-10-19T08:59:59')), at('2026-10-19T09:00:00'));
   assert.equal(nextScheduleAt(rule('daily'), at('2026-10-19T09:00:00')), at('2026-10-20T09:00:00'));
@@ -97,6 +98,35 @@ test('pending task creation blocks tick and duplicate writes until persistence c
   await finish(); await creating;
 });
 
+test('an isolated task at its retention limit pauses visibly without blocking another due task', async t => {
+  const { cwd, desk, action, calls } = await fixture(t);
+  let now = at('2026-10-19T08:00:00'); t.mock.method(Date, 'now', () => now);
+  await action({ action: 'create', cwd, name: '受限任务', text: '虚构任务一', schedule: rule('daily') });
+  await action({ action: 'create', cwd, name: '其他任务', text: '虚构任务二', schedule: rule('daily') });
+  const [limited, other] = desk.jobs;
+  limited.isolateWorktree = true;
+  limited.history = Array.from({ length: 100 }, (_, index) => ({ id: `tree-${index}`, worktree: { state: 'active' }, status: 'completed' }));
+  now = at('2026-10-19T09:01:00'); await desk.tick();
+  assert.equal(limited.enabled, false); assert.equal(limited.pauseReason, 'worktree_limit'); assert.equal(limited.scheduleRuns, 1);
+  assert.equal(limited.history[0].status, 'failed'); assert.match(limited.history[0].error, /100/);
+  assert.deepEqual(calls.map(call => call.text), ['虚构任务二']); assert.equal(other.history.length, 1);
+  await assert.rejects(action({ action: 'setEnabled', id: limited.id, enabled: true }), /100/);
+  desk.jobs[0].history[1].worktree.state = 'trashed';
+  await action({ action: 'setEnabled', id: limited.id, enabled: true });
+  assert.equal(desk.jobs[0].enabled, true); assert.ok(desk.jobs[0].nextAt > now);
+});
+test('an unexpected per-task scheduling error is recorded and does not stop later due tasks', async t => {
+  const { cwd, desk, action, calls } = await fixture(t);
+  let now = at('2026-10-19T08:00:00'); t.mock.method(Date, 'now', () => now);
+  await action({ action: 'create', cwd, text: '异常任务', schedule: rule('daily') });
+  await action({ action: 'create', cwd, text: '正常任务', schedule: rule('daily') });
+  const original = desk.runJob.bind(desk), firstId = desk.jobs[0].id;
+  desk.runJob = async (job, automatic) => { if (job.id === firstId) throw Error('虚构调度异常'); return original(job, automatic); };
+  now = at('2026-10-19T09:01:00'); await desk.tick();
+  assert.equal(desk.jobs[0].pauseReason, 'error'); assert.equal(desk.jobs[0].history[0].status, 'unknown');
+  assert.match(desk.jobs[0].history[0].error, /虚构调度异常/); assert.deepEqual(calls.map(call => call.text), ['正常任务']);
+});
+
 function ui(t, handler = async () => ({ jobs: [] }), optionsHandler = async () => structuredClone(settingsOptions)) {
   const dom = new JSDOM('<section id="schedules"></section>', { pretendToBeVisual: true }); t.after(() => dom.window.close());
   const root = dom.window.document.querySelector('section'), requests = [], context = { cwd: '/project-a' }, threads = [];
@@ -111,6 +141,8 @@ test('Chinese calendar form previews three executions and preserves failed draft
   let failing = true;
   const { $, root, input, choose, submit, settle, requests, controller, context } = ui(t, async (url, body) => { if (body && failing) throw Error('保存失败'); return { jobs: [] }; });
   await controller.load(); assert.match($('scheduleResults').textContent, /还没有/); assert.equal($('scheduleForm').hidden, true);
+  assert.match(root.querySelector('.schedule-conditions').textContent, /重启后任务暂停/);
+  assert.match($('scheduleCalendarOverview').textContent, /日历/);
   $('scheduleNew').click(); input('scheduleName', '每周汇总'); input('scheduleText', '读取变更并输出摘要'); choose('weekdays');
   assert.match($('schedulePreview').textContent, /每周一至周五 09:00/); assert.equal($('schedulePreview').querySelectorAll('li').length, 3); assert.match($('scheduleRuleHint').textContent, /节假日/);
   context.cwd = '/project-b'; await controller.load(); assert.equal($('scheduleText').value, '读取变更并输出摘要'); assert.equal(controller.hasDraft(), true);
@@ -176,6 +208,19 @@ test('expired recurring schedules never submit missed work after the inclusive e
   await action({ action: 'create', cwd, text: '检查', schedule: rule('daily', { endDate: '2026-10-20' }) }); now = at('2026-10-21T00:00:00'); await desk.tick();
   assert.equal(calls.length, 0); assert.equal(desk.jobs[0].enabled, false); assert.equal(desk.jobs[0].pauseReason, 'finished'); assert.equal(desk.jobs[0].scheduleRuns, 0);
 });
+test('workday jobs wait for unpublished calendars and resume without replaying unknown dates', async t => {
+  const { cwd, desk, action, workspace, calls } = await fixture(t); let now = at('2026-12-18T08:00:00'); t.mock.method(Date, 'now', () => now);
+  let calendar = structuredClone(BUNDLED_CALENDAR);
+  desk.holidayCalendar = { load: async () => calendar, snapshot: () => calendar, refresh: async () => calendar };
+  await action({ action: 'create', cwd, text: '工作日任务', schedule: { kind: 'workday', time: '09:00', startDate: '2026-12-18' } });
+  const job = desk.jobs[0]; now = at('2026-12-18T09:00:00'); await desk.tick();
+  assert.equal(calls.length, 1); assert.equal(job.enabled, true); assert.equal(job.pauseReason, 'calendar'); assert.equal(job.nextAt, null);
+  workspace.threads.get(job.lastThreadId).busy = false;
+  await action({ action: 'update', id: job.id, text: '改名不改变等待状态', schedule: job.schedule });
+  assert.equal(job.pauseReason, 'calendar'); assert.equal(job.nextAt, null);
+  calendar.years[2027] = { year: 2027, days: [], papers: [] }; now = at('2026-12-18T10:00:00'); await desk.tick();
+  assert.equal(job.pauseReason, null); assert.equal(job.nextAt, at('2026-12-21T09:00:00')); assert.equal(calls.length, 1);
+});
 test('Chinese date picker uses Monday-first dates, keyboard navigation, leap days and independent end fields', async t => {
   const { $, root, input, choose, dom, controller } = ui(t); $('scheduleNew').click();
   assert.equal($('scheduleDateCalendar').hidden, true); assert.equal(controller.hasDraft(), false);
@@ -186,6 +231,16 @@ test('Chinese date picker uses Monday-first dates, keyboard navigation, leap day
   input('scheduleEnd', 'date'); input('scheduleEndDate', '2028-03-31'); $('scheduleEndDate').click(); assert.equal($('scheduleEndDateCalendar').hidden, false); $('scheduleName').focus(); assert.equal($('scheduleEndDateCalendar').hidden, true);
   choose('once'); assert.equal($('scheduleCycleRow').hidden, true); assert.equal($('scheduleEndRow').hidden, true); assert.equal($('scheduleEndDate').disabled, true); assert.equal($('scheduleDate').getAttribute('aria-label'), '执行日期');
   choose('weekly'); input('scheduleEnd', 'count'); input('scheduleMaxRuns', '1'); assert.equal($('schedulePreview').querySelector('details'), null); assert.match($('scheduleRuleHint').textContent, /立即运行不计入/); assert.equal(root.querySelectorAll('[name=scheduleMode]').length, 2);
+});
+test('date picker labels published holiday and makeup-work dates', async t => {
+  const { $, input, controller, settle } = ui(t); $('scheduleNew').click(); await settle(() => !$('scheduleSave').disabled);
+  input('scheduleDate', '2026-09-20'); $('scheduleDate').click();
+  const grid = $('scheduleDateCalendar');
+  assert.match(grid.querySelector('[data-date="2026-09-20"]').getAttribute('aria-label'), /补班/);
+  assert.equal(grid.querySelector('[data-date="2026-09-20"] .schedule-day-marker').textContent, '班');
+  assert.match(grid.querySelector('[data-date="2026-09-25"]').getAttribute('aria-label'), /放假/);
+  assert.equal(grid.querySelector('[data-date="2026-09-25"] .schedule-day-marker').textContent, '休');
+  controller.dispose();
 });
 test('saving an unchanged legacy interval from the form preserves seconds, counters and its original anchor', async t => {
   const schedule = normalizeSchedule({ kind: 'interval', minutes: 120, anchorAt: at('2026-10-20T09:00:27'), maxRuns: 8 });
@@ -219,4 +274,32 @@ test('execution option reads cannot cross forms and unavailable choices do not s
   $('scheduleOptionsRefresh').click(); pending[2].resolve({ ...settingsOptions, folders: [] }); await settle(() => !$('scheduleSave').disabled);
   assert.equal($('scheduleFolder').value, 'folder-b'); assert.equal($('scheduleFolder').selectedOptions[0].disabled, true); assert.equal(controller.hasDraft(), true);
   root.querySelector('#scheduleForm').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); assert.match($('scheduleNotice').textContent, /不可用/);
+});
+
+test('workday and isolated worktree choices are saved explicitly, without putting the isolated thread in the original folder', async t => {
+  const { $, choose, input, submit, settle, requests, dom } = ui(t);
+  $('scheduleNew').click(); await settle(() => !$('scheduleSave').disabled);
+  choose('workday'); input('scheduleName', '工作日检查'); input('scheduleText', '在隔离目录生成结果');
+  assert.match($('scheduleRuleHint').textContent, /补班/);
+  $('scheduleFolder').value = 'folder-a'; $('scheduleWorktree').checked = true;
+  $('scheduleWorktree').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal($('scheduleFolder').disabled, true); assert.equal($('scheduleRecycleRow').hidden, false);
+  $('scheduleRecycleWorktree').checked = true; $('scheduleRecycleWorktree').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal($('scheduleRecycleHint').hidden, false);
+  await submit(); await settle(() => $('scheduleForm').hidden);
+  const body = requests.at(-1).body;
+  assert.equal(body.schedule.kind, 'workday'); assert.equal(body.isolateWorktree, true); assert.equal(body.recycleWorktree, true); assert.equal(body.folderId, null);
+});
+
+test('new schedule features stay unavailable with an older backend instead of silently running in the original project', async t => {
+  const oldOptions = structuredClone(settingsOptions); delete oldOptions.capabilities; delete oldOptions.calendar;
+  const { $, settle, dom } = ui(t, async () => ({ jobs: [] }), async () => oldOptions);
+  $('scheduleNew').click(); await settle(() => !$('scheduleSave').disabled);
+  assert.equal($('scheduleWorktree').disabled, true);
+  assert.equal($('scheduleCycle').querySelector('[value="workday"]').disabled, true);
+  assert.match($('scheduleOptionsStatus').textContent, /未加载新版/);
+  $('scheduleWorktree').checked = true; $('scheduleWorktree').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  $('scheduleText').value = '任务'; $('scheduleName').value = '任务';
+  $('scheduleForm').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  assert.match($('scheduleNotice').textContent, /未加载新版/);
 });

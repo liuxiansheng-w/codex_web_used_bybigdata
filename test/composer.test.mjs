@@ -30,7 +30,7 @@ function setup(t, withController = true) {
   const elements = [];
   class Element {
     get ownerDocument() { return globalThis.document; }
-    constructor(id = '') { elements.push(this); this.id = id; this.value = ''; this.textContent = ''; this.children = []; this.handlers = {}; this.dataset = {}; this.attributes = {}; this.hidden = true; this.disabled = false; this.selectors = new Map(); this.classList = { toggle() {}, add() {}, remove() {} }; this.style = { setProperty() {} }; this.scrollHeight = 300; this.scrollTop = 0; this.scrollLeft = 0; this.clientHeight = 400; }
+    constructor(id = '') { elements.push(this); this.id = id; this.value = ''; this.textContent = ''; this.children = []; this.handlers = {}; this.dataset = {}; this.attributes = {}; this.hidden = true; this.disabled = false; this.selectors = new Map(); const classes = new Set(); this.classList = { contains: value => classes.has(value), add: (...values) => values.forEach(value => classes.add(value)), remove: (...values) => values.forEach(value => classes.delete(value)), toggle(value, force = !classes.has(value)) { if (force) classes.add(value); else classes.delete(value); return force; } }; this.style = { setProperty() {} }; this.scrollHeight = 300; this.scrollTop = 0; this.scrollLeft = 0; this.clientHeight = 400; }
     addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }
     async fire(name, extra = {}) { for (const fn of this.handlers[name] || []) await fn({ preventDefault() {}, stopPropagation() {}, submitter: this, target: this, currentTarget: this, ...extra }); }
     append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }

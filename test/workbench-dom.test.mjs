@@ -121,7 +121,12 @@ test('real DOM integration: workbench navigation, multi-file drafts, selection, 
   assert.equal(document.querySelector('.active-thread[data-thread-id="background"] .thread-status').textContent, '运行中');
   $('conversationTitleButton').click(); assert.equal($('threadActionsDialog').open, true); assert.equal($('threadRename').value, 'Example'); $('closeThreadActions').click();
   $('settingsButton').click(); document.querySelector('[data-tab=native]').click(); assert.equal(document.querySelector('[data-panel=native]').hidden, false); assert.match($('nativeCapabilities').textContent, /网页暂不支持/); assert.ok(document.querySelector('[data-panel=native] a[href="codex://"]'));
-  document.querySelector('[data-tab=preferences]').click(); $('persistDrafts').checked = true; $('persistDrafts').dispatchEvent(new window.Event('change')); assert.equal(localStorage.getItem('codex-desk:persistDrafts'), 'true');
+  for (let i = 0; i < 20; i++) localStorage.setItem(`fixture-setting-${i}`, 'x');
+  const storagePrototype = Object.getPrototypeOf(localStorage), originalKey = storagePrototype.key; let keyReads = 0;
+  storagePrototype.key = function (index) { keyReads++; return originalKey.call(this, index); };
+  try { document.querySelector('[data-tab=preferences]').click(); assert.ok(keyReads <= localStorage.length + 2, `draft cache scan should be bounded, got ${keyReads} reads`); }
+  finally { storagePrototype.key = originalKey; }
+  $('persistDrafts').checked = true; $('persistDrafts').dispatchEvent(new window.Event('change')); assert.equal(localStorage.getItem('codex-desk:persistDrafts'), 'true'); await settle(() => !$('clearSavedDrafts').disabled);
   document.querySelector('[data-tab=connections]').click(); await settle(() => $('connectionsResults').textContent.includes('demo'));
   document.querySelector('[data-tab=search]').click(); assert.equal(document.querySelector('[data-panel=search]').hidden, false);
   const ids = [...document.querySelectorAll('[id]')].map(el => el.id); assert.equal(new Set(ids).size, ids.length, 'no duplicate IDs across dynamic editor and workbench');

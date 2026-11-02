@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, writeFile, readFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import XLSX from 'xlsx';
 import { createPatch } from 'diff';
+import { build } from 'esbuild';
 import { ProjectFiles } from '../lib/project-files.mjs';
 import { FileTools } from '../lib/file-tools.mjs';
 import { FileHistory } from '../lib/file-history.mjs';
@@ -14,6 +16,13 @@ import { Workspace } from '../lib/workspace.mjs';
 import { Subagents } from '../lib/subagents.mjs';
 import { SpreadsheetPreview } from '../lib/spreadsheet-preview.mjs';
 import { previewWorkbook } from '../lib/spreadsheet-worker.mjs';
+
+test('file history keeps shared path validation without importing browser renderers', async () => {
+  const result = await build({ absWorkingDir: fileURLToPath(new URL('..', import.meta.url)), entryPoints: ['lib/file-history.mjs'], bundle: true, write: false, metafile: true, packages: 'external', platform: 'node', format: 'esm', logLevel: 'silent' });
+  const modules = Object.keys(result.metafile.inputs);
+  assert.ok(modules.includes('public/project-paths.js'));
+  assert.equal(modules.some(file => /public\/(?:task-results|markdown|vendor\/)/.test(file)), false);
+});
 
 async function fixture() {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'lemon-features-'))), files = new ProjectFiles(), tools = new FileTools(files, { trash: path.join(cwd, 'trash') });

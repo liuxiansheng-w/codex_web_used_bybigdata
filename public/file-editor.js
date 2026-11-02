@@ -167,6 +167,29 @@ export function lineEdit(content, start, end, language, action) {
   return { from, to, text, start: position(start), end: position(end) };
 }
 
+// Display columns only: tabs advance to the next existing tab stop. Empty
+// lines retain the shared indentation of their neighboring nonempty lines.
+export function indentationColumns(text, tabSize = 2) {
+  tabSize = Number.isInteger(tabSize) && tabSize > 0 && tabSize <= 16 ? tabSize : 2;
+  const raw = [];
+  for (let start = 0; start <= text.length;) {
+    const newline = text.indexOf('\n', start), end = newline < 0 ? text.length : newline;
+    let at = start, columns = 0;
+    while (at < end && (text[at] === ' ' || text[at] === '\t')) { columns += text[at] === '\t' ? tabSize - columns % tabSize : 1; at++; }
+    raw.push(at === end ? -columns - 1 : columns);
+    if (newline < 0) break;
+    start = newline + 1;
+  }
+  const result = new Uint32Array(raw.length);
+  let next = 0, previous = 0;
+  for (let line = raw.length - 1; line >= 0; line--) { if (raw[line] >= 0) next = raw[line]; else result[line] = next; }
+  for (let line = 0; line < raw.length; line++) {
+    if (raw[line] >= 0) result[line] = previous = raw[line];
+    else result[line] = raw[line] < -1 ? -raw[line] - 1 : Math.min(previous, result[line]);
+  }
+  return result;
+}
+
 export function createFileEditor({ api, onAttach, onChange = () => {}, onSessionError = () => {}, onReveal = () => {} }) {
   const documents = [], views = new Map(), projectViews = new Map();
   const emptyView = { panel: $('editorEmptyPanel'), input: $('fileEditorText'), numbers: $('editorLineNumbers'), highlight: $('editorHighlight') };
@@ -311,6 +334,30 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     highlight.style.width = `${input.clientWidth}px`; highlight.style.height = `${input.clientHeight}px`;
     highlight.scrollTop = input.scrollTop; highlight.scrollLeft = input.scrollLeft;
     numbers.scrollTop = input.scrollTop;
+    renderIndentGuides(doc);
+  }
+  function renderIndentGuides(doc) {
+    const view = doc?.view; if (!view?.guides || doc.preview || markdownPreview(doc)) return;
+    const { input, guides, guideContent, guideRows } = view, style = input.ownerDocument.defaultView.getComputedStyle(input);
+    const metric = (value, fallback) => Number.isFinite(parseFloat(value)) ? parseFloat(value) : fallback;
+    const lineHeight = metric(style.lineHeight, 22), paddingTop = metric(style.paddingTop, 16), paddingLeft = metric(style.paddingLeft, 14);
+    const tabSize = Math.max(1, Math.min(16, parseInt(style.tabSize, 10) || 2));
+    const ghost = view.lastGhost, text = ghost ? input.value.slice(0, ghost.snapshot.start) + ghost.text + input.value.slice(ghost.snapshot.end) : input.value;
+    if (view.guideText !== text || view.guideTabSize !== tabSize) { view.guideColumns = indentationColumns(text, tabSize); view.guideText = text; view.guideTabSize = tabSize; }
+    Object.assign(guides.style, { width: `${input.clientWidth}px`, height: `${input.clientHeight}px`, fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, letterSpacing: style.letterSpacing });
+    guides.style.setProperty('--editor-indent-step', `${tabSize}ch`);
+    Object.assign(guideContent.style, { left: `${paddingLeft}px`, top: `${paddingTop}px`, transform: `translate(${-input.scrollLeft}px, ${-input.scrollTop}px)` });
+    const first = Math.max(0, Math.floor((input.scrollTop - paddingTop) / lineHeight) - 2);
+    const last = Math.min(view.guideColumns.length, first + Math.ceil((input.clientHeight || 600) / lineHeight) + 6), visibleRows = new Set();
+    for (let line = first; line < last; line++) {
+      const columns = Math.floor(view.guideColumns[line] / tabSize) * tabSize; if (!columns) continue;
+      visibleRows.add(line);
+      let row = guideRows.get(line);
+      if (!row) { row = document.createElement('div'); row.className = 'editor-indent-row'; row.dataset.line = String(line + 1); guideContent.append(row); guideRows.set(line, row); }
+      row.dataset.columns = String(columns);
+      Object.assign(row.style, { top: `${line * lineHeight}px`, height: `${lineHeight}px`, width: `${columns}ch` });
+    }
+    for (const [line, row] of guideRows) if (!visibleRows.has(line)) { row.remove(); guideRows.delete(line); }
   }
   function revealCaret(doc) {
     if (doc !== active || doc.preview || doc.loading || doc.composing || !visible()) return;
@@ -511,13 +558,15 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `editorTab-${doc.id}`);
     const numbers = document.createElement('pre'); numbers.className = 'editor-line-numbers'; numbers.setAttribute('aria-hidden', 'true');
     const source = document.createElement('div'); source.className = 'editor-source';
+    const guides = document.createElement('div'); guides.className = 'editor-indent-guides'; guides.setAttribute('aria-hidden', 'true');
+    const guideContent = document.createElement('div'); guideContent.className = 'editor-indent-content'; guides.append(guideContent);
     const rendered = document.createElement('pre'); rendered.className = 'editor-highlight'; rendered.setAttribute('aria-hidden', 'true');
     const input = document.createElement('textarea');
     Object.assign(input, { className: 'editor-input', spellcheck: false, wrap: 'off', maxLength: 20 * 1024 * 1024, readOnly: true });
     input.setAttribute('aria-label', `编辑文件内容：${doc.path}`); input.setAttribute('aria-describedby', 'editorHelp');
     for (const [name, value] of [['autocapitalize', 'off'], ['autocomplete', 'off'], ['autocorrect', 'off']]) input.setAttribute(name, value);
-    source.append(rendered, input); panel.append(numbers, source); $('editorBuffers').append(panel);
-    doc.view = { panel, numbers, source, highlight: rendered, input }; observer?.observe(input);
+    source.append(guides, rendered, input); panel.append(numbers, source); $('editorBuffers').append(panel);
+    doc.view = { panel, numbers, source, highlight: rendered, input, guides, guideContent, guideRows: new Map() }; observer?.observe(input);
     if (doc.markdown) {
       const reader = document.createElement('div'), article = document.createElement('article');
       reader.className = 'editor-markdown-reader'; reader.tabIndex = 0; reader.setAttribute('role', 'region'); reader.setAttribute('aria-label', `Markdown 预览：${doc.path}`);

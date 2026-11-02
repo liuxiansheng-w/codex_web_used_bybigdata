@@ -1,13 +1,140 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { EventEmitter } from 'node:events';
+import { fileURLToPath } from 'node:url';
+import { EventEmitter, once } from 'node:events';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { JSDOM } from 'jsdom';
+import { build } from 'esbuild';
 import { SqlRunner, prepareQuery, validateQuery } from '../lib/sql-runner.mjs';
 import { createApplication } from '../server.mjs';
 import { extractParams, substituteParams, createParameterMemory, yesterdayBusinessDate, calendarDate } from '../public/sql-parameters.js';
-import { createSqlQuery, resultText, filterRows, sqlFileFromRunnerLink, columnValueKey, columnOptions } from '../public/sql-query.js';
+import { createSqlQuery, resultText, filterRows, sqlFileFromRunnerLink, columnValueKey, columnOptions, sqlAnalysisData } from '../public/sql-query.js';
+import { parseDliResponse, businessErrorFromResponse, hasDliSuccessEvidence, isHtmlResponse, isUnrecognizedAliPayload, sqlExecutionFailure } from '../../dgc-sql-runner/response-validation.mjs';
 import { createBottomPanel } from '../public/editor-window.js';
+import * as runnerParameters from '../../dgc-sql-runner/public/sql-parser.mjs';
+
+test('real runner HTTP path forwards to its configured gateway and reports connection failures with a specific code', async t => {
+  const received = [], upstream = createServer(async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk;
+    received.push(JSON.parse(body));
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ code: 200, datas: [{ n: 1 }] }));
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { upstream.closeAllConnections(); if (upstream.listening) await new Promise(resolve => upstream.close(resolve)); });
+  const runner = fileURLToPath(new URL('../../dgc-sql-runner/server.mjs', import.meta.url));
+  const child = spawn(process.execPath, [runner], { env: { ...process.env, PORT: '0', HOST: '127.0.0.1', DLI_EXECSQL_URL: `http://127.0.0.1:${upstream.address().port}/fixture` }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit'); let errors = ''; child.stderr.on('data', chunk => { errors += chunk; });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); await exited; });
+  const base = await new Promise((resolve, reject) => {
+    let output = ''; const timer = setTimeout(() => reject(new Error('Fixture runner did not start')), 5000);
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.stdout.on('data', chunk => { output += chunk; const match = /DGC SQL runner: (http:\/\/127\.0\.0\.1:\d+)/.exec(output); if (match) { clearTimeout(timer); resolve(match[1]); } });
+  });
+  const query = () => fetch(base + '/api/execute-sql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sql: 'SELECT 1 AS n', engine: 'huawei' }) });
+  const success = await query(), data = await success.json();
+  assert.equal(success.status, 200); assert.equal(data.ok, true); assert.deepEqual(data.rows, [{ n: 1 }]);
+  assert.equal(received[0].sql, '--lzy\nSELECT 1 AS n');
+  upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve));
+  const failed = await query(), failure = await failed.json();
+  assert.equal(failed.status, 500); assert.equal(failure.uncertain, true); assert.equal(failure.errorCode, 'ECONNREFUSED');
+  assert.match(failure.error, /拒绝连接/); assert.equal(received.length, 1);
+  await new Promise(setImmediate); assert.match(errors, /ECONNREFUSED/); assert.doesNotMatch(errors, /SELECT 1/);
+});
+
+test('runner diagnostics distinguish network errors from local failures without exposing raw messages', () => {
+  const transport = sqlExecutionFailure(Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }));
+  assert.equal(transport.errorCode, 'UND_ERR_CONNECT_TIMEOUT'); assert.match(transport.error, /超时/);
+  const internal = sqlExecutionFailure(new ReferenceError('private SQL and raw response'));
+  assert.equal(internal.errorCode, 'RUNNER_INTERNAL_ERROR'); assert.match(internal.error, /执行异常/); assert.doesNotMatch(internal.error, /private|连接中断/);
+});
+
+test('workbench and standalone runner preserve quoted fields, comments and parameter escaping', () => {
+  const sql = "SELECT `col?`, `:alias`, `@field`, '${day}', {{region}}, ? -- :ignored\n/* @ignored */ FROM demo WHERE n=:count";
+  const params = { day: "O'Reilly", region: 'north', param1: 3, count: 4 };
+  for (const parser of [{ extractParams, substituteParams }, runnerParameters]) {
+    assert.deepEqual(parser.extractParams(sql), ['day', 'region', 'param1', 'count']);
+    assert.equal(parser.substituteParams(sql, params), "SELECT `col?`, `:alias`, `@field`, 'O''Reilly', north, 3 -- :ignored\n/* @ignored */ FROM demo WHERE n=4");
+    assert.throws(() => parser.substituteParams('SELECT :missing', {}), /缺少参数/);
+  }
+});
+
+test('standalone SQL page uses its local shared module and only asks for actual parameters', async t => {
+  const pageUrl = new URL('../../dgc-sql-runner/public/index.html', import.meta.url), html = await readFile(pageUrl, 'utf8');
+  const source = /<script type="module">([\s\S]*?)<\/script>/.exec(html)?.[1];
+  assert.ok(source, 'the page must load its local parameter module');
+  const bundle = await build({ stdin: { contents: source, resolveDir: fileURLToPath(new URL('.', pageUrl)), sourcefile: 'runner-page.js' }, bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent' });
+  const dom = new JSDOM(html, { url: 'http://127.0.0.1:5177', runScripts: 'outside-only', pretendToBeVisual: true });
+  t.after(() => dom.window.close());
+  const { window } = dom, requests = [], $ = id => window.document.getElementById(id);
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  window.fetch = async (route, options = {}) => {
+    requests.push({ route, body: options.body ? JSON.parse(options.body) : undefined });
+    const result = route === '/api/execute-sql' ? { ok: true, rows: [], columns: [], durationMs: 1, engine: 'huawei' } : { ok: true, files: [] };
+    return { ok: true, json: async () => result };
+  };
+  window.eval(bundle.outputFiles[0].text);
+  const type = sql => { $('sqlEditor').value = sql; $('sqlEditor').setSelectionRange(0, 0); $('sqlEditor').dispatchEvent(new window.Event('input', { bubbles: true })); };
+  type('SELECT `col?`, `:alias`, `@field` FROM demo');
+  assert.equal($('paramInfo').textContent, '参数 0');
+  $('runBtn').click(); await new Promise(setImmediate);
+  assert.equal($('paramModal').classList.contains('show'), false);
+  assert.equal(requests.filter(request => request.route === '/api/execute-sql').length, 1);
+  type('SELECT :region AS region'); $('runBtn').click();
+  assert.equal($('paramModal').classList.contains('show'), true);
+  assert.deepEqual([...$('paramGrid').querySelectorAll('input')].map(input => input.dataset.name), ['region']);
+  $('paramCancel').click();
+  assert.equal(requests.filter(request => request.route === '/api/execute-sql').length, 1);
+});
+test('unrecognized upstream pages and DLI business failures are never reported as SQL success', async () => {
+  const html = '<html><title>504 Gateway Time-out</title></html>';
+  for (const status of [200, 504]) { const result = parseDliResponse(html, status); assert.equal(result.uncertain, true); assert.match(result.error, /远端执行状态待核对/); assert.doesNotMatch(result.error, /<html>/); }
+  assert.deepEqual(parseDliResponse('{"code":200,"datas":[]}', 200).data, { code: 200, datas: [] });
+  assert.match(businessErrorFromResponse({ code: 1, message: '模拟业务失败' }, { strictCode: true }), /模拟业务失败/);
+  assert.equal(businessErrorFromResponse({ code: 1 }), ''); // Preserve the Ali CLI's existing code handling.
+  assert.equal(businessErrorFromResponse({ code: 0, datas: [] }, { strictCode: true }), ''); assert.equal(isHtmlResponse(html), true);
+  assert.equal(hasDliSuccessEvidence({}), false); assert.equal(hasDliSuccessEvidence({ code: '' }), false); assert.equal(hasDliSuccessEvidence({ code: false }), false); assert.equal(hasDliSuccessEvidence({ code: 0, datas: [] }), true); assert.equal(hasDliSuccessEvidence({ datas: [] }), true);
+  assert.equal(isUnrecognizedAliPayload(html), true); assert.equal(isUnrecognizedAliPayload('unrecognized text'), true); assert.equal(isUnrecognizedAliPayload('https://example.test/result.csv'), false); assert.equal(isUnrecognizedAliPayload({ rows: [] }), false);
+  const runner = new SqlRunner({ fetchImpl: async () => new Response(JSON.stringify({ ok: true, data: { body: html }, rows: [], columns: [] })) });
+  await assert.rejects(runner.execute({ sql: 'SELECT 1' }), error => error.uncertain === true && /待核对/.test(error.message));
+  runner.fetch = async () => new Response(JSON.stringify({ ok: true, data: { success: true, data: 'unrecognized text' }, rows: [], columns: [] }));
+  await assert.rejects(runner.execute({ sql: 'SELECT 1', engine: 'aliyun' }), error => error.uncertain === true && /待核对/.test(error.message));
+  runner.fetch = async () => new Response(JSON.stringify({ ok: true, data: { success: true, data: 'https://example.test/result.csv' }, ossUrl: 'https://example.test/result.csv', rows: [], columns: [] }));
+  assert.equal((await runner.execute({ sql: 'SELECT 1', engine: 'aliyun' })).downloadUrl, 'https://example.test/result.csv');
+  runner.fetch = async () => new Response(JSON.stringify({ ok: false, error: html, statusCode: 504 }), { status: 504 });
+  await assert.rejects(runner.execute({ sql: 'SELECT 1' }), error => error.uncertain === true && /504/.test(error.message) && !error.message.includes('<html>'));
+  runner.fetch = async () => new Response(JSON.stringify({ ok: false, error: 'connection reset', statusCode: 0 }), { status: 500 });
+  await assert.rejects(runner.execute({ sql: 'SELECT 1' }), error => error.uncertain === true && /待核对/.test(error.message));
+  runner.fetch = async () => new Response(JSON.stringify({ ok: false, error: '模拟语法错误', statusCode: 400 }), { status: 500 });
+  await assert.rejects(runner.execute({ sql: 'SELECT 1' }), error => error.uncertain === false && /模拟语法错误/.test(error.message));
+});
+
+test('uncertain SQL results show a clear status and require a remote-state acknowledgement before retry', async t => {
+  const { $, requests, fail, finish, settle } = await ui(t);
+  $('sqlRun').click(); fail(new Error('<html><title>504 Gateway Time-out</title></html>')); await settle();
+  assert.match($('sqlSummary').textContent, /状态待核对/); assert.match($('sqlResultBody').textContent, /504/); assert.doesNotMatch($('sqlResultBody').textContent, /<html>/);
+  const before = requests.filter(request => request.route === '/api/sql/query').length;
+  $('sqlRepeat').click(); assert.equal($('sqlReviewUncertain').hidden, false);
+  $('sqlReviewForm').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  assert.equal(requests.filter(request => request.route === '/api/sql/query').length, before); assert.equal($('sqlReviewWarning').hidden, false);
+  $('sqlReviewConfirmed').checked = true; $('sqlReviewForm').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  assert.equal(requests.filter(request => request.route === '/api/sql/query').length, before + 1);
+  finish({ ok: true, columns: ['value'], rows: [[1]], rowCount: 1, durationMs: 1 }); await settle();
+});
+
+test('AI analysis scope makes sampled rows and local summaries explicit without querying again', async t => {
+  const { $, requests, contexts, finish, settle } = await ui(t);
+  $('sqlRun').click(); finish({ ok: true, columns: ['name', 'amount'], rows: Array.from({ length: 150 }, (_, i) => [`row-${i}`, String(i + 1)]), rowCount: 150, durationMs: 1 }); await settle();
+  assert.match($('sqlAnalysisHint').textContent, /将附带 20 行/);
+  $('sqlAnalysisMode').value = 'sample100'; $('sqlAnalysisMode').dispatchEvent(new window.Event('change')); assert.match($('sqlAnalysisHint').textContent, /将附带 100 行/);
+  $('sqlContext').click(); assert.match(contexts.at(-1), /实际附带 100 行/); assert.match(contexts.at(-1), /row-99/); assert.doesNotMatch(contexts.at(-1), /row-100/);
+  $('sqlAnalysisMode').value = 'summary'; $('sqlAnalysisMode').dispatchEvent(new window.Event('change')); $('sqlContext').click();
+  assert.match(contexts.at(-1), /本机统计前 150 行/); assert.match(contexts.at(-1), /和 11325/); assert.doesNotMatch(contexts.at(-1), /row-0/);
+  assert.equal(requests.filter(request => request.route === '/api/sql/query').length, 1);
+  const bounded = sqlAnalysisData(['a'], [['x'.repeat(12000)], ['next']], 'all'); assert.equal(bounded.includedRows, 0); assert.equal(bounded.limited, true);
+});
 test('query charts use every filtered loaded row, isolate tab settings and never rerun SQL', async t => {
   const { $, finish, settle, requests, files } = await ui(t);
   const waitFor = async check => { for (let i = 0; i < 200; i++) { if (check()) return; await settle(); } assert.fail('chart did not settle'); };
@@ -170,7 +297,7 @@ test('SQL HTTP routes retain session and CSRF protection while Codex is offline'
   const result = await fetch(`${base}/api/sql/query`, request); assert.equal(result.status, 200); assert.equal((await result.json()).ok, true);
   assert.equal(calls.length, 1);
   request.headers.origin = 'https://untrusted.test'; assert.equal((await fetch(`${base}/api/sql/query`, request)).status, 403);
-  for (const asset of ['/sql-query.js', '/sql-parameters.js']) assert.equal((await fetch(base + asset)).status, 200);
+  for (const asset of ['/sql-query.js', '/sql-parameters.js', '/sql-parser.js']) assert.equal((await fetch(base + asset)).status, 200);
 });
 
 test('result filtering, sorting and spreadsheet exports preserve nulls and neutralize formulas', () => {

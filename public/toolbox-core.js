@@ -151,6 +151,14 @@ function base64(text, decode = false) {
 }
 function beijingTime(text, action) {
   let milliseconds;
+  if (action === 'auto') {
+    const value = text.trim();
+    if (/^\d{4}-\d{2}-\d{2}[ T]/.test(value)) action = 'date';
+    else if (/^-?\d{13}$/.test(value)) action = 'milliseconds';
+    else if (/^-?\d{10}$/.test(value) || value === '0') action = 'seconds';
+    else fail('无法确定时间格式，请选择 Unix 秒、Unix 毫秒或北京时间。');
+  }
+  if (!['date', 'seconds', 'milliseconds'].includes(action)) fail('请选择有效的时间格式。');
   if (action === 'date') {
     const parts = text.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
     if (!parts) fail('请输入北京时间 YYYY-MM-DD HH:mm:ss，可带毫秒。');
@@ -165,19 +173,92 @@ function beijingTime(text, action) {
   }
   if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > 8_639_999_971_200_000) fail('时间超出支持范围。');
   const value = new Date(milliseconds), local = new Date(value.getTime() + 8 * 3600000).toISOString().replace('T', ' ').replace('Z', '');
-  return `北京时间（UTC+08:00）：${local}\nUnix 秒：${value.getTime() / 1000}\nUnix 毫秒：${value.getTime()}\nUTC：${value.toISOString()}`;
+  const fields = [['北京时间（UTC+08:00）', local], ['Unix 秒', String(value.getTime() / 1000)], ['Unix 毫秒', String(value.getTime())], ['UTC', value.toISOString()]];
+  return { text: fields.map(([label, result]) => `${label}：${result}`).join('\n'), fields };
+}
+
+// Deliberately small, non-executable JSON path syntax: $.field[0][*]["key"].
+// Work on the lossless parse tree so large identifiers and decimal tokens stay intact.
+function jsonPathSteps(path) {
+  const source = String(path || '').trim();
+  if (!source.startsWith('$') || source.length > 1024) fail('路径须以 $ 开头，最多 1024 字符，例如 $.data[*].id。');
+  const steps = []; let at = 1;
+  while (at < source.length) {
+    if (steps.length >= 64) fail('JSON 路径最多支持 64 级。');
+    if (source[at] === '.') {
+      const match = source.slice(at + 1).match(/^[\p{L}\p{N}_$-]+/u);
+      if (!match) fail(`JSON 路径第 ${at + 1} 个字符附近无效。`);
+      steps.push({ type: 'key', value: match[0] }); at += match[0].length + 1;
+    } else if (source[at] === '[') {
+      const rest = source.slice(at), indexed = rest.match(/^\[(\*|0|[1-9]\d*)\]/);
+      if (indexed) { steps.push(indexed[1] === '*' ? { type: 'all' } : { type: 'index', value: Number(indexed[1]) }); at += indexed[0].length; continue; }
+      if (source[at + 1] !== '"') fail(`JSON 路径第 ${at + 1} 个字符附近无效。`);
+      let end = at + 2;
+      while (end < source.length && source[end] !== '"') { if (source[end] === '\\') end++; end++; }
+      if (source[end] !== '"' || source[end + 1] !== ']') fail('带引号的 JSON 字段路径未闭合。');
+      let key; try { key = JSON.parse(source.slice(at + 1, end + 1)); } catch { fail('JSON 路径中的字段转义无效。'); }
+      steps.push({ type: 'key', value: key }); at = end + 2;
+    } else fail(`JSON 路径第 ${at + 1} 个字符附近无效。`);
+  }
+  return steps;
+}
+
+export function extractJsonPath(root, path, indent = 2) {
+  const steps = jsonPathSteps(path); let nodes = [root], multiple = false;
+  for (const step of steps) {
+    const next = [];
+    for (const node of nodes) {
+      if (step.type === 'key') {
+        if (node.type !== 'object') fail(`路径中的 ${step.value} 需要对象。`);
+        const entries = node.entries.filter(entry => entry.key.value === step.value);
+        if (!entries.length) fail(`路径中的字段 ${step.value} 不存在；未忽略任何项目。`);
+        if (entries.length > 1) fail(`字段 ${step.value} 重复，无法确定要提取的值。`);
+        next.push(entries[0].node);
+      } else {
+        if (node.type !== 'array') fail('数组下标和 [*] 只能用于数组。');
+        if (step.type === 'all') { multiple = true; for (const entry of node.entries) { next.push(entry); if (next.length > 100_000) fail('提取结果超过 10 万项，请缩小范围。'); } }
+        else { if (!Number.isSafeInteger(step.value) || step.value >= node.entries.length) fail(`数组下标 ${step.value} 超出范围。`); next.push(node.entries[step.value]); }
+      }
+      if (next.length > 100_000) fail('提取结果超过 10 万项，请缩小范围。');
+    }
+    nodes = next;
+  }
+  const selected = multiple ? { type: 'array', entries: nodes } : nodes[0];
+  return { text: printJson(selected, { indent: indent === 4 ? 4 : 2 }), count: multiple ? nodes.length : 1 };
+}
+
+function cleanLines(input, action, deduplicate, sqlStyle) {
+  const lines = input.split(/\r\n|\r|\n/).map(line => line.trim()).filter(Boolean);
+  if (!lines.length) fail('请输入至少一行非空内容。');
+  const values = deduplicate ? [...new Set(lines)] : lines;
+  if (action === 'sql-string') {
+    if (!['standard', 'backslash'].includes(sqlStyle)) fail('请选择 SQL 字符串转义方式。');
+    if (values.some(value => /[\x00-\x1f\x7f]/.test(value))) fail('包含控制字符，请先处理后再生成。');
+    if (sqlStyle === 'standard' && values.some(value => value.includes('\\'))) fail('包含反斜杠，请先处理或选择适合目标引擎的转义方式。');
+    const quote = value => "'" + (sqlStyle === 'standard' ? value.replaceAll("'", "''") : value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")) + "'";
+    return { text: `(\n  ${values.map(quote).join(',\n  ')}\n)`, message: `生成 ${values.length} 项${sqlStyle === 'standard' ? '标准 SQL' : '反斜杠转义'}字符串列表；请核对目标引擎设置，未执行查询。` };
+  }
+  if (action === 'sql-number') {
+    if (values.some(value => !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value))) fail('纯数字模式只接受普通整数或小数；带前导零的编号请使用字符串模式。');
+    return { text: `(\n  ${values.join(',\n  ')}\n)`, message: `生成 ${values.length} 项数字列表；未执行查询。` };
+  }
+  if (action === 'fields') return { text: values.join(',\n'), message: `整理 ${values.length} 行；请按目标 SQL 方言核对字段名。` };
+  fail('未知的数据整理操作。');
 }
 
 async function difference(before, after, vendor) {
   if (before.split('\n').length + after.split('\n').length > 20_000) fail('比较最多支持合计 2 万行，请缩小范围。');
   const { diffLines } = await vendor();
-  const diff = diffLines(before, after, { timeout: 1200, maxEditLength: 2000 });
+  const diff = diffLines(before, after, { timeout: 1200, maxEditLength: 2000, ignoreNewlineAtEof: true });
   if (!diff) fail('差异较大，比较已停止，请缩小范围。');
-  const text = diff.map(part => part.value.split('\n').map((line, i, all) => i === all.length - 1 && !line ? '' : (part.added ? '+ ' : part.removed ? '- ' : '  ') + line).join('\n') + (part.value.endsWith('\n') ? '' : '\n')).join('');
-  return { text: before === after ? '内容一致。' : text, diff, filename: 'compare.diff', insertable: false };
+  let text = diff.map(part => part.value.split('\n').map((line, i, all) => i === all.length - 1 && !line ? '' : (part.added ? '+ ' : part.removed ? '- ' : '  ') + line).join('\n') + (part.value.endsWith('\n') ? '' : '\n')).join('');
+  const oldEnd = /\n$/.test(before), newEnd = /\n$/.test(after);
+  const newlineNote = oldEnd !== newEnd ? `文件末尾换行：原文${oldEnd ? '有' : '无'}，对比内容${newEnd ? '有' : '无'}。` : '';
+  if (newlineNote) text += `\n${newlineNote}\n`;
+  return { text: before === after ? '内容一致。' : text, diff, newlineNote, message: before === after ? '内容一致。' : newlineNote || '比较完成。', filename: 'compare.diff', insertable: false };
 }
 
-export async function runTool({ category, action, input = '', secondary = '', file, indent = 2 }, vendor = () => import('./vendor/toolbox.js')) {
+export async function runTool({ category, action, input = '', secondary = '', file, indent = 2, path = '', deduplicate = false, sqlStyle = 'standard' }, vendor = () => import('./vendor/toolbox.js')) {
   checkText(input); checkText(secondary);
   let text = '', filename = 'result.txt', extra = {};
   if (category === 'json') {
@@ -185,7 +266,11 @@ export async function runTool({ category, action, input = '', secondary = '', fi
     else {
       const root = parseJson(input);
       if (action === 'unescape') { if (root.type !== 'string') fail('去除转义需要输入 JSON 字符串（包含外层双引号）。'); text = root.value; }
-      else if (action === 'compare') {
+      else if (action === 'extract') {
+        const result = extractJsonPath(root, path, indent);
+        if (result.text.length > MAX_TEXT * 4) fail('结果超过 800 万字符，请缩小输入。');
+        return { text: result.text, filename: 'extracted.json', message: `已提取 ${result.count} 项，数字保留原文。` };
+      } else if (action === 'compare') {
         const options = { indent: 2, sort: true };
         return difference(printJson(root, options), printJson(parseJson(secondary), options), vendor);
       } else {
@@ -213,7 +298,8 @@ export async function runTool({ category, action, input = '', secondary = '', fi
     else if (action === 'comma-lines') text = input.split(',').join('\n');
     else if (action === 'stats') { text = `字符数：${Array.from(input).length}\n非空白字符：${Array.from(input.replace(/\s/g, '')).length}\n行数：${input ? input.split(/\r\n|\r|\n/).length : 0}\nUTF-8 字节：${new TextEncoder().encode(input).length}`; extra.insertable = false; }
     else fail('未知的文本操作。');
-  } else if (category === 'time') { text = beijingTime(input, action); extra.insertable = false; }
+  } else if (category === 'time') { const result = beijingTime(input, action); text = result.text; extra.fields = result.fields; extra.insertable = false; }
+  else if (category === 'data-clean') { const result = cleanLines(input, action, deduplicate, sqlStyle); text = result.text; extra.message = result.message; }
   else if (category === 'chart') {
     if (!['auto', 'json', 'csv', 'tsv'].includes(action)) fail('请选择有效的数据格式。');
     if (action === 'auto' && input.trim().startsWith('{')) {

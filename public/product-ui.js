@@ -1,5 +1,6 @@
 import { createImageAttachment } from './interactions.js';
 import { currentRequest } from './message-timing.js';
+import { createChatLayout } from './editor-window.js';
 
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; };
 
@@ -274,7 +275,7 @@ export function createProductUI() {
   const surface = $('workSurface'), bar = document.querySelector('.topbar'); surface.prepend(bar);
   bar.classList.add('workspace-bar');
   const modes = node('div', '', 'workspace-modes'); modes.setAttribute('aria-label', '工作区布局');
-  let mode = 'both', hadFile = false;
+  let mode = 'both', hadFile = false, chatLayout;
   try { mode = localStorage.getItem('lemon:workspaceMode') || 'both'; } catch {}
   if (!['chat', 'both', 'files'].includes(mode)) mode = 'both';
   for (const [value, label] of [['chat', '对话'], ['both', '并排'], ['files', '文件']]) {
@@ -283,6 +284,15 @@ export function createProductUI() {
   }
   bar.querySelector('.breadcrumb').after(modes);
   const shortcuts = document.querySelector('.conversation-actions'); shortcuts.classList.add('workspace-shortcuts'); modes.after(shortcuts);
+  const taskMenu = node('details', '', 'workspace-task-menu'), taskSummary = node('summary', '任务'), taskItems = node('div', '', 'workspace-task-items');
+  taskSummary.setAttribute('aria-label', '任务与成果'); $('quickArtifacts').setAttribute('aria-label', '本次文件'); $('quickAgents').setAttribute('aria-label', 'AI 子任务'); taskItems.append($('quickArtifacts'), $('quickAgents'));
+  const schedules = node('button', '定时任务', 'text-button'); schedules.type = 'button'; schedules.id = 'quickSchedules'; schedules.setAttribute('aria-label', '定时任务'); taskItems.append(schedules);
+  taskMenu.append(taskSummary, taskItems); shortcuts.insertBefore(taskMenu, $('quickTerminal'));
+  taskMenu.addEventListener('toggle', () => { if (!taskMenu.open) return; const rect = taskSummary.getBoundingClientRect(); taskItems.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 196))}px`; taskItems.style.top = `${rect.bottom + 6}px`; });
+  taskItems.addEventListener('click', event => { if (event.target.closest('button')) taskMenu.open = false; });
+  taskMenu.addEventListener('keydown', event => { if (event.key === 'Escape') { taskMenu.open = false; taskSummary.focus(); } });
+  document.addEventListener('pointerdown', event => { if (taskMenu.open && !taskMenu.contains(event.target)) taskMenu.open = false; });
+  window.addEventListener('resize', () => { taskMenu.open = false; });
   // Keep detailed preferences here; the compact gallery trigger stays in the bar.
   const preferences = document.querySelector('[data-panel="preferences"]');
   preferences.prepend(node('p', '自动记住打开的文件标签和阅读位置。未保存内容是否恢复，由下方的本机草稿选项控制。', 'field-hint'));
@@ -300,6 +310,7 @@ export function createProductUI() {
     for (const button of modes.children) { button.disabled = button.dataset.layoutMode !== 'chat' && !open; button.setAttribute('aria-pressed', String(button.dataset.layoutMode === surface.dataset.mode)); }
     if (open && !hadFile && mode === 'chat' && !restoring) setMode('both');
     hadFile = open;
+    chatLayout?.sync();
   }
   const format = $('editorFormatCode'); $('editorMarkdownModes').before(format); format.className = 'text-button';
   // A direct file picker complements drag-and-drop; references remain in +.
@@ -317,6 +328,7 @@ export function createProductUI() {
   const links = document.querySelectorAll('[data-panel="git"] .field-hint');
   for (const p of links) if (p.textContent.includes('review/start')) p.textContent = '检查代码并给出建议，会使用当前模型额度。';
   const main = $('mainPanel'), history = $('historyPanel'), scroll = $('scrollArea');
+  chatLayout = createChatLayout({ pane: main, container: $('workspacePanes'), surface, onDock: () => setMode(!$('fileEditor').hidden ? 'both' : 'chat', false) });
   let readingPosition = 0;
   function setChatView(view) {
     const isHistory = view === 'history';

@@ -72,7 +72,13 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     const main = document.createElement('button'); main.type = 'button'; main.className = 'file-main'; main.title = entry.path;
     // Icon markup is a fixed application constant; filenames only use textContent.
     const icon = document.createElement('span'); icon.className = `file-icon ${entry.kind}`; icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[entry.kind] || icons.file}</svg>`;
-    const label = document.createElement('span'); label.className = 'file-name'; label.textContent = searching ? entry.path : entry.name;
+    const label = document.createElement('span'); label.className = 'file-name';
+    const displayName = searching ? entry.path : entry.name;
+    if (displayName.length > 24) {
+      const prefix = document.createElement('span'), suffix = document.createElement('span');
+      prefix.className = 'file-name-prefix'; suffix.className = 'file-name-suffix';
+      prefix.textContent = displayName.slice(0, -12); suffix.textContent = displayName.slice(-12); label.append(prefix, suffix);
+    } else label.textContent = displayName;
     const mark = document.createElement('span'); mark.className = 'file-add-mark'; mark.setAttribute('aria-hidden', 'true');
     if (entry.kind === 'folder') {
       const arrow = document.createElement('span'); arrow.className = 'file-chevron'; arrow.textContent = expanded.has(entry.path) ? '⌄' : '›'; arrow.setAttribute('aria-hidden', 'true');

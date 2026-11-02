@@ -1,6 +1,6 @@
 import { createEditorWindow } from './editor-window.js';
 import { fileChangeLines, activityState } from './execution-view.js';
-import { projectPath } from './task-results.js';
+import { projectPath } from './project-paths.js';
 import { highlightFileLines } from './vendor/markdown/document.js';
 import { currentRequest } from './message-timing.js';
 

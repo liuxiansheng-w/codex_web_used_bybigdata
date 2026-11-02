@@ -1,5 +1,6 @@
 import { markdown } from './markdown.js';
-import { projectPath, createAgentCards, agentSummary, subtaskGroups } from './task-results.js';
+import { createAgentCards, agentSummary, subtaskGroups } from './task-results.js';
+import { projectPath } from './project-paths.js';
 import { popupLayout } from './interactions.js';
 import { createSchedules } from './schedules.js';
 const $ = id => document.getElementById(id);
@@ -76,7 +77,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   for (const element of [...artifactPanel.children].filter(el => el.tagName !== 'H3' && el.id !== 'artifactResults')) artifactBrowser.append(element);
   $('artifactResults').before(artifactBrowser);
   function disposeArtifact() { artifactViewer?.dispose(); artifactViewer = null; }
-  function close() { searchController?.abort(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools', 'terminal-dock'); if (!bottomPanel) terminalConsole.hide(); disposeArtifact(); sequence++; scheduleAgents(); opener?.focus(); }
+  function close() { searchController?.abort(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools'); disposeArtifact(); sequence++; scheduleAgents(); opener?.focus(); }
   function contextChanged() {
     const key = JSON.stringify([context().cwd, context().thread?.id]); if (key === contextKey) return; searchController?.abort(); contextKey = key; managedEntry = null; artifactSignature = ''; changesSignature = ''; sequence++; searchResult = null; preview = null; git = null;
     disposeArtifact(); lastArtifact = null; artifactBrowser.open = true; dialog.classList.remove('has-artifact'); clearTimeout(agentsTimer); agentsTimer = null; agentGeneration++; agentsData = null; agentsPromise = null; agentsLast = 0; agentsError = ''; inlineGroups.clear(); panelAgentCards.update([]); reviewChanges = null; restorePreview = null; restoreDialog.close(); $('fileHistoryResults').replaceChildren(); $('agentResults').replaceChildren();
@@ -92,7 +93,8 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   }
   const status = (text, terminal = false) => { (terminal && $('terminalStatus') || $('workbenchStatus')).textContent = text || ''; };
   const context = () => getContext();
-  const hasEditorDraftCache = () => { try { return !!hasEditorDraftCache() || Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).some(key => key?.startsWith('codex-desk:editorDrafts:v2:')); } catch { return false; } };
+  const hasEditorDraftCache = () => { try { return !!localStorage.getItem('codex-desk:editorDrafts') || Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).some(key => key?.startsWith('codex-desk:editorDrafts:v2:')); } catch { return false; } };
+  function syncDraftControls() { const cached = hasEditorDraftCache(); $('recoverDrafts').disabled = !editor.snapshots?.()?.length && !cached; $('clearSavedDrafts').disabled = !getDraftPreference() && !cached; $('persistDrafts').checked = getDraftPreference(); }
   const scoped = route => `${route}?cwd=${encodeURIComponent(context().cwd)}`;
   const run = (fn, terminal = false) => async event => { const control = event?.currentTarget; if (control?.dataset?.pending) { event.preventDefault(); return; } if (control) control.dataset.pending = 'true'; if (control?.tagName === 'BUTTON') control.disabled = true; status('', terminal); pendingActions++; const expected = terminal ? context().cwd : contextKey; try { return await fn(event); } catch (error) { if ((terminal ? context().cwd : contextKey) === expected) status(error.message, terminal); } finally { pendingActions--; if (control) delete control.dataset.pending; if (control?.tagName === 'BUTTON') control.disabled = false; } };
   const bind = (id, fn) => $(id).addEventListener('click', run(fn));
@@ -103,16 +105,14 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   for (const panel of dialog.querySelectorAll('[data-panel]')) { panel.id = `workbench-${panel.dataset.panel}`; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `workbench-tab-${panel.dataset.panel}`); }
   const terminalPanel = dialog.querySelector('[data-panel=terminal]');
   const terminalConsole = createTerminalConsole({ root: terminalPanel, api, getContext,
-    isVisible: () => bottomPanel ? bottomPanel.visible('terminal') : !dialog.hidden && tab === 'terminal',
+    isVisible: () => bottomPanel.visible('terminal'),
     toolbar: document.querySelector('.bottom-panel-header'), before: $('bottomResultControls'),
   });
-  if (bottomPanel) {
-    bottomPanel.attachTerminal(terminalPanel); $('quickTerminal').textContent = '终端';
-    bottomPanel.subscribe(() => { if (bottomPanel.visible('terminal')) void terminalConsole.refresh(); else terminalConsole.hide(); });
-  }
+  bottomPanel.attachTerminal(terminalPanel); $('quickTerminal').textContent = '终端';
+  bottomPanel.subscribe(() => { if (bottomPanel.visible('terminal')) void terminalConsole.refresh(); else terminalConsole.hide(); });
   for (const text of ['录制技能与操作回放', '浏览器标签页工作区与页面批注', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
   async function show(id = tab, entry) {
-    if (id === 'terminal' && bottomPanel) { contextChanged(); close(); bottomPanel.show('terminal'); $('terminalCommand').focus(); return; }
+    if (id === 'terminal') { contextChanged(); close(); bottomPanel.show('terminal'); $('terminalCommand').focus(); return; }
     searchController?.abort();
     contextChanged(); tab = id; sequence++; status(''); searchLoading = false;
     if (id === 'search') renderSearchResults();
@@ -125,17 +125,15 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     $('showTaskTools').setAttribute('aria-pressed', String(task)); $('showSettingsTools').setAttribute('aria-pressed', String(!task));
     if (entry?.path) $('managePath').value = entry.path;
     if (dialog.hidden) opener = document.activeElement;
-    dialog.hidden = false; $('workSurface').classList.add('with-tools'); $('workSurface').classList.toggle('terminal-dock', id === 'terminal');
+    dialog.hidden = false; $('workSurface').classList.add('with-tools');
     $('workbenchNav').querySelector(`[data-tab=${id}]`)?.focus();
     if (entry?.query != null) { $('projectSearchQuery').value = entry.query; $('searchFilenames').checked = !!entry.filenames; $('projectSearchForm').requestSubmit(); }
     if (id === 'git') { renderTurnChanges(); selectReviewSection(entry?.section || 'changes'); if (entry?.section === 'git') await run(loadGit)(); }
     if (id === 'files') { managedEntry = entry || null; $('manageNewName').value = ''; $('manageTarget').value = entry?.path || ''; updateManagedSelection(); }
     if (id === 'artifacts') { renderArtifacts(); if (!entry?.loadingArtifact && lastArtifact && !artifactViewer) void run(() => previewArtifact(lastArtifact))(); }
     if (id === 'agents') { renderAgentViews(); void pollAgents(true); }
-    if (!bottomPanel) terminalConsole.hide();
-    if (id === 'terminal') void terminalConsole.refresh();
     if (id === 'projects') renderProjects();
-    if (id === 'preferences') { $('recoverDrafts').disabled = !editor.snapshots?.()?.length && !hasEditorDraftCache(); $('clearSavedDrafts').disabled = !getDraftPreference() && !hasEditorDraftCache(); $('persistDrafts').checked = getDraftPreference(); $('enterBehavior').value = localStorage.getItem('codex-desk:enterBehavior') || 'enter'; }
+    if (id === 'preferences') { syncDraftControls(); $('enterBehavior').value = localStorage.getItem('codex-desk:enterBehavior') || 'enter'; }
     if (id === 'connections') await run(loadConnections)();
     if (id === 'appApprovals') await run(loadAppApprovals)();
     if (id === 'memories') await run(loadMemories)();
@@ -578,10 +576,10 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bind('projectAttach', async () => { await context().attachDirectory($('projectRoot').value.trim()); status('附加目录已加入当前消息，未扩大写权限。'); });
   bind('worktreeCreate', async () => { await loadGit(); if (!confirm(`从当前 HEAD 新建分支 ${$('worktreeBranch').value}，并写入工作树 ${$('worktreeDestination').value}？不会复制未提交修改。`)) return; await api('/api/git/action', { action: 'worktree', cwd: context().cwd, version: git.version, branch: $('worktreeBranch').value, destination: $('worktreeDestination').value, confirmed: true }); await loadGit(); status('工作树已创建，可将其路径设为主项目。'); });
   const schedules = createSchedules({ root: dialog.querySelector('[data-panel="schedules"]'), api, getContext: context, onThread, close });
-  $('persistDrafts').addEventListener('change', run(async () => { await setDraftPreference($('persistDrafts').checked); $('persistDrafts').checked = getDraftPreference(); }));
+  $('persistDrafts').addEventListener('change', run(async () => { await setDraftPreference($('persistDrafts').checked); syncDraftControls(); }));
   bind('gitSubmitOpen', () => onGitSubmit(context().cwd));
   bind('showDraftVersions', showDraftVersions);
-  bind('recoverDrafts', async () => { close(); await restoreDrafts(); }); bind('clearSavedDrafts', () => { if (confirm('清除浏览器里保存的输入/编辑草稿？不会删除磁盘文件或当前编辑区内容。')) { clearDrafts(); status('已清除本机缓存。'); } });
+  bind('recoverDrafts', async () => { close(); await restoreDrafts(); }); bind('clearSavedDrafts', () => { if (confirm('清除浏览器里保存的输入/编辑草稿？不会删除磁盘文件或当前编辑区内容。')) { clearDrafts(); syncDraftControls(); status('已清除本机缓存。'); } });
   $('enterBehavior').addEventListener('change', () => { localStorage.setItem('codex-desk:enterBehavior', $('enterBehavior').value); $('composerHelp').textContent = $('enterBehavior').value === 'cmd' ? '⌘ / Ctrl + Enter 发送 · Enter 换行' : 'Enter 发送 · Shift + Enter 换行'; });
   bind('notifyEnable', async () => { if (!('Notification' in window)) throw new Error('浏览器不支持系统通知。'); status(`通知权限：${await Notification.requestPermission()}`); });
   bind('usageRefresh', async () => { $('usageResult').textContent = JSON.stringify(await api('/api/usage'), null, 2); });

@@ -5,7 +5,13 @@ import { createResultsLayout } from './editor-window.js';
 const $ = id => document.getElementById(id);
 const resultKind = result => result?.sqlType || sqlStatementKind(result?.executedSql || result?.sql);
 const isExecution = result => !['', 'SELECT', 'WITH', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN'].includes(resultKind(result));
-const resultStatus = result => result.loading ? (isExecution(result) ? '执行中' : '查询中') : result.ok ? (isExecution(result) ? '执行成功' : `${result.rowCount} 行`) : '未完成';
+const resultStatus = result => result.loading ? (isExecution(result) ? '执行中' : '查询中') : result.ok ? (isExecution(result) ? '执行成功' : `${result.rowCount} 行`) : result.uncertain ? '状态待核对' : '未完成';
+export function readableSqlFailure(error) {
+  const original = String(error?.message || '查询未完成。');
+  const html = /<(?:!doctype|html|head|body|title|script)\b/i.test(original);
+  const status = html && original.match(/\b(4\d\d|5\d\d)\b/)?.[1];
+  return { error: html ? `查询服务返回${status ? ` HTTP ${status} 的` : '了'}异常页面，远端执行状态待核对。请先在云端确认任务状态，再决定是否重试。` : original, uncertain: error?.uncertain === true || html };
+}
 export function sqlFileFromRunnerLink(href) {
   try {
     const url = new URL(href);
@@ -60,6 +66,31 @@ export function resultText(columns, rows, csv = false, includeHeader = true) {
     return csv ? `"${text.replaceAll('"', '""')}"` : text.replace(/[\t\r\n]+/g, ' ');
   };
   return [...(includeHeader ? [columns] : []), ...rows.map(row => columns.map((column, index) => Array.isArray(row) ? row[index] : row?.[column]))].map(row => row.map(value).join(csv ? ',' : '\t')).join(csv ? '\r\n' : '\n');
+}
+// Prepare an explicitly bounded payload from the currently filtered, loaded
+// rows. Never claim that a size-limited sample represents the full result.
+export function sqlAnalysisData(columns, rows, mode = 'sample20', maxChars = 12000) {
+  if (mode === 'summary') {
+    const selected = rows.slice(0, 5000), chosen = columns.slice(0, 30);
+    const lines = chosen.map((column, index) => {
+      const values = selected.map(row => Array.isArray(row) ? row[index] : row?.[column]);
+      const stats = selectionStatistics(values);
+      const numeric = stats.numericCount && !stats.unavailable ? `；数值 ${stats.numericCount}，和 ${stats.sum}，均值${stats.approximate ? '约 ' : ' '}${stats.average}，最小 ${stats.min}，最大 ${stats.max}` : stats.unavailable ? '；数值超出统计范围' : '';
+      return `${column}：非空 ${stats.nonEmptyCount} / ${stats.count}${numeric}`;
+    });
+    let text = '', includedColumns = 0;
+    for (const line of lines) { if (text.length + line.length + 1 > maxChars) break; text += (text ? '\n' : '') + line; includedColumns++; }
+    return { text, includedRows: 0, summaryRows: selected.length, includedColumns, limited: selected.length < rows.length || includedColumns < columns.length };
+  }
+  const limit = mode === 'sample100' ? 100 : mode === 'all' ? rows.length : 20;
+  let text = resultText(columns, [], false, true), includedRows = 0;
+  if (text.length > maxChars) return { text: '', includedRows, limited: true };
+  for (const row of rows.slice(0, limit)) {
+    const line = resultText(columns, [row], false, false);
+    if (text.length + line.length + 1 > maxChars) break;
+    text += `\n${line}`; includedRows++;
+  }
+  return { text, includedRows, limited: includedRows < rows.length };
 }
 export const resultValue = (result, row, column) => Array.isArray(row) ? row[result.columns.indexOf(column)] : row?.[column];
 export const columnValueKey = value => value == null ? 'null:' : `${typeof value}:${cellText(value)}`;
@@ -125,6 +156,9 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
   const viewSwitch = document.createElement('div'); viewSwitch.className = 'sql-view-switch'; viewSwitch.setAttribute('role', 'group'); viewSwitch.setAttribute('aria-label', '结果展示方式');
   viewSwitch.innerHTML = '<button id="sqlTableView" type="button" class="text-button" aria-pressed="true">表格</button><button id="sqlChartView" type="button" class="text-button" aria-pressed="false">图表</button>';
   $('sqlFilter').after(viewSwitch);
+  const analysisScope = document.createElement('div'); analysisScope.id = 'sqlAnalysisScope'; analysisScope.className = 'sql-analysis-scope'; analysisScope.hidden = true;
+  analysisScope.innerHTML = '<label>AI 分析范围 <select id="sqlAnalysisMode" aria-label="AI 分析范围"><option value="sample20">前 20 行</option><option value="sample100">前 100 行</option><option value="all">全部筛选行（有字数上限）</option><option value="summary">本机统计摘要</option></select></label><span id="sqlAnalysisHint" role="status"></span>';
+  $('sqlResultActions').after(analysisScope);
   for (const [id, view] of [['sqlTableView', 'table'], ['sqlChartView', 'chart']]) $(id).addEventListener('click', () => { const state = current(); if (!state?.result?.ok || !state.result.rows.length) return; chartState(state).view = view; closeColumnMenu(); render(); });
   async function renderChart(state, rows) {
     const token = chartGeneration, body = $('sqlResultBody'); body.textContent = '正在加载本机图表…';
@@ -171,7 +205,7 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
   const historyDialog = document.createElement('dialog'); historyDialog.id = 'sqlHistoryDialog'; historyDialog.className = 'query-history-dialog'; historyDialog.setAttribute('aria-labelledby', 'queryHistoryTitle');
   historyDialog.innerHTML = '<div class="dialog-heading"><h2 id="queryHistoryTitle">查询历史</h2><button type="button" id="sqlHistoryClose" class="icon-button" aria-label="关闭查询历史">×</button></div><label class="query-cache-option"><input id="sqlKeepResults" type="checkbox">在本机保留查询和结果预览</label><p class="field-hint">开启后可在刷新后恢复。仅此浏览器保存，最多 20 次查询、每次前 1,000 行，总计约 4 MB；完整数据请下载保存。</p><p id="sqlCacheStatus" role="status"></p><div id="sqlHistoryList"></div>';
   document.body.append(historyDialog);
-  const reviewDialog = document.createElement('dialog'); reviewDialog.id = 'sqlReviewDialog'; reviewDialog.className = 'query-review-dialog'; reviewDialog.innerHTML = '<form id="sqlReviewForm"><h2>核对后再次查询</h2><p id="sqlReviewTarget"></p><label>查询内容<textarea id="sqlReviewText" rows="12" required aria-label="待重新查询的 SQL"></textarea></label><p class="field-hint">这是上次执行的 SQL 快照，不会修改编辑器里的文件。</p><div class="dialog-actions"><button type="button" id="sqlReviewCancel">取消</button><button class="primary-button" type="submit">继续查询</button></div></form>'; document.body.append(reviewDialog); let repeatSnapshot = null;
+  const reviewDialog = document.createElement('dialog'); reviewDialog.id = 'sqlReviewDialog'; reviewDialog.className = 'query-review-dialog'; reviewDialog.innerHTML = '<form id="sqlReviewForm"><h2>核对后再次查询</h2><p id="sqlReviewTarget"></p><label>查询内容<textarea id="sqlReviewText" rows="12" required aria-label="待重新查询的 SQL"></textarea></label><p class="field-hint">这是上次执行的 SQL 快照，不会修改编辑器里的文件。</p><label id="sqlReviewUncertain" class="query-cache-option" hidden><input id="sqlReviewConfirmed" type="checkbox">原任务的远端状态待核对；我已确认后决定重新执行。</label><p id="sqlReviewWarning" class="field-error" role="status" hidden>请先核对远端任务状态，再确认是否重新执行。</p><div class="dialog-actions"><button type="button" id="sqlReviewCancel">取消</button><button class="primary-button" type="submit">继续查询</button></div></form>'; document.body.append(reviewDialog); let repeatSnapshot = null;
   const renameDialog = document.createElement('dialog'); renameDialog.innerHTML = '<form id="sqlRenameForm"><h2>结果名称</h2><input id="sqlResultName" aria-label="结果名称" maxlength="60" required><div class="dialog-actions"><button type="button" id="sqlRenameCancel">取消</button><button type="submit" class="primary-button">保存名称</button></div></form>'; document.body.append(renameDialog); let renameTarget = null;
   function queuePersist() { clearTimeout(persistTimer); persistTimer = setTimeout(() => { try { historyStore.write(allHistory()); } catch (error) { $('sqlCacheStatus').textContent = error.message; notice(error.message); } }, 300); }
   function allHistory() { return [...new Map([...archived, ...[...projects.values()].flatMap(project => project.tabs)].map(tab => [tab.id, tab])).values()]; }
@@ -186,11 +220,11 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     }
     historyDialog.showModal();
   }
-  function reviewQuery(result) { if (running || pending) return notice('请等待当前执行完成。'); repeatSnapshot = { ...result, parameters: result.parameters || {} }; $('sqlReviewTarget').textContent = `${result.path} · ${engineName(result.engine)}`; $('sqlReviewText').value = result.sql; reviewDialog.querySelector('h2').textContent = isExecution(result) ? '核对后再次执行' : '核对后再次查询'; reviewDialog.querySelector('[type=submit]').textContent = isExecution(result) ? '继续执行' : '继续查询'; reviewDialog.showModal(); }
+  function reviewQuery(result) { if (running || pending) return notice('请等待当前执行完成。'); repeatSnapshot = { ...result, parameters: result.parameters || {} }; $('sqlReviewTarget').textContent = `${result.path} · ${engineName(result.engine)}`; $('sqlReviewText').value = result.sql; $('sqlReviewUncertain').hidden = !result.uncertain; $('sqlReviewConfirmed').checked = false; $('sqlReviewWarning').hidden = true; reviewDialog.querySelector('h2').textContent = isExecution(result) ? '核对后再次执行' : '核对后再次查询'; reviewDialog.querySelector('[type=submit]').textContent = isExecution(result) ? '继续执行' : '继续查询'; reviewDialog.showModal(); }
   $('sqlHistory').onclick = showHistory; $('sqlHistoryClose').onclick = () => historyDialog.close();
   $('sqlKeepResults').onchange = () => { try { historyStore.setEnabled($('sqlKeepResults').checked); queuePersist(); $('sqlCacheStatus').textContent = historyStore.enabled() ? '已开启，结果预览将保存在本机。' : '已关闭并清除本机记录；当前页面的结果仍保留。'; } catch (error) { $('sqlCacheStatus').textContent = error.message; } };
   $('sqlRepeat').onclick = () => { if (current()) reviewQuery(current().result); }; $('sqlReviewCancel').onclick = () => { repeatSnapshot = null; reviewDialog.close(); };
-  $('sqlReviewForm').onsubmit = event => { event.preventDefault(); const snapshot = repeatSnapshot; if (!snapshot) return; snapshot.sql = $('sqlReviewText').value; repeatSnapshot = null; reviewDialog.close(); requestParameters(snapshot); };
+  $('sqlReviewForm').onsubmit = event => { event.preventDefault(); const snapshot = repeatSnapshot; if (!snapshot) return; if (snapshot.uncertain && !$('sqlReviewConfirmed').checked) { $('sqlReviewWarning').hidden = false; $('sqlReviewConfirmed').focus(); return; } snapshot.sql = $('sqlReviewText').value; repeatSnapshot = null; reviewDialog.close(); requestParameters(snapshot); };
   function renameResult(tab) { renameTarget = tab; $('sqlResultName').value = tab.name || `结果 ${tab.id}`; renameDialog.showModal(); }
   $('sqlRename').onclick = () => { if (current()) renameResult(current()); }; $('sqlRenameCancel').onclick = () => renameDialog.close(); $('sqlRenameForm').onsubmit = event => { event.preventDefault(); if (renameTarget) renameTarget.name = $('sqlResultName').value.trim().slice(0, 60); renameDialog.close(); render(); };
   const elapsedTimer = window.setInterval(() => { const result = current()?.result; if (result?.loading) $('sqlSummary').textContent = `${resultStatus(result)} · 已用 ${Math.floor((Date.now() - result.startedAt) / 1000)} 秒`; }, 1000);
@@ -300,8 +334,10 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
       const button = document.createElement('button'); button.type = 'button'; button.id = `sql-result-tab-${tab.id}`;
       button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', 'sqlResultBody');
       button.setAttribute('aria-selected', String(tab.id === project.active)); button.tabIndex = tab.id === project.active ? 0 : -1;
-      const status = ` · ${tab.result.loading || tab.result.ok ? resultStatus(tab.result) : '失败'}`;
-      button.textContent = `${tab.name || `结果 ${tab.id} · ${tab.result.path.split('/').at(-1)}`} · ${new Date(tab.result.startedAt).toLocaleTimeString('zh-CN', { hour12: false })}${status}`;
+      const status = ` · ${tab.result.loading || tab.result.ok || tab.result.uncertain ? resultStatus(tab.result) : '失败'}`;
+      const name = document.createElement('span'), meta = document.createElement('span'); name.className = 'sql-result-tab-name'; meta.className = 'sql-result-tab-meta';
+      name.textContent = tab.name || `结果 ${tab.id} · ${tab.result.path.split('/').at(-1)}`;
+      meta.textContent = ` · ${new Date(tab.result.startedAt).toLocaleTimeString('zh-CN', { hour12: false })}${status}`; button.append(name, meta);
       button.addEventListener('dblclick', () => renameResult(tab));
       button.title = `${tab.result.path} · ${engineName(tab.result.engine)} · ${new Date(tab.result.startedAt).toLocaleTimeString('zh-CN')}`;
       button.addEventListener('click', () => { project.active = tab.id; closeColumnMenu(); sync(); render(); });
@@ -381,16 +417,18 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     $('sqlTableView').setAttribute('aria-pressed', String(!chartMode)); $('sqlChartView').setAttribute('aria-pressed', String(chartMode));
     body.classList.toggle('showing-chart', chartMode); body.setAttribute('aria-label', chartMode ? '查询图表' : '查询数据表');
     $('sqlContext').disabled = !!result.loading; $('sqlRepeat').disabled = !!running || !!pending; $('sqlRename').disabled = !!result.loading;
+    analysisScope.hidden = !result.ok || !!result.loading;
     $('sqlRepeat').textContent = isExecution(result) ? '再次执行…' : '再次查询…';
     $('sqlSnapshot').querySelector('summary').textContent = isExecution(result) ? '本次执行 SQL' : '本次查询 SQL';
     $('sqlDownload').hidden = !result.downloadUrl; $('sqlDownload').href = result.downloadUrl || '#';
     if (result.loading || !result.ok) {
-      $('sqlSummary').textContent = result.loading ? (isExecution(result) ? '正在执行…' : '正在查询…') : (isExecution(result) ? '执行失败' : '未获取结果');
+      $('sqlSummary').textContent = result.loading ? (isExecution(result) ? '正在执行…' : '正在查询…') : result.uncertain ? '远端状态待核对' : (isExecution(result) ? '执行失败' : '未获取结果');
       const message = document.createElement('p'); message.className = result.loading ? 'sql-empty' : 'sql-error';
       message.textContent = result.loading ? 'SQL 在后台运行，可继续编辑或切换文件。当前服务没有提供中止接口，收起结果不会停止执行。' : result.error;
       if (!result.loading) message.setAttribute('role', 'alert'); body.append(message); return;
     }
     const rows = filteredRows(state), pageCount = Math.max(1, Math.ceil(rows.length / state.pageSize));
+    renderAnalysisScope(state, rows);
     state.page = Math.min(state.page, pageCount - 1);
     $('sqlSummary').textContent = `${isExecution(result) ? '执行成功' : `${rows.length}${hasFilters(state) ? ` / ${result.rows.length}` : ''} 行`} · ${(result.durationMs / 1000).toFixed(1)} 秒`;
     $('sqlPage').textContent = `${state.page + 1} / ${pageCount} 页`;
@@ -420,6 +458,15 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     }
     body.append(table); if (empty) body.append(empty); selection.mount(state, pageRows);
   }
+  function renderAnalysisScope(state, rows) {
+    const mode = state.analysisMode || 'sample20', data = mode === 'summary' ? null : sqlAnalysisData(state.result.columns, rows, mode);
+    $('sqlAnalysisMode').value = mode;
+    $('sqlAnalysisHint').textContent = mode === 'summary'
+      ? `已加载 ${state.result.rows.length} 行 · 当前筛选 ${rows.length} 行 · 将统计前 ${Math.min(rows.length, 5000)} 行、最多 30 列（摘要最多 12000 字符）`
+      : `已加载 ${state.result.rows.length} 行 · 当前筛选 ${rows.length} 行 · 将附带 ${data.includedRows} 行${data.limited ? '（非全部筛选结果）' : ''}`;
+    if (state.result.truncated) $('sqlAnalysisHint').textContent += ' · 当前数据为截断预览';
+  }
+  $('sqlAnalysisMode').addEventListener('change', () => { const state = current(); if (!state?.result?.ok) return; state.analysisMode = $('sqlAnalysisMode').value; renderAnalysisScope(state, filteredRows(state)); });
   async function execute(snapshot, params = {}) {
     if (running) return;
     const project = projectFor(snapshot.cwd);
@@ -433,7 +480,7 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     try {
       const result = await api('/api/sql/query', { sql: snapshot.sql, params, engine: snapshot.engine });
       state.result = { ...state.result, ...result, loading: false };
-    } catch (error) { state.result = { ...state.result, loading: false, ok: false, error: error.message, executedSql: substituteParams(snapshot.sql, params) }; }
+    } catch (error) { state.result = { ...state.result, loading: false, ok: false, ...readableSqlFailure(error), executedSql: substituteParams(snapshot.sql, params) }; }
     finally { running = null; queuePersist(); sync(); if (projectKey() === snapshot.cwd) render(); }
   }
   function start() {
@@ -552,7 +599,9 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
   $('sqlContext').addEventListener('click', () => {
     const state = current(), result = state?.result; if (!result || result.loading) return;
     const rows = result.ok ? filteredRows(state) : [];
-    onContext(`请帮我${result.ok ? '分析以下查询结果' : '排查以下查询错误'}：\n文件：${result.cwd}/${result.path}\n引擎：${engineName(result.engine)}\n查询时间：${new Date(result.startedAt).toLocaleString('zh-CN')}\nSQL（查询时快照${(result.executedSql || result.sql).length > 8000 ? '，截取前 8000 字符' : ''}）：\n${(result.executedSql || result.sql).slice(0, 8000)}\n\n${result.ok ? `返回 ${result.rowCount} 行${result.truncated ? `，本页保留前 ${result.rows.length} 行` : ''}；当前筛选 ${rows.length} 行，以下仅取前 20 行、最多 12000 字符：\n${resultText(result.columns, rows.slice(0, 20)).slice(0, 12000)}` : result.error.slice(0, 4000)}`);
+    const mode = state.analysisMode || 'sample20', data = result.ok ? sqlAnalysisData(result.columns, rows, mode) : null;
+    const scope = mode === 'summary' ? `本机统计前 ${data?.summaryRows} 行、${data?.includedColumns} 列${data?.limited ? '（受统计上限限制）' : ''}；数值统计可能包含编号，请结合字段含义判断：` : `实际附带 ${data?.includedRows} 行${data?.limited ? '，并非全部筛选结果' : ''}，最多 12000 字符：`;
+    onContext(`请帮我${result.ok ? '分析以下查询结果' : '排查以下查询错误'}：\n文件：${result.cwd}/${result.path}\n引擎：${engineName(result.engine)}\n查询时间：${new Date(result.startedAt).toLocaleString('zh-CN')}\nSQL（查询时快照${(result.executedSql || result.sql).length > 8000 ? '，截取前 8000 字符' : ''}）：\n${(result.executedSql || result.sql).slice(0, 8000)}\n\n${result.ok ? `返回 ${result.rowCount} 行${result.truncated ? `，本页保留前 ${result.rows.length} 行` : ''}；当前筛选 ${rows.length} 行；${scope}\n${data.text}` : result.error.slice(0, 4000)}`);
     notice('查询内容已加入输入框，可补充问题后发送。');
   });
   document.addEventListener('keydown', event => {

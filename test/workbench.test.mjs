@@ -239,11 +239,15 @@ test('new HTTP routes keep session/CSRF checks and operate only in a temporary p
   assert.match(page.headers.get('content-security-policy'), /style-src 'self';/); assert.doesNotMatch(page.headers.get('content-security-policy'), /unsafe-inline/);
   assert.equal((await fetch(base + '/vendor/markdown/document.js')).status, 401);
   assert.notEqual((await fetch(base + '/vendor/markdown/package.json', { headers: { cookie } })).status, 200);
-  for (const asset of ['/workbench.js', '/schedules.js', '/schedule-time.js', '/editor-tools.js', '/project-list.js', '/task-results.js', '/message-timing.js']) assert.equal((await fetch(base + asset)).status, 200);
-  for (const route of ['/api/project/mutate', '/api/project/replace-apply', '/api/git/action', '/api/review', '/api/terminal/start', '/api/schedules/action', '/api/connections/action', '/api/threads/action']) assert.equal((await fetch(base + route, { method: 'POST', headers: { cookie, origin: base, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+  for (const asset of ['/workbench.js', '/schedules.js', '/schedule-time.js', '/holiday-calendar.js', '/editor-tools.js', '/project-list.js', '/task-results.js', '/message-timing.js']) assert.equal((await fetch(base + asset)).status, 200);
+  for (const route of ['/api/project/mutate', '/api/project/replace-apply', '/api/git/action', '/api/review', '/api/terminal/start', '/api/schedules/action', '/api/schedules/calendar', '/api/connections/action', '/api/threads/action']) assert.equal((await fetch(base + route, { method: 'POST', headers: { cookie, origin: base, 'content-type': 'application/json' }, body: '{}' })).status, 403);
   const optionsUrl = `${base}/api/schedules/options?cwd=${encodeURIComponent(cwd)}`;
   assert.equal((await fetch(optionsUrl)).status, 401);
   const options = await (await fetch(optionsUrl, { headers: { cookie } })).json(); assert.equal(options.cwd, cwd); assert.deepEqual(options.folders, []); assert.ok(options.permissions.options.some(option => option.id === 'auto-review' && option.enabled));
+  assert.deepEqual(options.capabilities, { workdayCalendar: true, isolatedWorktrees: true }); assert.ok(options.calendar.years[2026]);
+  app.workbench.holidayCalendar.fetch = async () => { throw new Error('fixture offline'); };
+  const calendar = await fetch(base + '/api/schedules/calendar', { method: 'POST', headers, body: '{}' });
+  assert.equal(calendar.status, 200); assert.ok((await calendar.json()).years[2026]);
   assert.equal(app.bridge.calls.filter(call => ['thread/start', 'turn/start'].includes(call.method)).length, 0);
   const search = await (await fetch(`${base}/api/project/search?cwd=${encodeURIComponent(cwd)}&query=x`, { headers: { cookie } })).json(); assert.equal(search.results[0].path, 'sample.py');
   const created = await fetch(base + '/api/project/mutate', { method: 'POST', headers, body: JSON.stringify({ cwd, path: 'new.txt', action: 'createFile' }) }); assert.equal(created.status, 200);
