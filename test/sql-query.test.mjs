@@ -343,6 +343,16 @@ function selectCells($, start, end = start, shiftKey = false) {
   document.dispatchEvent(new window.MouseEvent('pointerup', { bubbles: true }));
 }
 
+test('disjoint editor column selections cannot execute a fragment or silently fall back to the whole SQL file', async t => {
+  const { $, files, controller, requests, settle } = await ui(t);
+  files[0].columnSelection = true; controller.sync();
+  assert.equal($('sqlRun').disabled, true); assert.match($('sqlScope').textContent, /列选择/);
+  $('sqlRun').click();
+  $('fileEditorText').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }));
+  await settle(); assert.equal(requests.filter(request => request.route === '/api/sql/query').length, 0);
+  files[0].columnSelection = false; controller.sync(); assert.equal($('sqlRun').disabled, false);
+});
+
 test('result cells support rectangular selection, live decimal statistics, keyboard expansion and copying without queries', async t => {
   const { $, finish, settle, requests } = await ui(t);
   $('sqlRun').click();

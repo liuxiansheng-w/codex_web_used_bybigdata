@@ -27,7 +27,7 @@ export function createInlineCompletion({ editor, api, getConfig = () => ({}), st
   try { enabled = storage.getItem('lemon:sqlInlineAI') !== 'false'; } catch {}
   const listen = (target, type, fn, capture = false) => { target.addEventListener(type, fn, capture); listeners.push(() => target.removeEventListener(type, fn, capture)); };
   const config = () => ({ ...getConfig(), dialect: $('sqlDialect').value });
-  const eligible = file => file?.language === 'sql' && file.writable && !file.loading && !file.composing && file.start === file.end && file.content.length <= 200000 && editor.visible && !editor.locked && document.visibilityState !== 'hidden' && !document.querySelector('dialog[open]');
+  const eligible = file => file?.language === 'sql' && file.writable && !file.loading && !file.composing && !file.columnSelection && file.start === file.end && file.content.length <= 200000 && editor.visible && !editor.locked && document.visibilityState !== 'hidden' && !document.querySelector('dialog[open]');
   const focused = () => document.activeElement === $('fileEditorText');
   function paint() {
     const elapsed = Math.floor((Date.now() - requestStarted) / 1000), pending = !!request;
@@ -62,7 +62,7 @@ export function createInlineCompletion({ editor, api, getConfig = () => ({}), st
   }
   function sync() {
     const file = editor.current, cfg = config();
-    const next = JSON.stringify([file?.id, file?.cwd, file?.content, file?.start, file?.end, file?.language, file?.writable, file?.loading, file?.composing, editor.visible, editor.locked, cfg.model, cfg.available, cfg.dialect, enabled]);
+    const next = JSON.stringify([file?.id, file?.cwd, file?.content, file?.start, file?.end, file?.language, file?.writable, file?.loading, file?.composing, file?.columnSelection, editor.visible, editor.locked, cfg.model, cfg.available, cfg.dialect, enabled]);
     if (next !== signature) {
       const previous = ghost, consumed = file && previous ? file.start - previous.file.start : 0;
       const remainder = previous && eligible(file) && focused() && previous.file.id === file.id && previous.file.cwd === file.cwd && previous.file.path === file.path && previous.model === cfg.model && previous.dialect === cfg.dialect && consumed > 0 && consumed < previous.text.length && file.content === previous.file.content.slice(0, previous.file.start) + previous.text.slice(0, consumed) + previous.file.content.slice(previous.file.end) ? previous.text.slice(consumed) : '';
@@ -85,7 +85,7 @@ export function createInlineCompletion({ editor, api, getConfig = () => ({}), st
   }
   function showWords(manual = false) {
     const file = editor.current; clearWords();
-    if (!file || !file.writable || file.composing || file.start !== file.end || !editor.visible || editor.locked || file.content.length > 200000 || (!manual && file.language !== 'sql')) return;
+    if (!file || !file.writable || file.composing || file.columnSelection || file.start !== file.end || !editor.visible || editor.locked || file.content.length > 200000 || (!manual && file.language !== 'sql')) return;
     const before = file.content.slice(0, file.start), prefix = before.match(/[A-Za-z_]\w*$/)?.[0] || '';
     if (!manual && !prefix) return;
     // Do not put keyword menus inside SQL comments or strings.
@@ -157,7 +157,7 @@ export function createInlineCompletion({ editor, api, getConfig = () => ({}), st
   listen(document, 'input', inputChanged);
   listen(document, 'compositionend', inputChanged);
   listen(document, 'keydown', event => {
-    if (event.target !== $('fileEditorText') || event.isComposing || editor.current?.composing || document.querySelector('dialog[open]')) return;
+    if (event.target !== $('fileEditorText') || event.isComposing || editor.current?.composing || editor.current?.columnSelection || document.querySelector('dialog[open]')) return;
     if (event.altKey && event.code === 'Backslash') { event.preventDefault(); clearTimeout(timer); suggest(true); return; }
     if (event.key === 'Escape') { if (ghost || words.length || request) event.preventDefault(); dismissed = cacheKey(editor.current); cache.delete(dismissed); cancel(); return; }
     if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && ghost) {
@@ -190,11 +190,11 @@ export function createEditorTools({ editor, api, notice, onContext, onPreview, c
   const current = () => { const file = editor.current; if (!file) throw new Error('请先打开一个文本文件。'); return file; };
   const run = handler => async () => { try { await handler(); } catch (error) { status(error.message); } };
   function context(intent) {
-    const file = current(), selected = file.content.slice(file.start, file.end);
-    if (!selected) throw new Error('请先选中一段代码。');
+    const file = current(), selected = file.columnSelection ? file.selections.map(range => file.content.slice(range.start, range.end)).join('\n') : file.content.slice(file.start, file.end);
+    if (!selected || file.columnSelection && !file.selections.some(range => range.end > range.start)) throw new Error('请先选中一段代码。');
     if (selected.length > 40000) throw new Error('选区过大，请选择少于 4 万字符。');
-    const start = file.content.slice(0, file.start).split('\n').length, end = file.content.slice(0, file.end).split('\n').length;
-    onContext(`${intent}\n文件：${file.cwd}/${file.path}:${start}-${end}（编辑器选区快照，可能尚未保存）\n\n${selected}`);
+    const start = file.content.slice(0, file.selections?.[0]?.start ?? file.start).split('\n').length, end = file.content.slice(0, file.selections?.at(-1)?.end ?? file.end).split('\n').length;
+    onContext(`${intent}\n文件：${file.cwd}/${file.path}:${start}-${end}（编辑器${file.columnSelection ? '矩形列选区，按行拼接' : '选区'}快照，可能尚未保存）\n\n${selected}`);
   }
   $('editorSelection').addEventListener('click', run(() => context('请结合以下代码继续处理：')));
   $('editorExplain').addEventListener('click', run(() => context('请解释以下代码，不要修改文件：')));

@@ -7,7 +7,7 @@ const $ = id => document.getElementById(id);
 const node = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
 const button = (text, fn) => { const el = node('button', text, 'secondary-button'); el.type = 'button'; el.addEventListener('click', fn); return el; };
 export function createWorkbench({ api, editor, getContext, onContext, onThread, onProject, projects, refreshFiles, getDraftPreference, setDraftPreference, clearDrafts, restoreDrafts, showDraftVersions = () => {}, onGitSubmit = () => {}, bottomPanel, getArtifacts = () => [], getChanges = () => [] }) {
-  let tab = 'search', searchResult = null, preview = null, git = null, sequence = 0, artifactUrl = null, pendingActions = 0, opener = null, contextKey = '', managedEntry = null, artifactSignature = '', changesSignature = '';
+  let tab = 'search', searchResult = null, preview = null, git = null, sequence = 0, artifactUrl = null, pendingActions = 0, opener = null, contextKey = '', artifactSignature = '', changesSignature = '';
   let artifactViewer = null, lastArtifact = null, agentsTimer = null, agentGeneration = 0, restorePreview = null, reviewChanges = null;
   let agentsData = null, agentsPromise = null, agentsLast = 0, agentsError = '', agentsRevision = 0;
   let searchController, searchPage = 0, searchLoading = false;
@@ -19,7 +19,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     <header class="workbench-head"><div><span class="eyebrow">项目工具</span><h2 id="workbenchTitle">项目工具</h2></div><div class="workbench-groups"><button id="showTaskTools" type="button">工具</button><button id="showSettingsTools" type="button">设置</button></div><button id="closeWorkbench" type="button" class="icon-button" aria-label="收起工具面板">×</button></header>
     <div class="workbench-layout"><nav id="workbenchNav" role="tablist" aria-label="工作台功能"></nav><div class="workbench-main"><div class="workbench-project-row"><p id="workbenchProject" class="workbench-project"></p><button id="copyProjectPath" type="button" class="text-button">复制项目路径</button></div><p id="workbenchStatus" role="status" class="workbench-status"></p>
     <section data-panel="search"><h3>搜索与替换</h3><form id="projectSearchForm" class="workbench-form"><label>搜索内容<input id="projectSearchQuery" required maxlength="500" placeholder="查找代码，或定位文件…"></label><div class="inline-fields"><label><input id="searchFilenames" type="checkbox">仅文件名</label><label><input id="searchCase" type="checkbox">区分大小写</label><button class="primary-button">搜索项目</button></div></form><p class="field-hint">文件名搜索会分批遍历项目，结果可翻页；内容搜索若未完成会提示缩小范围。隐藏、依赖和项目忽略目录不参与搜索。</p><div id="projectSearchResults" class="workbench-results"></div><details><summary>替换搜索命中的文件</summary><p class="field-hint">替换区分大小写、按字面量匹配。先保存或关闭编辑器草稿；预览后需再次确认。</p><label>替换为<input id="projectReplaceText" maxlength="10000"></label><button id="projectReplacePreview" class="secondary-button" type="button">生成替换预览</button><div id="projectReplaceResults"></div><button id="projectReplaceApply" class="danger-button" type="button" hidden>确认应用这份预览</button></details></section>
-    <section data-panel="files" hidden><h3>文件管理</h3><p class="field-hint">路径相对于当前项目。移动/重命名仅支持不超过 1 MB 的普通 UTF-8 文件；原文件保留在系统废纸篓。目录移动请使用本机文件管理器。</p><p id="manageSelection" class="selected-file">从左侧文件树选择文件，或输入路径。</p><details><summary>手工输入路径</summary><label>文件或目录路径<input id="managePath" placeholder="src/example.py"></label></details><label>新建文件或目录名称<input id="manageNewName" placeholder="例如 notes.md 或 reports"></label><p id="manageCreateParent" class="field-hint"></p><div class="action-grid"><button data-file="open">打开文件</button><button data-file="preview">预览 / 下载</button><button data-file="createFile">新建空文件</button><button data-file="createFolder">新建目录</button></div><label>移动 / 重命名为<input id="manageTarget" placeholder="src/new_name.py"></label><div class="action-grid"><button data-file="move">移动 / 重命名</button><button data-file="trash" class="danger-button">移到废纸篓</button></div></section>
+    <section data-panel="files" hidden></section>
     <section data-panel="git" hidden><h3>变更与代码审查</h3><div class="inline-fields"><button id="gitRefresh" class="secondary-button">刷新差异</button><span id="gitBranch"></span></div><section id="turnChanges" hidden aria-label="本轮记录的差异"></section><div id="gitFiles" class="git-files"></div><div id="gitFileDiff"></div><details><summary>完整工作区差异 / 手工操作</summary><pre id="gitStatus" class="workbench-output"></pre><details open><summary>未暂存差异</summary><pre id="gitUnstaged" class="workbench-output"></pre></details><details><summary>已暂存差异</summary><pre id="gitStaged" class="workbench-output"></pre></details><label>针对文件的 Git 操作<input id="gitPath" placeholder="项目内的文件相对路径"></label><div class="action-grid"><button data-git="stage">暂存此文件</button><button data-git="unstage">取消暂存</button></div></details><button id="gitSubmitOpen" type="button" class="primary-button">选择文件并提交 / 推送…</button><p class="field-hint">所有提交入口使用同一份文件选择和提交说明。提交前核对项目、分支、文件及差异；不运行 Git hooks、不签名。</p><hr><h4>原生代码审查</h4><label>审查范围<select id="reviewTarget"><option value="uncommittedChanges">未提交修改</option><option value="baseBranch">与基础分支比较</option><option value="commit">指定提交</option><option value="custom">自定义审查要求</option></select></label><input id="reviewValue" aria-label="分支、提交编号或审查要求" placeholder="按所选范围填写；未提交修改可留空"><label>审查会话<select id="reviewDelivery"><option value="detached">新建独立审查会话</option><option value="inline">使用当前会话</option></select></label><button id="reviewStart" class="primary-button">开始只读审查</button><p class="field-hint">会消耗模型额度；需要一个空闲会话。独立审查保留原对话。</p><label>行级反馈：文件:行号<input id="reviewLocation" placeholder="src/example.py:42"></label><label for="reviewComment">反馈意见</label><textarea id="reviewComment" rows="3" placeholder="针对该位置的修改意见"></textarea><button id="reviewFeedback" class="secondary-button">将行级反馈加入对话</button></section>
     <section data-panel="terminal" hidden></section>
     <section data-panel="appApprovals" hidden><h3>电脑操作 · 应用授权</h3><p class="field-hint">查看官方客户端在本机保存的“始终允许”应用。会话授权、组织策略和 macOS 系统权限分别生效。</p><div class="inline-fields"><button id="appApprovalsRefresh" type="button" class="secondary-button">刷新授权列表</button><a class="text-button" href="codex://">打开官方客户端 ↗</a></div><p id="appApprovalsHint" role="status" class="field-hint"></p><div id="appApprovalsList" class="app-approvals-list"></div><p class="field-hint">撤销将在后续授权检查中生效；当前会话已获得的授权可能继续有效。</p></section>
@@ -31,11 +31,6 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     <section data-panel="native" hidden><h3>桌面客户端能力</h3><p>以下功能依赖本机桌面集成，当前网页暂不支持。点击入口不会自动授予录屏、麦克风或电脑控制权限。</p><div id="nativeCapabilities"></div><a class="primary-button" href="codex://">打开本机桌面客户端 ↗</a><p class="field-hint">若浏览器未唤起客户端，请手动打开本机桌面应用。</p><a href="https://learn.chatgpt.com/docs/overview" target="_blank" rel="noopener noreferrer">查看客户端说明 ↗</a></section>
     </div></div>`;
   $('workSurface').append(dialog);
-  const pathActions = node('div', null, 'inline-fields file-path-actions');
-  for (const [action, label] of [['relative', '复制相对路径'], ['absolute', '复制绝对路径']]) {
-    const control = node('button', label, 'secondary-button'); control.type = 'button'; control.dataset.copyFilePath = action; pathActions.append(control);
-  }
-  $('manageSelection').after(pathActions);
   const agentsPanel = node('section'); agentsPanel.dataset.panel = 'agents'; agentsPanel.hidden = true;
   agentsPanel.innerHTML = '<h3>子任务</h3><div class="agents-toolbar"><span id="agentsSummary" role="status"></span><button id="agentsRefresh" class="text-button">刷新状态</button><button id="agentsParent" class="text-button" hidden>返回主任务</button></div><p id="agentsNotice" class="agent-hint" role="status"></p><p id="agentsEmpty" class="field-hint" hidden></p><div id="agentResults"></div>';
   dialog.querySelector('.workbench-main').append(agentsPanel);
@@ -77,15 +72,15 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   for (const element of [...artifactPanel.children].filter(el => el.tagName !== 'H3' && el.id !== 'artifactResults')) artifactBrowser.append(element);
   $('artifactResults').before(artifactBrowser);
   function disposeArtifact() { artifactViewer?.dispose(); artifactViewer = null; }
-  function close() { searchController?.abort(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools'); disposeArtifact(); sequence++; scheduleAgents(); opener?.focus(); }
+  function close() { searchController?.abort(); fileManager.hide(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools'); disposeArtifact(); sequence++; scheduleAgents(); opener?.focus(); }
   function contextChanged() {
-    const key = JSON.stringify([context().cwd, context().thread?.id]); if (key === contextKey) return; searchController?.abort(); contextKey = key; managedEntry = null; artifactSignature = ''; changesSignature = ''; sequence++; searchResult = null; preview = null; git = null;
+    const key = JSON.stringify([context().cwd, context().thread?.id]); if (key === contextKey) return; searchController?.abort(); contextKey = key; artifactSignature = ''; changesSignature = ''; sequence++; searchResult = null; preview = null; git = null;
     disposeArtifact(); lastArtifact = null; artifactBrowser.open = true; dialog.classList.remove('has-artifact'); clearTimeout(agentsTimer); agentsTimer = null; agentGeneration++; agentsData = null; agentsPromise = null; agentsLast = 0; agentsError = ''; inlineGroups.clear(); panelAgentCards.update([]); reviewChanges = null; restorePreview = null; restoreDialog.close(); $('fileHistoryResults').replaceChildren(); $('agentResults').replaceChildren();
     artifactPanel.querySelector('h3').textContent = '成果与文件预览'; $('fileHistoryPath').value = '';
     for (const id of ['projectSearchResults', 'projectReplaceResults', 'gitFiles', 'gitFileDiff', 'gitStatus', 'gitUnstaged', 'gitStaged', 'artifactList', 'artifactResults', 'turnChanges', 'connectionsResults']) $(id).replaceChildren();
-    for (const id of ['managePath', 'manageNewName', 'manageTarget', 'gitPath', 'reviewLocation', 'reviewComment', 'artifactPath']) $(id).value = '';
+    for (const id of ['gitPath', 'reviewLocation', 'reviewComment', 'artifactPath']) $(id).value = '';
     terminalConsole.syncContext(); schedules.render();
-    updateManagedSelection();
+    fileManager.reset();
     $('projectReplaceApply').hidden = true; $('turnChanges').hidden = true;
     if (artifactUrl) { URL.revokeObjectURL(artifactUrl); artifactUrl = null; }
     renderProjectPath(); status('');
@@ -110,6 +105,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   });
   bottomPanel.attachTerminal(terminalPanel); $('quickTerminal').textContent = '终端';
   bottomPanel.subscribe(() => { if (bottomPanel.visible('terminal')) void terminalConsole.refresh(); else terminalConsole.hide(); });
+  const fileManager = createFileManager({ root: dialog.querySelector('[data-panel=files]'), api, getContext, editor, openFile, previewFile: previewArtifact, refreshFiles, isVisible: () => !dialog.hidden && tab === 'files' });
   for (const text of ['录制技能与操作回放', '浏览器标签页工作区与页面批注', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
   async function show(id = tab, entry) {
     if (id === 'terminal') { contextChanged(); close(); bottomPanel.show('terminal'); $('terminalCommand').focus(); return; }
@@ -118,18 +114,19 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     if (id === 'search') renderSearchResults();
     if (id === 'git') reviewChanges = entry?.changes?.map(change => ({ ...change, path: projectPath(change.path, context().cwd) })).filter(change => change.path) || null; renderProjectPath();
     if (id !== 'artifacts') disposeArtifact();
+    if (id !== 'files') fileManager.hide();
+    dialog.classList.toggle('files-view', id === 'files');
     dialog.classList.toggle('document-wide', id === 'artifacts'); dialog.classList.toggle('agents-view', id === 'agents'); dialog.classList.toggle('schedules-view', id === 'schedules'); schedules.setVisible(id === 'schedules');
     for (const panel of dialog.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== id;
     const task = taskTabs.has(id); $('workbenchTitle').textContent = task ? '项目工具' : '设置';
     for (const el of $('workbenchNav').children) { el.hidden = taskTabs.has(el.dataset.tab) !== task || el.dataset.tab === 'appApprovals' && !context().appApprovals || el.dataset.tab === 'memories' && !context().memorySettings; el.setAttribute('aria-selected', String(el.dataset.tab === id)); el.tabIndex = el.dataset.tab === id ? 0 : -1; }
     $('showTaskTools').setAttribute('aria-pressed', String(task)); $('showSettingsTools').setAttribute('aria-pressed', String(!task));
-    if (entry?.path) $('managePath').value = entry.path;
     if (dialog.hidden) opener = document.activeElement;
     dialog.hidden = false; $('workSurface').classList.add('with-tools');
     $('workbenchNav').querySelector(`[data-tab=${id}]`)?.focus();
     if (entry?.query != null) { $('projectSearchQuery').value = entry.query; $('searchFilenames').checked = !!entry.filenames; $('projectSearchForm').requestSubmit(); }
     if (id === 'git') { renderTurnChanges(); selectReviewSection(entry?.section || 'changes'); if (entry?.section === 'git') await run(loadGit)(); }
-    if (id === 'files') { managedEntry = entry || null; $('manageNewName').value = ''; $('manageTarget').value = entry?.path || ''; updateManagedSelection(); }
+    if (id === 'files') await fileManager.show(entry);
     if (id === 'artifacts') { renderArtifacts(); if (!entry?.loadingArtifact && lastArtifact && !artifactViewer) void run(() => previewArtifact(lastArtifact))(); }
     if (id === 'agents') { renderAgentViews(); void pollAgents(true); }
     if (id === 'projects') renderProjects();
@@ -187,12 +184,6 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     if (!preview || !confirm(`将这份预览中的 ${preview.files.length} 个文件写入磁盘？多文件写入不是原子操作，发生冲突时会停止并报告已保存的文件。`)) return;
     const result = await api('/api/project/replace-apply', { id: preview.id, confirmed: true }); status(`已保存：${result.saved.join('、') || '无'}${result.error ? `。${result.error}` : '。已打开的文件请重新载入。'}`); preview = null; $('projectReplaceApply').hidden = true; refreshFiles();
   });
-  function managedParent() { return managedEntry?.kind === 'folder' ? managedEntry.path : $('managePath').value.trim().split('/').slice(0, -1).join('/'); }
-  function selectedRelativePath() {
-    if (managedEntry?.cwd && managedEntry.cwd !== context().cwd) return '';
-    const relative = managedEntry?.path || $('managePath').value.trim();
-    return relative && !/[\\\x00-\x1f\x7f]/.test(relative) && relative.split('/').every(part => part && part !== '.' && part !== '..') ? relative : '';
-  }
   function renderProjectPath() {
     const cwd = context().cwd || '';
     $('workbenchProject').textContent = cwd; $('workbenchProject').title = cwd;
@@ -208,36 +199,9 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
       if (expected === contextKey && revision === sequence) status(`已复制${label}。`);
     } catch {
       if (expected === contextKey && revision === sequence) status(`剪贴板不可用，请手动复制${label}：${text}`);
-    } finally { delete control.dataset.copyPending; renderProjectPath(); updateManagedSelection(); }
+    } finally { delete control.dataset.copyPending; renderProjectPath(); fileManager.render(); }
   }
   $('copyProjectPath').addEventListener('click', event => { void copyPath(event.currentTarget, context().cwd, '项目绝对路径'); });
-  for (const control of pathActions.children) control.addEventListener('click', () => {
-    const relative = selectedRelativePath(); if (!relative) return;
-    const absolute = control.dataset.copyFilePath === 'absolute';
-    void copyPath(control, absolute ? `${context().cwd.replace(/\/+$/, '')}/${relative}` : relative, absolute ? '绝对路径' : '相对路径');
-  });
-  function updateManagedSelection() {
-    $('manageSelection').textContent = managedEntry?.path || ($('managePath').value.trim() ? `手工路径：${$('managePath').value.trim()}` : '从左侧文件树选择文件，或输入路径。');
-    $('manageCreateParent').textContent = `新建位置：${managedParent() || '项目根目录'}`;
-    for (const control of pathActions.children) {
-      const relative = selectedRelativePath(); control.disabled = !relative || !!control.dataset.copyPending;
-      control.title = relative ? control.dataset.copyFilePath === 'relative' ? `相对于当前项目：${relative}` : `${context().cwd.replace(/\/+$/, '')}/${relative}` : '请先选择文件或目录，或输入项目内相对路径';
-    }
-    for (const el of dialog.querySelectorAll('[data-file]')) el.disabled = managedEntry?.kind === 'folder' && ['open', 'preview', 'move', 'trash'].includes(el.dataset.file);
-  }
-  $('managePath').addEventListener('input', () => { managedEntry = null; updateManagedSelection(); });
-  for (const el of dialog.querySelectorAll('[data-file]')) el.addEventListener('click', run(async () => {
-    const entry = { cwd: context().cwd, path: $('managePath').value.trim() }, action = el.dataset.file;
-    if (['createFile', 'createFolder'].includes(action)) { const name = $('manageNewName').value.trim(); if (!name || name.includes('/') || name.includes('\\')) throw new Error('请输入一个文件或目录名称，不包含路径分隔符。'); const parent = managedParent(); entry.path = parent ? `${parent}/${name}` : name; }
-    if (action === 'open') return openFile(entry);
-    if (action === 'preview') return previewArtifact(entry);
-    if (editor.tabs.some(t => t.cwd === entry.cwd && t.path === entry.path)) throw new Error('请先关闭此文件的编辑标签，以免移动后保留失效草稿。');
-    let version;
-    if (['move', 'trash'].includes(action)) { const file = await api(`/api/project/file?cwd=${encodeURIComponent(entry.cwd)}&path=${encodeURIComponent(entry.path)}`); version = file.version; if (!confirm(`${action === 'trash' ? '移到系统废纸篓' : '移动/重命名并将原文件备份到废纸篓'}：${entry.path}？`)) return; }
-    const result = await api('/api/project/mutate', { ...entry, action, target: $('manageTarget').value.trim(), version, confirmed: true });
-    status(result.message || '已创建。'); if (result.recovery) status(`${result.message} 可恢复路径：${result.recovery}`); refreshFiles();
-    if (action === 'createFile') await openFile(entry);
-  }));
   async function loadGit() {
     const cwd = context().cwd, expected = sequence; renderTurnChanges(); status('正在读取工作区变更…');
     const result = await api(scoped('/api/git')); if (cwd !== context().cwd || expected !== sequence) return;
@@ -584,7 +548,217 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bind('notifyEnable', async () => { if (!('Notification' in window)) throw new Error('浏览器不支持系统通知。'); status(`通知权限：${await Notification.requestPermission()}`); });
   bind('usageRefresh', async () => { $('usageResult').textContent = JSON.stringify(await api('/api/usage'), null, 2); });
   document.addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); show('search'); } });
-  return { show, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft(); }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return pendingActions > 0 || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(terminalConsole.pending) + Number(schedules.pending); } };
+  return { show, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft(); }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return pendingActions > 0 || fileManager.pending || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(fileManager.pending) + Number(terminalConsole.pending) + Number(schedules.pending); } };
+}
+
+// Browse first, then act on the selected item. Paths are navigation metadata;
+// all writes still use the existing version-checked, no-overwrite file API.
+export function createFileManager({ root, api, getContext, editor, openFile, previewFile, refreshFiles, isVisible = () => true }) {
+  root.classList.add('file-manager');
+  root.innerHTML = `<div class="file-manager-heading"><h3>文件管理</h3><button id="manageUp" type="button" aria-label="上一级目录" title="上一级 · ⌘↑">↑</button><button id="manageRefresh" type="button" aria-label="刷新当前目录">↻</button></div>
+    <nav id="manageBreadcrumbs" class="file-manager-breadcrumbs" aria-label="当前文件夹"></nav>
+    <div id="manageMoveBanner" class="file-manager-move" hidden><strong id="manageMoveName"></strong><p>打开目标文件夹，然后点“移到此处”。</p><button id="manageMoveCancel" type="button" class="text-button">取消移动</button></div>
+    <div id="manageToolbar" class="file-manager-toolbar"><button id="manageCreateFile" type="button">新建文件</button><button id="manageCreateFolder" type="button" title="新建文件夹 · ⇧⌘N">新建文件夹</button></div>
+    <form id="manageNameForm" class="file-manager-name-form" hidden><label id="manageNameLabel" for="manageNewName">名称</label><input id="manageNewName" required maxlength="255" autocomplete="off"><p id="manageCreateParent" class="field-hint"></p><div class="inline-fields"><button id="manageNameApply" type="submit" class="primary-button">确认</button><button id="manageNameCancel" type="button">取消</button></div></form>
+    <p id="manageNotice" role="status" class="file-manager-notice"></p>
+    <div id="manageList" class="file-manager-list" role="listbox" tabindex="0" aria-label="当前目录文件列表"></div><button id="manageMore" type="button" class="text-button" hidden>显示更多</button>
+    <div id="manageSelected" class="file-manager-selected" hidden><strong id="manageSelection"></strong><span id="manageSelectionKind"></span><div id="manageActions" class="file-manager-toolbar"><button id="manageOpen" type="button" title="打开 · ⌘↓">打开</button><button id="managePreview" type="button" title="预览 · 空格">预览</button><button id="manageRename" type="button" title="重命名 · Return">重命名</button><button id="manageMove" type="button">移动到…</button><button id="manageTrash" type="button" class="danger-button">移到废纸篓</button></div></div>
+    <div id="manageMoveFooter" class="file-manager-move-footer" hidden><span id="manageDestination"></span><button id="manageMoveApply" type="button" class="primary-button">移到此处</button></div>
+    <details class="file-manager-details"><summary>路径与操作说明</summary><code id="manageFullPath"></code><div class="inline-fields"><button type="button" data-copy-file-path="relative">复制相对路径</button><button type="button" data-copy-file-path="absolute">复制绝对路径</button></div><p class="field-hint">移动、重命名和移到废纸篓支持 1 MB 以内的普通 UTF-8 文件。打开中的文件请先保存并关闭标签。文件夹可浏览和新建，暂不支持在网页内移动或重命名。</p><div id="manageRecovery" hidden><strong>上次操作的恢复位置</strong><code id="manageRecoveryPath"></code></div></details>
+    <details class="file-manager-details"><summary>按路径前往</summary><form id="manageLocationForm"><label for="managePath">项目内相对路径</label><input id="managePath" placeholder="例如 src 或 src/example.sql" autocomplete="off"><button type="submit">前往</button></form></details>`;
+  const find = id => root.querySelector(`#${id}`), parent = path => path.split('/').slice(0, -1).join('/'), base = path => path.split('/').at(-1);
+  const join = (dir, name) => dir ? `${dir}/${name}` : name;
+  const valid = path => typeof path === 'string' && path.length < 4096 && !/[\\\x00-\x1f\x7f]/.test(path) && !path.startsWith('/') && (!path || path.split('/').every(part => part && part !== '.' && part !== '..'));
+  let cwd = '', folder = '', entries = [], selected = null, moving = null, returnLocation = null, mode = '', generation = 0, loading = false, writing = false, nextOffset = null, limited = false, dragged = null;
+  let recovery = '';
+  const notice = (text = '', error = false) => { find('manageNotice').textContent = text; find('manageNotice').classList.toggle('is-error', error); };
+  const current = (rootCwd = cwd, revision = generation) => rootCwd === cwd && cwd === getContext().cwd && revision === generation;
+  function reset() {
+    const next = getContext().cwd || ''; if (next === cwd) return;
+    generation++; cwd = next; folder = ''; entries = []; selected = moving = returnLocation = null; mode = ''; nextOffset = null; loading = false; recovery = ''; notice(); find('manageNewName').value = find('managePath').value = ''; render();
+  }
+  function render() {
+    const busy = loading || writing, file = selected?.kind === 'file';
+    find('manageUp').disabled = busy || !!mode || !folder; find('manageRefresh').disabled = busy || !!mode;
+    const crumbs = find('manageBreadcrumbs'); crumbs.replaceChildren();
+    const parts = folder ? folder.split('/') : [];
+    for (let i = -1; i < parts.length; i++) {
+      const path = i < 0 ? '' : parts.slice(0, i + 1).join('/'), control = button(i < 0 ? base(cwd) || '项目' : parts[i], () => void browse(path));
+      control.title = path || cwd; control.disabled = busy || !!mode; if (path === folder) control.setAttribute('aria-current', 'location'); crumbs.append(control);
+      if (i < parts.length - 1) crumbs.append(node('span', '›'));
+    }
+    find('manageToolbar').hidden = !!moving || !!mode;
+    for (const id of ['manageCreateFile', 'manageCreateFolder']) find(id).disabled = busy || !!mode;
+    find('manageNameForm').hidden = !mode; find('manageNameApply').disabled = find('manageNameCancel').disabled = writing; find('manageNewName').disabled = writing;
+    find('manageMoveBanner').hidden = find('manageMoveFooter').hidden = !moving;
+    find('manageMoveName').textContent = moving ? `移动“${base(moving.path)}”` : '';
+    find('manageDestination').textContent = `目标：${folder || '项目根目录'}`;
+    find('manageMoveApply').disabled = busy || !moving || folder === parent(moving.path);
+    find('manageMoveCancel').disabled = writing;
+    find('manageSelected').hidden = !selected || !!moving || !!mode;
+    find('manageSelection').textContent = selected ? base(selected.path) : '';
+    find('manageSelection').title = selected?.path || '';
+    find('manageSelectionKind').textContent = selected?.kind === 'folder' ? '文件夹 · 双击打开' : '文件';
+    for (const id of ['manageOpen', 'managePreview', 'manageRename', 'manageMove', 'manageTrash']) find(id).disabled = busy || !!mode || !selected || id !== 'manageOpen' && !file;
+    const path = selected?.path || folder;
+    find('manageFullPath').textContent = cwd ? join(cwd, path) : '';
+    for (const control of root.querySelectorAll('[data-copy-file-path]')) control.disabled = !cwd || !!control.dataset.pending;
+    find('manageRecovery').hidden = !recovery; find('manageRecoveryPath').textContent = recovery;
+    find('manageMore').hidden = nextOffset == null; find('manageMore').disabled = busy;
+    find('manageList').setAttribute('aria-busy', String(loading));
+    const list = find('manageList'); list.replaceChildren();
+    if (loading && !entries.length) list.append(node('p', '正在读取目录…', 'field-hint'));
+    const visible = moving ? entries.filter(entry => entry.kind === 'folder') : entries;
+    for (const entry of visible) {
+      const control = button('', () => { if (writing || mode) return; selected = entry; render(); focusRow(entry.path); });
+      control.className = 'file-manager-item'; control.dataset.path = entry.path; control.setAttribute('role', 'option'); control.setAttribute('aria-selected', String(selected?.path === entry.path)); control.title = entry.path;
+      const icon = node('span', null, 'file-manager-icon'); icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = entry.kind === 'folder' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6h7l2 2h9v12H3Z"/></svg>' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 3h9l5 5v13H5Z"/><path d="M14 3v6h5M9 13h6m-6 4h6"/></svg>';
+      control.append(icon, node('span', entry.name, 'file-manager-name')); if (entry.kind === 'folder') control.append(node('span', '›', 'file-manager-chevron'));
+      control.addEventListener('dblclick', () => { if (!writing && !mode) void open(entry); });
+      control.draggable = entry.kind === 'file' && !moving && !writing && !mode;
+      control.addEventListener('dragstart', event => { dragged = { ...entry, cwd }; event.dataTransfer.setData('application/x-lemon-file', entry.path); event.dataTransfer.effectAllowed = 'move'; });
+      control.addEventListener('dragend', () => { dragged = null; });
+      if (entry.kind === 'folder') {
+        control.addEventListener('dragover', event => { if (dragged?.cwd === cwd && !writing && !mode) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; control.classList.add('is-drop-target'); } });
+        control.addEventListener('dragleave', () => control.classList.remove('is-drop-target'));
+        control.addEventListener('drop', event => { event.preventDefault(); const source = dragged; dragged = null; if (source?.cwd === cwd && !writing && !mode) void beginMove(source, entry.path); });
+      }
+      list.append(control);
+    }
+    if (!loading && !visible.length) {
+      const emptyHint = !moving ? '此文件夹为空。' : folder !== parent(moving.path) ? '此处没有子文件夹，可直接移到当前目录。' : folder ? '此处没有子文件夹，请返回上一级选择其他目录。' : '暂无其他文件夹；可取消移动后新建目标文件夹。';
+      list.append(node('p', emptyHint, 'field-hint'));
+    }
+    if (limited) list.append(node('p', '目录过大，当前只显示部分文件。', 'field-hint'));
+  }
+  function focusRow(path) { [...find('manageList').querySelectorAll('[data-path]')].find(row => row.dataset.path === path)?.focus(); }
+  async function load(offset = 0) {
+    if (!cwd) return;
+    const rootCwd = cwd, path = folder, revision = ++generation; loading = true; if (!offset) entries = []; render();
+    let showHidden = true; try { showHidden = window.localStorage.getItem(`lemon:showHiddenFiles:${encodeURIComponent(cwd)}`) !== 'false'; } catch {}
+    try {
+      const result = await api(`/api/project/files?cwd=${encodeURIComponent(rootCwd)}&path=${encodeURIComponent(path)}&offset=${offset}&showHidden=${Number(showHidden)}`);
+      if (!current(rootCwd, revision)) return;
+      if (!Array.isArray(result.entries)) throw new Error('目录内容暂时不可用，请刷新重试。');
+      const page = result.entries.map(entry => ({ ...entry, path: entry.path || join(path, entry.name) })).filter(entry => valid(entry.path) && entry.path && ['file', 'folder'].includes(entry.kind));
+      entries = [...new Map([...entries, ...page].map(entry => [entry.path, entry])).values()]; nextOffset = result.nextOffset ?? null; limited = !!result.limited;
+    } catch (error) { if (current(rootCwd, revision)) notice(error.message, true); }
+    finally { if (current(rootCwd, revision)) { loading = false; render(); } }
+  }
+  async function browse(path) {
+    if (writing || mode || !valid(path)) return;
+    folder = path; selected = null; nextOffset = null; notice(); await load();
+  }
+  async function open(entry = selected) {
+    if (!entry || writing || mode) return;
+    if (entry.kind === 'folder') return browse(entry.path);
+    try { await openFile({ cwd, path: entry.path }); } catch (error) { notice(error.message, true); }
+  }
+  function editName(action) {
+    if (writing || loading || moving || action === 'rename' && selected?.kind !== 'file') return;
+    mode = action; notice();
+    find('manageNameLabel').textContent = action === 'rename' ? `重命名“${base(selected.path)}”` : action === 'createFolder' ? '新文件夹名称' : '新文件名称';
+    find('manageCreateParent').textContent = `位置：${folder || '项目根目录'}`;
+    find('manageNameApply').textContent = action === 'rename' ? '保存名称' : '创建';
+    find('manageNewName').value = action === 'rename' ? base(selected.path) : action === 'createFolder' ? '未命名文件夹' : '';
+    render(); const input = find('manageNewName'); input.focus(); const dot = input.value.lastIndexOf('.'); input.setSelectionRange(0, action === 'rename' && dot > 0 ? dot : input.value.length);
+  }
+  async function beginMove(entry = selected, destination = parent(entry?.path || '')) {
+    if (writing || loading || mode || entry?.kind !== 'file') return;
+    returnLocation = { folder, selected }; moving = { ...entry, cwd }; selected = null; mode = ''; notice(); folder = destination; await load();
+  }
+  async function cancelMove() {
+    if (writing) return; moving = null; const previous = returnLocation; returnLocation = null; folder = previous?.folder ?? folder; selected = previous?.selected || null; notice(); await load();
+  }
+  async function mutate(action, entry, target) {
+    if (writing || !entry || !valid(entry.path) || !entry.path) return;
+    const rootCwd = cwd, revision = generation, path = entry.path; let completed = false;
+    writing = true; notice(); render();
+    try {
+      if (editor.tabs.some(tab => tab.cwd === rootCwd && tab.path === path)) throw new Error('请先保存并关闭这个文件的编辑标签，再整理文件。');
+      let version;
+      if (action === 'move' || action === 'trash') {
+        const file = await api(`/api/project/file?cwd=${encodeURIComponent(rootCwd)}&path=${encodeURIComponent(path)}`);
+        if (!current(rootCwd, revision) || !isVisible()) return;
+        version = file.version;
+        if (action === 'trash' && !confirm(`将“${base(path)}”移到废纸篓？可在访达中恢复。`)) return;
+      }
+      if (!current(rootCwd, revision) || !isVisible()) return;
+      const result = await api('/api/project/mutate', { cwd: rootCwd, path, action, target, version, confirmed: true });
+      if (rootCwd !== cwd || cwd !== getContext().cwd) return;
+      refreshFiles();
+      if (revision !== generation || !isVisible()) { if (selected?.path === path) { selected = null; mode = ''; } if (moving?.path === path) moving = returnLocation = null; return; }
+      recovery = result.recovery || ''; mode = ''; find('manageNewName').value = ''; moving = returnLocation = null;
+      selected = action === 'trash' ? null : { name: base(target || path), path: target || path, kind: action === 'createFolder' ? 'folder' : 'file' };
+      if (action === 'move') folder = parent(target);
+      notice(action === 'trash' ? `“${base(path)}”已移到废纸篓。` : action === 'move' ? parent(path) === parent(target) ? '名称已更新。' : `已移到“${base(folder) || '项目根目录'}”。` : action === 'createFolder' ? '文件夹已创建。' : '文件已创建。');
+      await load(); completed = rootCwd === cwd;
+      if (action === 'createFile' && rootCwd === cwd && isVisible()) await openFile({ cwd: rootCwd, path });
+    } catch (error) { if (rootCwd === cwd && cwd === getContext().cwd) notice(error.message, true); }
+    finally { writing = false; if (cwd === getContext().cwd) { render(); if (completed && action !== 'createFile' && !mode && isVisible()) { if (selected) focusRow(selected.path); else find('manageList').focus(); } } }
+  }
+  find('manageNameForm').addEventListener('submit', event => {
+    event.preventDefault(); if (!mode || writing) return;
+    const name = find('manageNewName').value.trim();
+    if (!name || name === '.' || name === '..' || /[\\/\x00-\x1f\x7f]/.test(name)) { notice('请输入一个名称，不包含路径分隔符。', true); return; }
+    const path = join(folder, name);
+    if (mode === 'rename') { if (path === selected.path) { mode = ''; render(); return; } void mutate('move', selected, path); }
+    else void mutate(mode, { path, kind: mode === 'createFolder' ? 'folder' : 'file' });
+  });
+  find('manageNameCancel').addEventListener('click', () => { if (!writing) { mode = ''; notice(); render(); find('manageList').focus(); } });
+  find('manageCreateFile').addEventListener('click', () => editName('createFile')); find('manageCreateFolder').addEventListener('click', () => editName('createFolder'));
+  find('manageRename').addEventListener('click', () => editName('rename')); find('manageMove').addEventListener('click', () => void beginMove());
+  find('manageOpen').addEventListener('click', () => void open());
+  find('managePreview').addEventListener('click', () => { if (selected?.kind === 'file') void Promise.resolve(previewFile({ cwd, path: selected.path })).catch(error => notice(error.message, true)); });
+  find('manageTrash').addEventListener('click', () => { if (selected?.kind === 'file') void mutate('trash', selected); });
+  find('manageMoveCancel').addEventListener('click', () => void cancelMove());
+  find('manageMoveApply').addEventListener('click', () => { if (moving && folder !== parent(moving.path)) void mutate('move', moving, join(folder, base(moving.path))); });
+  find('manageUp').addEventListener('click', () => void browse(parent(folder))); find('manageRefresh').addEventListener('click', () => { if (!writing && !mode) void load(); }); find('manageMore').addEventListener('click', () => { if (nextOffset != null && !loading && !writing) void load(nextOffset); });
+  for (const control of root.querySelectorAll('[data-copy-file-path]')) control.addEventListener('click', async () => {
+    const path = selected?.path || folder, rootCwd = cwd, revision = generation; if (!rootCwd || control.dataset.pending) return;
+    const text = control.dataset.copyFilePath === 'absolute' ? join(rootCwd, path) : path || '.'; control.dataset.pending = 'true'; control.disabled = true;
+    try { await window.navigator.clipboard.writeText(text); if (current(rootCwd, revision)) notice('路径已复制。'); }
+    catch { if (current(rootCwd, revision)) notice(`请手动复制路径：${text}`, true); }
+    finally { delete control.dataset.pending; render(); }
+  });
+  find('manageLocationForm').addEventListener('submit', async event => {
+    event.preventDefault(); if (writing || mode) return;
+    const path = find('managePath').value.trim(); if (!valid(path)) { notice('请输入项目内的相对路径。', true); return; }
+    if (!path) { await browse(''); return; }
+    // Resolve the user's explicit location by listing its parent, never by
+    // reading file bodies or expanding access outside this project.
+    const rootCwd = cwd, revision = generation; let offset = 0;
+    try {
+      for (;;) {
+        const result = await api(`/api/project/files?cwd=${encodeURIComponent(rootCwd)}&path=${encodeURIComponent(parent(path))}&offset=${offset}&showHidden=1`);
+        if (!current(rootCwd, revision) || !isVisible()) return;
+        const entry = result.entries.find(entry => (entry.path || join(parent(path), entry.name)) === path);
+        if (entry) { folder = entry.kind === 'folder' ? path : parent(path); selected = entry.kind === 'folder' ? null : { ...entry, path }; notice(); await load(); return; }
+        if (result.nextOffset == null || result.nextOffset <= offset) throw new Error('没有找到这个文件或文件夹，请检查路径。');
+        offset = result.nextOffset;
+      }
+    } catch (error) { if (current(rootCwd, revision)) notice(error.message, true); }
+  });
+  root.addEventListener('keydown', event => {
+    if (event.isComposing || event.target.matches('input,textarea')) { if (event.key === 'Escape' && mode && !writing) { event.preventDefault(); event.stopPropagation(); mode = ''; render(); find('manageList').focus(); } return; }
+    if (writing || loading) return;
+    const command = event.metaKey || event.ctrlKey;
+    if (event.key === 'Escape' && (mode || moving)) { event.preventDefault(); event.stopPropagation(); if (moving) void cancelMove(); else { mode = ''; render(); } return; }
+    if (command && event.shiftKey && event.key.toLowerCase() === 'n') { event.preventDefault(); event.stopPropagation(); editName('createFolder'); return; }
+    if (!event.target.closest('#manageList')) return;
+    if (command && event.key === 'ArrowUp') { event.preventDefault(); void browse(parent(folder)); }
+    else if (command && event.key === 'ArrowDown') { event.preventDefault(); void open(); }
+    else if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); editName('rename'); }
+    else if (event.key === ' ' && selected?.kind === 'file') { event.preventDefault(); find('managePreview').click(); }
+    else if (command && event.key === 'Backspace') { event.preventDefault(); find('manageTrash').click(); }
+    else if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); const rows = [...find('manageList').querySelectorAll('[data-path]')], index = rows.findIndex(row => row.dataset.path === selected?.path); rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.click(); }
+  });
+  render();
+  return { reset, render, get pending() { return writing; },
+    async show(entry) { reset(); if (entry?.path && valid(entry.path) && (!entry.cwd || entry.cwd === cwd)) { mode = ''; moving = returnLocation = null; folder = entry.kind === 'folder' ? entry.path : parent(entry.path); selected = entry.kind === 'folder' ? null : { ...entry, name: base(entry.path), kind: 'file' }; } await load(); },
+    hide() { generation++; loading = false; dragged = null; },
+  };
 }
 
 // A command-line presentation of the existing bounded executor, not a PTY.

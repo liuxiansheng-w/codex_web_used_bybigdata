@@ -190,6 +190,233 @@ export function indentationColumns(text, tabSize = 2) {
   return result;
 }
 
+const graphemes = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+const textGlyphs = text => graphemes ? Array.from(graphemes.segment(text), part => part.segment) : Array.from(text);
+
+// One replacement spanning the selected rows preserves everything between the
+// columns and gives the browser one native undo transaction per edit.
+export function columnEdit(content, ranges, value = '', action = 'insert') {
+  if (!ranges.length || ranges.some((range, i) => !Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 0 || range.end < range.start || range.end > content.length || i && range.start <= ranges[i - 1].end)) return null;
+  const changes = ranges.map((range, i) => {
+    let { start: from, end: to, pad = 0 } = range;
+    let text = '';
+    if (action === 'insert') { text = ' '.repeat(pad) + (Array.isArray(value) ? value[i] : value); pad = 0; }
+    else if (from === to && action !== 'delete') {
+      if (pad) { if (action === 'backward' || action === 'wordBackward') pad = Math.max(0, pad - 1); }
+      else if (action === 'backward' || action === 'wordBackward') {
+        const line = content.slice(content.lastIndexOf('\n', from - 1) + 1, from);
+        from -= action === 'wordBackward' ? line.match(/(?:\s+|[\p{L}\p{N}_$]+|[^\s\p{L}\p{N}_$]+)$/u)?.[0].length || 0 : textGlyphs(line).at(-1)?.length || 0;
+      } else {
+        const newline = content.indexOf('\n', to), line = content.slice(to, newline < 0 ? content.length : newline);
+        to += action === 'wordForward' ? line.match(/^(?:\s+|[\p{L}\p{N}_$]+|[^\s\p{L}\p{N}_$]+)/u)?.[0].length || 0 : textGlyphs(line)[0]?.length || 0;
+      }
+    }
+    return { from, to, text, pad };
+  });
+  const from = changes[0].from, to = changes.at(-1).to, parts = [], next = [];
+  let cursor = from, delta = 0;
+  for (const change of changes) {
+    parts.push(content.slice(cursor, change.from), change.text); cursor = change.to;
+    const caret = change.from + delta + change.text.length;
+    next.push({ start: caret, end: caret, pad: change.pad });
+    delta += change.text.length - (change.to - change.from);
+  }
+  parts.push(content.slice(cursor, to));
+  return { from, to, text: parts.join(''), ranges: next };
+}
+
+function createColumnSelection({ input, source, available, editable, apply, changed, language }) {
+  const owner = input.ownerDocument, win = owner.defaultView;
+  const layer = owner.createElement('div'); layer.className = 'editor-column-layer'; layer.setAttribute('aria-hidden', 'true'); layer.hidden = true; source.append(layer);
+  let selection = null, drag = null, frame = 0, applying = false, cachedText, starts = [], fontKey = '', context, space = 8;
+  let metrics;
+  const lines = new Map(), widths = new Map();
+  const number = (value, fallback) => Number.isFinite(parseFloat(value)) ? parseFloat(value) : fallback;
+  function measure(glyph) {
+    if (!widths.has(glyph)) { if (widths.size > 512) widths.clear(); widths.set(glyph, (context?.measureText(glyph).width || number(metrics.fontSize, 13) * .6 * (/^[\x00-\x7f]*$/.test(glyph) ? glyph.length : 2)) + number(metrics.letterSpacing, 0)); }
+    return widths.get(glyph);
+  }
+  function prepare() {
+    metrics = win.getComputedStyle(input);
+    const key = [metrics.fontFamily, metrics.fontSize, metrics.fontWeight, metrics.fontStyle, metrics.letterSpacing, metrics.tabSize].join('|');
+    if (fontKey !== key) {
+      fontKey = key; lines.clear(); widths.clear();
+      if (!context && win.CanvasRenderingContext2D) context = owner.createElement('canvas').getContext('2d');
+      if (context) { context.font = `${metrics.fontStyle || 'normal'} ${metrics.fontWeight || 'normal'} ${metrics.fontSize || '13px'} ${metrics.fontFamily || 'monospace'}`; context.fontKerning = 'none'; }
+      space = measure(' ');
+    }
+    if (cachedText !== input.value) {
+      cachedText = input.value; starts = [0]; lines.clear();
+      for (let at = cachedText.indexOf('\n'); at >= 0; at = cachedText.indexOf('\n', at + 1)) starts.push(at + 1);
+    }
+    return { lineHeight: number(metrics.lineHeight, 22), top: number(metrics.paddingTop, 16), left: number(metrics.paddingLeft, 14) };
+  }
+  function lineAt(at) {
+    let lo = 0, hi = starts.length;
+    while (lo + 1 < hi) { const mid = (lo + hi) >>> 1; if (starts[mid] <= at) lo = mid; else hi = mid; }
+    return lo;
+  }
+  function lineMetrics(line) {
+    if (lines.has(line)) return lines.get(line);
+    const text = cachedText.slice(starts[line], line + 1 < starts.length ? starts[line + 1] - 1 : cachedText.length);
+    const offsets = [0], positions = [0], tab = space * Math.max(1, parseInt(metrics.tabSize, 10) || 2);
+    for (const glyph of textGlyphs(text)) {
+      const x = positions.at(-1);
+      offsets.push(offsets.at(-1) + glyph.length); positions.push(glyph === '\t' ? (Math.floor((x + .001) / tab) + 1) * tab : x + measure(glyph));
+    }
+    if (lines.size >= 256) lines.delete(lines.keys().next().value);
+    const result = { offsets, positions }; lines.set(line, result); return result;
+  }
+  function offsetAt(line, x) {
+    const { positions, offsets } = lineMetrics(line);
+    let lo = 0, hi = positions.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (positions[mid] < x) lo = mid + 1; else hi = mid; }
+    if (lo && x - positions[lo - 1] < positions[lo] - x) lo--;
+    return { at: starts[line] + offsets[lo], pad: Math.max(0, Math.round((x - positions.at(-1)) / space)) };
+  }
+  function xAt(at, pad = 0) {
+    const line = lineAt(at), row = lineMetrics(line), index = row.offsets.indexOf(at - starts[line]);
+    return { line, x: (row.positions[Math.max(0, index)] || 0) + pad * space };
+  }
+  function stopDrag() {
+    if (!drag) return;
+    const id = drag.id; drag = null; win.cancelAnimationFrame?.(frame); frame = 0;
+    owner.removeEventListener('pointermove', move, true); owner.removeEventListener('pointerup', finish, true); owner.removeEventListener('pointercancel', cancelDrag, true); win.removeEventListener('blur', cancelDrag);
+    if (input.hasPointerCapture?.(id)) input.releasePointerCapture(id);
+    source.classList.remove('is-column-dragging');
+  }
+  function clear(notify = true) {
+    const had = !!selection; stopDrag(); selection = null; layer.hidden = true; layer.replaceChildren(); source.classList.remove('has-column-selection');
+    if (had && notify) changed();
+  }
+  function valid() {
+    if (applying) return selection;
+    if (selection) {
+      const primary = selection.ranges[selection.primary];
+      if (!available() || selection.text !== input.value || input.selectionStart !== primary.start || input.selectionEnd !== primary.end) clear(false);
+    }
+    return selection;
+  }
+  function nativeSelection() {
+    const primary = selection.ranges[selection.primary];
+    input.setSelectionRange(primary.start, primary.end, selection.backward ? 'backward' : 'forward');
+  }
+  function render() {
+    if (!valid() || applying) return;
+    const size = prepare(), fragment = owner.createDocumentFragment();
+    layer.hidden = false; source.classList.add('has-column-selection');
+    Object.assign(layer.style, { width: `${input.clientWidth}px`, height: `${input.clientHeight}px` });
+    for (const range of selection.ranges) {
+      const line = lineAt(range.start), y = size.top + line * size.lineHeight - input.scrollTop;
+      if (y + size.lineHeight < 0 || y > input.clientHeight) continue;
+      const start = xAt(range.start, range.pad);
+      const end = xAt(range.end, range.tailPad), row = owner.createElement('div'); row.className = 'editor-column-row'; row.dataset.line = String(start.line + 1);
+      Object.assign(row.style, { left: `${size.left + start.x - input.scrollLeft}px`, top: `${y}px`, width: `${Math.max(0, end.x - start.x)}px`, height: `${size.lineHeight}px` });
+      const caret = owner.createElement('i'); caret.className = 'editor-column-caret'; caret.style.left = selection.backward ? '0' : '100%'; row.append(caret); fragment.append(row);
+    }
+    layer.replaceChildren(fragment);
+  }
+  function point(event) {
+    const size = prepare(), rect = input.getBoundingClientRect();
+    return { line: Math.max(0, Math.min(starts.length - 1, Math.floor((event.clientY - rect.top + input.scrollTop - size.top) / size.lineHeight))), x: Math.max(0, event.clientX - rect.left + input.scrollLeft - size.left) };
+  }
+  function selectBox(anchor = drag.anchor, head = point(drag.pointer)) {
+    const ranges = [];
+    for (let line = Math.min(anchor.line, head.line); line <= Math.max(anchor.line, head.line); line++) {
+      const left = offsetAt(line, Math.min(anchor.x, head.x)), right = offsetAt(line, Math.max(anchor.x, head.x));
+      ranges.push({ start: left.at, end: right.at, pad: left.pad, tailPad: right.pad });
+    }
+    const previous = selection;
+    selection = { text: input.value, ranges, anchor, head, primary: head.line < anchor.line ? 0 : ranges.length - 1, backward: head.x < anchor.x };
+    if (previous && previous.text === selection.text && previous.primary === selection.primary && previous.backward === selection.backward && previous.ranges.length === ranges.length && ranges.every((range, i) => ['start', 'end', 'pad', 'tailPad'].every(key => range[key] === previous.ranges[i][key]))) return;
+    nativeSelection(); changed();
+  }
+  function scrollDrag() {
+    if (!drag) return;
+    const rect = input.getBoundingClientRect(), { pointer } = drag;
+    const distance = (at, min, max) => at < min + 12 ? -Math.min(30, min + 12 - at) : at > max - 12 ? Math.min(30, at - max + 12) : 0;
+    const top = input.scrollTop, left = input.scrollLeft;
+    input.scrollTop += distance(pointer.clientY, rect.top, rect.bottom); input.scrollLeft += distance(pointer.clientX, rect.left, rect.right);
+    if (top !== input.scrollTop || left !== input.scrollLeft) selectBox();
+    frame = win.requestAnimationFrame?.(scrollDrag) || 0;
+  }
+  function move(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    event.preventDefault(); drag.pointer = { clientX: event.clientX, clientY: event.clientY }; selectBox();
+  }
+  function finish(event) { if (drag && event.pointerId === drag.id) { move(event); stopDrag(); } }
+  function cancelDrag() { stopDrag(); }
+  input.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.shiftKey || !event.altKey || event.ctrlKey || event.metaKey || !available() || event.pointerType && event.pointerType !== 'mouse') { if (event.button === 0) clear(); return; }
+    event.preventDefault(); clear(false); input.focus({ preventScroll: true });
+    drag = { id: event.pointerId, anchor: point(event), pointer: { clientX: event.clientX, clientY: event.clientY } };
+    source.classList.add('is-column-dragging');
+    try { input.setPointerCapture?.(event.pointerId); } catch { /* Document listeners still finish drags outside the input. */ }
+    owner.addEventListener('pointermove', move, true); owner.addEventListener('pointerup', finish, true); owner.addEventListener('pointercancel', cancelDrag, true); win.addEventListener('blur', cancelDrag);
+    selectBox(); frame = win.requestAnimationFrame?.(scrollDrag) || 0;
+  });
+  function edit(value = '', action = 'insert') {
+    if (!valid() || !editable()) return;
+    const previous = selection, result = columnEdit(input.value, previous.ranges, value, action); if (!result) return;
+    const primary = result.ranges[previous.primary];
+    let ok; applying = true;
+    try { ok = result.text === input.value.slice(result.from, result.to) || apply({ ...result, start: primary.start, end: primary.end }); }
+    finally { applying = false; }
+    if (ok) { selection = { ...previous, text: input.value, ranges: result.ranges, anchor: null, head: null }; nativeSelection(); changed(); }
+  }
+  input.addEventListener('beforeinput', event => {
+    if (applying || event.isComposing || !valid()) return;
+    if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') { clear(); return; }
+    if (!event.cancelable || !editable()) return;
+    const action = { deleteContentBackward: 'backward', deleteContentForward: 'forward', deleteWordBackward: 'wordBackward', deleteWordForward: 'wordForward', deleteByCut: 'delete' }[event.inputType];
+    if (action) { event.preventDefault(); edit('', action); }
+    else if (['insertText', 'insertReplacementText'].includes(event.inputType) && event.data !== null) { event.preventDefault(); edit(event.data); }
+    else if (['insertLineBreak', 'insertParagraph'].includes(event.inputType)) { event.preventDefault(); edit('\n'); }
+    else clear();
+  });
+  input.addEventListener('input', () => { if (!applying) clear(false); }, true);
+  input.addEventListener('compositionstart', () => clear());
+  input.addEventListener('focus', () => source.classList.add('column-focused'));
+  input.addEventListener('blur', () => { source.classList.remove('column-focused'); stopDrag(); });
+  for (const type of ['copy', 'cut']) input.addEventListener(type, event => {
+    if (!valid() || !event.clipboardData || !selection.ranges.some(range => range.end > range.start)) return;
+    event.preventDefault(); event.clipboardData.setData('text/plain', selection.ranges.map(range => input.value.slice(range.start, range.end)).join('\n'));
+    if (type === 'cut') edit('', 'delete');
+  });
+  input.addEventListener('paste', event => {
+    if (!valid() || !editable() || !event.clipboardData) return;
+    event.preventDefault(); const value = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n'), rows = value.split('\n');
+    if (!value) return;
+    edit(rows.length === selection.ranges.length ? rows : value);
+  });
+  return {
+    clear, render, destroy: stopDrag,
+    get ranges() { return valid()?.ranges; },
+    keydown(event) {
+      if (!valid()) return false;
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); clear(); return true; }
+      if (event.shiftKey && event.altKey && !event.ctrlKey && !event.metaKey && /^Arrow(Up|Down|Left|Right)$/.test(event.key)) {
+        event.preventDefault(); prepare();
+        const first = selection.ranges[0], last = selection.ranges.at(-1), primary = selection.ranges[selection.primary];
+        const anchor = selection.anchor || xAt(selection.primary === 0 ? last.start : first.start, selection.primary === 0 ? last.pad : first.pad);
+        const head = { ...(selection.head || xAt(selection.backward ? primary.start : primary.end, primary.pad)) };
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') head.line = Math.max(0, Math.min(starts.length - 1, head.line + (event.key === 'ArrowUp' ? -1 : 1)));
+        else head.x = Math.max(0, head.x + (event.key === 'ArrowLeft' ? -space : space));
+        selectBox(anchor, head); return true;
+      }
+      if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && editable()) { event.preventDefault(); edit(' '.repeat(language() === 'python' ? 4 : 2)); return true; }
+      if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey && editable()) {
+        event.preventDefault(); edit(selection.ranges.map(range => { const line = input.value.slice(input.value.lastIndexOf('\n', range.start - 1) + 1, range.start); return '\n' + line.match(/^[\t ]*/)[0] + (language() === 'python' && line.trimEnd().endsWith(':') ? '    ' : ''); })); return true;
+      }
+      if (['Backspace', 'Delete'].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey && editable()) { event.preventDefault(); edit('', event.key === 'Backspace' ? 'backward' : 'forward'); return true; }
+      if (event.key === 'Tab' && event.shiftKey || (event.metaKey || event.ctrlKey) && (event.code === 'Slash' || event.key === '/')) {
+        const first = selection.ranges[0].start, last = selection.ranges.at(-1).end; clear(false); input.setSelectionRange(first, last); changed();
+      } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key) || (event.metaKey || event.ctrlKey) && /^[azy]$/i.test(event.key)) clear();
+      return false;
+    },
+  };
+}
+
 export function createFileEditor({ api, onAttach, onChange = () => {}, onSessionError = () => {}, onReveal = () => {} }) {
   const documents = [], views = new Map(), projectViews = new Map();
   const emptyView = { panel: $('editorEmptyPanel'), input: $('fileEditorText'), numbers: $('editorLineNumbers'), highlight: $('editorHighlight') };
@@ -246,7 +473,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   document.addEventListener('pointerdown', event => { if (!tabMenu.hidden && !tabMenu.contains(event.target) && !menuOpener?.contains(event.target)) closeTabMenu(); });
   window.addEventListener('resize', () => closeTabMenu());
 
-  const matches = expected => !!active?.file && !markdownPreview(active) && active.id === expected?.id && active.file.cwd === expected.cwd && active.path === expected.path && active.view.input.value === expected.content && active.view.input.selectionStart === expected.start && active.view.input.selectionEnd === expected.end && writable(active) && !active.loading && !active.composing && !uiLocked() && visible();
+  const matches = expected => !!active?.file && !markdownPreview(active) && !active.view.columns?.ranges && active.id === expected?.id && active.file.cwd === expected.cwd && active.path === expected.path && active.view.input.value === expected.content && active.view.input.selectionStart === expected.start && active.view.input.selectionEnd === expected.end && writable(active) && !active.loading && !active.composing && !uiLocked() && visible();
 
   function persistSession() {
     window.clearTimeout?.(sessionTimer);
@@ -281,7 +508,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   function setMarkdownMode(mode, { focus = false } = {}) {
     if (!active?.markdown || !['preview', 'source'].includes(mode) || uiLocked() || active.loading) return false;
     if (mode !== active.markdown.mode) {
-      rememberSource(active); active.markdown.mode = mode; active.view.ghost = null;
+      rememberSource(active); active.view.columns?.clear(false); active.markdown.mode = mode; active.view.ghost = null;
       if (mode === 'preview') { searchQuery = ''; $('editorFindBar').hidden = true; $('editorFindToggle').setAttribute('aria-expanded', 'false'); }
       update();
       if (mode === 'source') { active.view.input.scrollTop = active.position?.top || 0; active.view.input.scrollLeft = active.position?.left || 0; syncScroll(); }
@@ -298,7 +525,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   }
   function selectText(start, end = start) {
     if (!active) return;
-    setMarkdownMode('source'); active.view.input.focus(); active.view.input.setSelectionRange(start, end);
+    active.view.columns?.clear(false); setMarkdownMode('source'); active.view.input.focus(); active.view.input.setSelectionRange(start, end);
     active.view.input.scrollTop = Math.max(0, active.view.input.value.slice(0, start).split('\n').length - 4) * 22; update();
   }
   function ensureLoaded(doc) {
@@ -308,9 +535,9 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   }
 
   function applyKeyboardEdit(doc, edit, { reveal = false } = {}) {
-    if (!edit || !writable(doc) || doc.loading || doc.composing || uiLocked()) return;
+    if (!edit || !writable(doc) || doc.loading || doc.composing || uiLocked()) return false;
     const { input } = doc.view, direction = input.selectionDirection, top = input.scrollTop, left = input.scrollLeft;
-    if (input.value.length - (edit.to - edit.from) + edit.text.length > input.maxLength) { $('editorToolStatus').textContent = '修改后超过文件编辑大小上限。'; return; }
+    if (input.value.length - (edit.to - edit.from) + edit.text.length > input.maxLength) { $('editorToolStatus').textContent = '修改后超过文件编辑大小上限。'; return false; }
     doc.view.ghost = null;
     let inserted = false, notified = false;
     const changed = () => { notified = true; }; input.addEventListener('input', changed);
@@ -320,7 +547,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     if (!inserted) input.setRangeText(edit.text, edit.from, edit.to, 'end');
     input.setSelectionRange(edit.start, edit.end, direction); input.scrollTop = top; input.scrollLeft = left;
     if (!notified) input.dispatchEvent(new input.ownerDocument.defaultView.Event('input', { bubbles: true }));
-    update(); if (reveal) revealCaret(doc);
+    update(); if (reveal) revealCaret(doc); return true;
   }
 
   function setCurrentIds(view) {
@@ -335,6 +562,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     highlight.scrollTop = input.scrollTop; highlight.scrollLeft = input.scrollLeft;
     numbers.scrollTop = input.scrollTop;
     renderIndentGuides(doc);
+    doc?.view.columns?.render();
   }
   function renderIndentGuides(doc) {
     const view = doc?.view; if (!view?.guides || doc.preview || markdownPreview(doc)) return;
@@ -445,7 +673,8 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       view.numbers.textContent = labels.join('\n');
     }
     const before = text.slice(0, view.input.selectionStart || 0).split('\n');
-    $('editorCursor').textContent = `行 ${before.length}，列 ${before.at(-1).length + 1}`;
+    const columns = view.columns?.ranges;
+    $('editorCursor').textContent = `行 ${before.length}，列 ${before.at(-1).length + 1}${columns ? ` · 列选择 ${columns.length} 行 · Esc 退出` : ''}`;
     syncScroll(doc);
   }
   function update({ restoring = false } = {}) {
@@ -518,6 +747,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     if (active !== doc) {
       closeTabMenu();
       if (active) {
+        active.view.columns?.clear(false);
         rememberSource(active);
         active.view.panel.hidden = true;
       }
@@ -533,7 +763,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     return true;
   }
   function showEmpty() {
-    if (active) active.view.panel.hidden = true;
+    if (active) { active.view.columns?.clear(false); active.view.panel.hidden = true; }
     active = null; emptyView.panel.hidden = false; setCurrentIds(emptyView);
     $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); update();
     $('prompt').focus();
@@ -541,7 +771,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   function removeDocument(doc) {
     if (menuTarget === doc) closeTabMenu();
     const index = documents.indexOf(doc); if (index < 0) return;
-    doc.readSequence++; doc.viewer?.dispose(); doc.markdownViewer?.dispose(); if (doc.previewUrl) URL.revokeObjectURL(doc.previewUrl); observer?.unobserve(doc.view.input); doc.view.panel.remove();
+    doc.readSequence++; doc.view.columns?.destroy(); doc.viewer?.dispose(); doc.markdownViewer?.dispose(); if (doc.previewUrl) URL.revokeObjectURL(doc.previewUrl); observer?.unobserve(doc.view.input); doc.view.panel.remove();
     views.get(doc.id).row.remove(); views.delete(doc.id); documents.splice(index, 1);
     if (active === doc) {
       // Drop the old ids before giving them to the neighboring document.
@@ -567,6 +797,13 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     for (const [name, value] of [['autocapitalize', 'off'], ['autocomplete', 'off'], ['autocorrect', 'off']]) input.setAttribute(name, value);
     source.append(guides, rendered, input); panel.append(numbers, source); $('editorBuffers').append(panel);
     doc.view = { panel, numbers, source, highlight: rendered, input, guides, guideContent, guideRows: new Map() }; observer?.observe(input);
+    if (!doc.preview) doc.view.columns = createColumnSelection({ input, source,
+      available: () => active === doc && visible() && !markdownPreview(doc) && !!doc.file && !doc.loading && !doc.composing && !uiLocked() && !document.querySelector('dialog[open]'),
+      editable: () => writable(doc) && !input.readOnly && !doc.composing && !uiLocked(),
+      language: () => doc.language === 'auto' ? detectLanguage(doc.path) : doc.language,
+      apply: edit => applyKeyboardEdit(doc, edit, { reveal: true }),
+      changed: () => { doc.view.ghost = null; update(); },
+    });
     if (doc.markdown) {
       const reader = document.createElement('div'), article = document.createElement('article');
       reader.className = 'editor-markdown-reader'; reader.tabIndex = 0; reader.setAttribute('role', 'region'); reader.setAttribute('aria-label', `Markdown 预览：${doc.path}`);
@@ -594,6 +831,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     input.addEventListener('scroll', () => { if (!doc.loading && !doc.view.panel.hidden) rememberSource(doc); if (active === doc) { if (searchQuery) highlight(doc); else syncScroll(doc); } queueSession(); });
     input.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.isComposing || doc.composing || document.querySelector('dialog[open]')) return;
+      if (doc.view.columns?.keydown(event)) return;
       if (event.key === 'Escape') { doc.navigateByTab = true; $('editorToolStatus').textContent = '再按 Tab 或 Shift + Tab 移出编辑区'; return; }
       const navigate = doc.navigateByTab; doc.navigateByTab = false;
       if (navigate && event.key === 'Tab') return;
@@ -899,8 +1137,8 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     open: openFile, close, closeTab, save: () => save(), saveAll, refresh, setMarkdownMode,
     inspect(entry) { const doc = documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd)); return doc?.file ? { ...doc.file, content: doc.view.input.value, dirty: dirty(doc), saving: doc.saving, loading: doc.loading } : null; },
     saveFile(entry) { return save(documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd))); },
-    hide() { rememberSource(active); $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); onChange(); queueSession(); },
-    get current() { return active?.file ? { ...active.file, id: active.id, content: active.view.input.value, dirty: dirty(active), start: active.view.input.selectionStart, end: active.view.input.selectionEnd, composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
+    hide() { active?.view.columns?.clear(false); rememberSource(active); $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); onChange(); queueSession(); },
+    get current() { return active?.file ? { ...active.file, id: active.id, content: active.view.input.value, dirty: dirty(active), start: active.view.input.selectionStart, end: active.view.input.selectionEnd, columnSelection: !!active.view.columns?.ranges, selections: active.view.columns?.ranges?.map(({ start, end }) => ({ start, end })), composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
     previewCompletion(text = '', snapshot) {
       if (text && (!matches(snapshot) || snapshot.language !== 'sql' || snapshot.content.length > 200000)) return false;
       for (const doc of documents) { if (doc.view.ghost) { doc.view.ghost = null; doc.view.lastText = null; } }
@@ -927,6 +1165,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       return true;
     },
     setSearch(query, direction = 0) {
+      active?.view.columns?.clear(false);
       if (query) setMarkdownMode('source');
       searchQuery = query;
       const found = searchState(active);
@@ -957,7 +1196,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       if (cwd === project) return;
       closeTabMenu();
       if (project) projectViews.set(project, { id: active?.id, visible: visible() });
-      if (active) { rememberSource(active); active.view.panel.hidden = true; }
+      if (active) { active.view.columns?.clear(false); rememberSource(active); active.view.panel.hidden = true; }
       project = cwd; active = null;
       const saved = projectViews.get(cwd), tabs = projectDocuments(), next = tabs.find(doc => doc.id === saved?.id) || tabs.at(-1);
       if (next) { activate(next, { focus: false, restoring: !!next.sessionPosition }); if (saved?.visible === false) { $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); onChange(); } }

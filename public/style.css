@@ -718,6 +718,13 @@ dialog .field-hint { color: var(--muted); font-size: 11px; line-height: 1.8; }
 .editor-indent-guides { position: absolute; inset: 0; overflow: hidden; pointer-events: none; user-select: none; color: var(--muted); opacity: .32; font: 13px/22px var(--mono); font-variant-ligatures: none; }
 .editor-indent-content { position: absolute; pointer-events: none; }
 .editor-indent-row { position: absolute; left: 0; background-image: repeating-linear-gradient(to right, currentColor 0, currentColor 1px, transparent 1px, transparent var(--editor-indent-step, 2ch)); }
+.editor-column-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; user-select: none; z-index: 1; }
+.editor-column-row { position: absolute; background: var(--module-selection, #579aca66); }
+.editor-column-caret { display: none; position: absolute; top: 0; height: 100%; border-left: 1px solid var(--ink); }
+.column-focused .editor-column-caret { display: block; }
+#fileEditor .editor-source.has-column-selection #fileEditorText { caret-color: transparent; }
+#fileEditor .editor-source.has-column-selection #fileEditorText::selection { background: transparent; }
+.editor-source.is-column-dragging #fileEditorText { cursor: crosshair; }
 #fileEditorText { display: block; position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; min-height: 0; resize: none; background: transparent; color: #d9e6f2; overflow: auto; outline: none; scrollbar-width: thin; scrollbar-color: #3b4c64 transparent; caret-color: #d3faff; }
 #editorHighlight { position: absolute; inset: 0; pointer-events: none; overflow: hidden; color: #d9e6f2; }
 .has-highlight #fileEditorText { color: transparent; -webkit-text-fill-color: transparent; }
@@ -825,6 +832,8 @@ dialog .field-hint { color: var(--muted); font-size: 11px; line-height: 1.8; }
 .editor-resize[data-edge=se]::after { content: ''; position: absolute; right: 8px; bottom: 8px; width: 7px; height: 7px; border-right: 2px solid #688fa0; border-bottom: 2px solid #688fa0; }
 .is-maximized .editor-resize { display: none; }
 @media (forced-colors: active) {
+  .editor-column-row { forced-color-adjust: none; background: Highlight; }
+  .editor-column-caret { border-color: CanvasText; }
   .has-highlight #fileEditorText { color: CanvasText; -webkit-text-fill-color: CanvasText; caret-color: CanvasText; }
   #editorHighlight { visibility: hidden; }
 }
@@ -2851,6 +2860,41 @@ dialog.git-submit-dialog { width: min(1180px, 94vw); max-width: 94vw; max-height
 .toolbox-panel.is-workspace .toolbox-home-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .toolbox-panel.is-workspace .toolbox-main { padding: 14px; }
 .file-name:has(.file-name-prefix) { display: flex; }
+.file-manager { display: flex; flex: 1; flex-direction: column; min-height: 420px; gap: 10px; }
+.file-manager > :not(.file-manager-list) { flex-shrink: 0; }
+.file-manager[hidden], .file-manager [hidden] { display: none; }
+.file-manager-heading, .file-manager-toolbar, .file-manager-breadcrumbs { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.file-manager-heading h3 { flex: 1; margin: 0; }
+.file-manager-heading button { width: 30px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); }
+.file-manager-breadcrumbs { gap: 3px; max-height: 64px; overflow: auto; color: var(--subtle); }
+.file-manager-breadcrumbs button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 5px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+.file-manager-breadcrumbs button[aria-current] { color: var(--ink); font-weight: 600; background: var(--accent-soft); border-radius: 5px; }
+.file-manager-toolbar > button, .file-manager-name-form button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 12px; }
+.file-manager-notice { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.file-manager-notice:empty { display: none; }
+.file-manager-notice.is-error { color: var(--danger); }
+.file-manager-list { flex: 1; min-height: 150px; max-height: 46vh; overflow: auto; padding: 5px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg); }
+.file-manager-list > .field-hint { padding: 15px 8px; }
+.file-manager-list > .file-manager-item { display: flex; align-items: center; width: 100%; gap: 9px; min-width: 0; min-height: 35px; padding: 7px 8px; border: 0; border-radius: 6px; text-align: left; color: var(--ink); background: transparent; font-size: 12px; }
+.file-manager-list > .file-manager-item:hover { background: var(--surface-hover); }
+.file-manager-list > .file-manager-item[aria-selected=true], .file-manager-list > .file-manager-item.is-drop-target { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.file-manager-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-manager-icon { flex-shrink: 0; display: flex; width: 19px; height: 19px; color: var(--accent); }
+.file-manager-icon svg { width: 100%; height: 100%; }
+.file-manager-chevron { color: var(--subtle); }
+.file-manager-selected { display: flex; flex-direction: column; gap: 7px; padding-top: 5px; }
+.file-manager-selected > strong { overflow-wrap: anywhere; line-height: 1.5; font-size: 13px; }
+.file-manager-selected > span { color: var(--subtle); font-size: 11px; }
+.file-manager-details { font-size: 12px; color: var(--muted); }
+.file-manager-details > summary { cursor: pointer; padding: 4px 0; }
+.file-manager-details code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-block: 7px; font-size: 11px; }
+.file-manager-name-form, .file-manager-move { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
+.file-manager-name-form label { margin-top: 0; overflow-wrap: anywhere; }
+.file-manager-name-form .field-hint { margin: 6px 0; }
+.file-manager-move strong { font-size: 13px; overflow-wrap: anywhere; }
+.file-manager-move p { margin: 6px 0; color: var(--muted); }
+.file-manager-move-footer { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; font-size: 12px; overflow-wrap: anywhere; }
+.workbench-dialog.files-view .workbench-main { display: flex; flex-direction: column; }
 .file-name-prefix { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-name-suffix { flex: 0 0 auto; white-space: nowrap; }
 .sql-result-tab > [role=tab] { display: flex; align-items: center; }

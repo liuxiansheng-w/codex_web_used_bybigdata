@@ -928,8 +928,9 @@ test('chat shows a file summary without restoring the result dashboard, and revi
   $('quickGit').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name')); assert.equal($('turnChanges').hidden, true);
   events.emit('thread', { ...thread, revision: 4, latestTurnId: 'next', completion: 'failed', items: [{ id: 'new', turnId: 'next', type: 'agentMessage', text: '未完成' }] });
   assert.equal($('currentThreadStatus').textContent, '需检查'); events.emit('error'); assert.equal($('currentThreadStatus').textContent, '待核实');
-  document.querySelector('[data-tab=files]').click(); input('managePath', 'nested/example.py');
-  assert.equal($('manageCreateParent').textContent, '新建位置：nested');
+  document.querySelector('[data-tab=files]').click(); await settle(() => !$('manageCreateFile').disabled);
+  $('manageCreateFile').click(); assert.equal($('manageNameForm').hidden, false);
+  assert.equal($('manageCreateParent').textContent, '位置：项目根目录'); $('manageNameCancel').click();
 });
 
 test('live editing popup follows native snapshots in tabs without file reads, draft changes or stale conversation content', async t => {

@@ -54,6 +54,18 @@ test('editor snapshots include current unsaved selection, bound large buffers an
   file.preview = false; editor.visible = false; assert.equal(editorContextSnapshot(editor, '/project'), null);
 });
 
+test('column selection context contains only the selected columns and no full-file fallback for multiple carets', () => {
+  const content = 'left_abc_right\nleft_def_right';
+  const file = { cwd: '/project', path: 'demo.sql', id: 'f', content, start: 19, end: 22, columnSelection: true,
+    selections: ['abc', 'def'].map(value => ({ start: content.indexOf(value), end: content.indexOf(value) + value.length })) };
+  const editor = { current: file, visible: true, tabs: [{ ...file, dirty: true }] };
+  const result = editorContextSnapshot(editor, '/project');
+  assert.match(result.label, /列选区/); assert.match(result.text, /矩形列选区，按行拼接/);
+  assert.ok(result.text.endsWith('abc\ndef')); assert.doesNotMatch(result.text, /left_|_right/);
+  file.selections = file.selections.map(range => ({ start: range.start, end: range.start }));
+  assert.equal(editorContextSnapshot(editor, '/project'), null);
+});
+
 test('editor context toggles work without storage and Cosmos remains opt-in independently', t => {
   const dom = new JSDOM('<button id="editorContextToggle"></button><details id="editorContextPreview"><summary id="editorContextSummary"></summary><pre id="editorContextText"></pre></details>');
   const previous = globalThis.document; globalThis.document = dom.window.document;

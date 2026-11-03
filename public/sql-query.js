@@ -373,9 +373,9 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     if (isSql) {
       const selected = file.content.slice(file.start, file.end).trim();
       const verb = isExecution({ sql: selected || file.content }) ? '执行' : '查询';
-      $('sqlRun').disabled = !!running || !!pending || editor.locked || editor.tabs.find(tab => tab.id === file.id)?.loading || !file.content.trim();
+      $('sqlRun').disabled = !!running || !!pending || editor.locked || !!file.columnSelection || editor.tabs.find(tab => tab.id === file.id)?.loading || !file.content.trim();
       $('sqlRun').textContent = running?.id === file.id ? `${isExecution(running) ? '执行' : '查询'}中…` : `${verb}${selected ? '选区' : '全文'}`;
-      $('sqlScope').textContent = running && running.id !== file.id ? '其他文件正在查询' : selected ? '执行选中的 SQL' : '执行当前编辑内容 · ⌘ / Ctrl + Enter';
+      $('sqlScope').textContent = file.columnSelection ? '列选择仅用于编辑 · 按 Esc 后选择完整 SQL 执行' : running && running.id !== file.id ? '其他文件正在查询' : selected ? '执行选中的 SQL' : '执行当前编辑内容 · ⌘ / Ctrl + Enter';
       $('sqlEngine').disabled = !!running || !!pending; $('sqlEngine').value = stateFor(file).engine;
       if (!checked) void checkConnection();
     }
@@ -484,7 +484,7 @@ export function createSqlQuery({ editor, api, onContext, onChartContext = onCont
     finally { running = null; queuePersist(); sync(); if (projectKey() === snapshot.cwd) render(); }
   }
   function start() {
-    const file = editor.current; if (!file || file.language !== 'sql' || running || pending || editor.locked) return;
+    const file = editor.current; if (!file || file.language !== 'sql' || file.columnSelection || running || pending || editor.locked) return;
     const sql = file.content.slice(file.start, file.end).trim() || file.content.trim(); if (!sql) return;
     requestParameters({ ...file, sql, engine: stateFor(file).engine });
   }

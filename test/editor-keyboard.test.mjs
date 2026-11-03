@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
-import { createFileEditor, lineEdit, indentationColumns } from '../public/file-editor.js';
+import { createFileEditor, lineEdit, indentationColumns, columnEdit } from '../public/file-editor.js';
 
 test('indent guides use tab stops and continue through empty lines only within a shared block', () => {
   assert.deepEqual([...indentationColumns('SELECT\n  nested\n    value\n\n    other\nFROM demo')], [0, 2, 4, 4, 4, 0]);
@@ -60,6 +60,110 @@ async function setup(t) {
   };
   return {editor,$,key,calls};
 }
+
+test('column edits preserve intervening text, distribute paste rows and never delete line boundaries or split graphemes', () => {
+  const source = 'xxabcYY\nzzdefZZ\nqqghiWW', ranges = [2, 10, 18].map(start => ({ start, end: start + 3 }));
+  let edit = columnEdit(source, ranges, 'Q');
+  assert.equal(apply(source, edit), 'xxQYY\nzzQZZ\nqqQWW');
+  assert.deepEqual(edit.ranges.map(range => range.start), [3, 9, 15]);
+  assert.equal(apply(source, columnEdit(source, ranges, ['A', 'B', 'C'])), 'xxAYY\nzzBZZ\nqqCWW');
+  const unicode = 'a👩‍💻Z\nb中Z', carets = [unicode.indexOf('Z'), unicode.lastIndexOf('Z')].map(start => ({ start, end: start }));
+  assert.equal(apply(unicode, columnEdit(unicode, carets, '', 'backward')), 'aZ\nbZ');
+  assert.equal(apply('a\nb', columnEdit('a\nb', [{ start: 0, end: 0 }, { start: 2, end: 2 }], '', 'backward')), 'a\nb');
+  assert.equal(apply('a\nb', columnEdit('a\nb', [{ start: 1, end: 1 }, { start: 3, end: 3 }], '', 'forward')), 'a\nb');
+  assert.equal(apply('a\nlong', columnEdit('a\nlong', [{ start: 1, end: 1, pad: 3 }, { start: 6, end: 6 }], 'X')), 'a   X\nlongX');
+  edit = columnEdit('a\nb', [{ start: 1, end: 1, pad: 3 }, { start: 3, end: 3 }], '', 'backward');
+  assert.equal(apply('a\nb', edit), 'a\n'); assert.equal(edit.ranges[0].pad, 2);
+});
+
+function columnFixture({ $, editor }, source) {
+  const input = $('fileEditorText');
+  Object.assign(input.style, { fontFamily: 'monospace', fontSize: '10px', lineHeight: '22px', paddingTop: '16px', paddingLeft: '14px', tabSize: '4' });
+  Object.defineProperty(input, 'clientWidth', { configurable: true, value: 640 });
+  Object.defineProperty(input, 'clientHeight', { configurable: true, value: 220 });
+  input.getBoundingClientRect = () => ({ left: 100, top: 60, right: 740, bottom: 280, width: 640, height: 220 });
+  input.value = source; input.setSelectionRange(0, 0); input.dispatchEvent(new window.Event('input', { bubbles: true })); input.focus();
+  const pointer = (type, line, column, options = {}) => {
+    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 114 + column * 6 - input.scrollLeft, clientY: 87 + line * 22 - input.scrollTop, shiftKey: true, altKey: true, ...options });
+    Object.defineProperties(event, { pointerId: { value: 7 }, pointerType: { value: 'mouse' } });
+    (type === 'pointerdown' ? input : document).dispatchEvent(event); return event;
+  };
+  const drag = (from, to) => { pointer('pointerdown', ...from); pointer('pointermove', ...to); pointer('pointerup', ...to); };
+  const textInput = value => {
+    const event = new window.InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: value }); input.dispatchEvent(event); return event;
+  };
+  const clipboard = (type, text = '') => {
+    const values = new Map([['text/plain', text]]), event = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: { getData: key => values.get(key) || '', setData: (key, value) => values.set(key, value) } });
+    input.dispatchEvent(event); return { event, text: values.get('text/plain') };
+  };
+  return { input, pointer, drag, textInput, clipboard, selected: () => editor.current.selections?.map(range => input.value.slice(range.start, range.end)) };
+}
+
+test('Shift+Option mouse drag selects actual columns and copies, replaces and deletes all rows without saving', async t => {
+  const state = await setup(t), { editor, $, key, calls } = state;
+  const { input, pointer, drag, textInput, clipboard, selected } = columnFixture(state, 'xxabcYY\nzzdefZZ\nqqghiWW');
+  pointer('pointerdown', 0, 2); pointer('pointerup', 0, 2);
+  for (const name of ['ArrowDown', 'ArrowDown', 'ArrowRight', 'ArrowRight', 'ArrowRight']) key(name, { altKey: true, shiftKey: true });
+  assert.deepEqual(selected(), ['abc', 'def', 'ghi']); key('Escape');
+  drag([0, 2], [2, 5]);
+  assert.equal(editor.current.columnSelection, true); assert.deepEqual(selected(), ['abc', 'def', 'ghi']);
+  assert.match($('editorCursor').textContent, /列选择 3 行/);
+  assert.equal(clipboard('copy').text, 'abc\ndef\nghi');
+  clipboard('paste', ''); assert.equal(input.value, 'xxabcYY\nzzdefZZ\nqqghiWW', 'non-text and empty clipboard contents cannot erase the selected columns');
+  input.maxLength = input.value.length + 1; textInput('too-long');
+  assert.equal(input.value, 'xxabcYY\nzzdefZZ\nqqghiWW'); assert.equal(editor.current.columnSelection, true); assert.match($('editorToolStatus').textContent, /大小上限/); input.maxLength = 20 * 1024 * 1024;
+  assert.equal(textInput('Q').defaultPrevented, true); assert.equal(input.value, 'xxQYY\nzzQZZ\nqqQWW');
+  assert.equal(editor.current.columnSelection, true); assert.deepEqual(selected(), ['', '', '']);
+  key('Backspace'); assert.equal(input.value, 'xxYY\nzzZZ\nqqWW');
+  assert.equal(clipboard('paste', 'A\r\nB\r\nC').event.defaultPrevented, true); assert.equal(input.value, 'xxAYY\nzzBZZ\nqqCWW');
+  assert.equal(key('Escape').defaultPrevented, true); assert.equal(editor.current.columnSelection, false);
+  assert.equal(input.parentElement.querySelector('.editor-column-layer').hidden, true); assert.equal(calls.length, 1);
+});
+
+test('column drag supports tabs, wide characters, reversed drags and one native undo command per edit', async t => {
+  const state = await setup(t), { editor, $ } = state;
+  const { input, drag, clipboard, textInput, selected } = columnFixture(state, '\t中ab\n    中xy');
+  drag([1, 8], [0, 6]); assert.deepEqual(selected(), ['ab', 'xy']); assert.equal(editor.current.start, 2);
+  assert.equal(clipboard('copy').text, 'ab\nxy');
+  const commands = [];
+  document.execCommand = (command, ui, text) => {
+    commands.push({ command, text }); input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
+    input.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText' })); return true;
+  };
+  textInput('z'); assert.equal(input.value, '\t中z\n    中z'); assert.equal(commands.length, 1);
+  assert.equal(commands[0].command, 'insertText'); assert.equal(commands[0].text, 'z\n    中z');
+  assert.equal($('editorLineNumbers').textContent, '1\n2');
+});
+
+test('column selections render only visible rows and remain aligned after scrolling', async t => {
+  const state = await setup(t), { editor, $ } = state;
+  const { input, drag } = columnFixture(state, Array(150).fill('xxabcYY').join('\n'));
+  drag([0, 2], [149, 5]); assert.equal(editor.current.selections.length, 150);
+  input.scrollTop = 50 * 22; input.scrollLeft = 10; input.dispatchEvent(new window.Event('scroll'));
+  const layer = input.parentElement.querySelector('.editor-column-layer'), rows = [...layer.children];
+  assert.ok(rows.length <= 12); assert.equal(layer.getAttribute('aria-hidden'), 'true');
+  assert.ok(rows.every(row => Number(row.dataset.line) >= 50 && Number(row.dataset.line) <= 60));
+  assert.ok(rows.every(row => row.style.left === '16px' && row.style.width === '18px'));
+  assert.ok(rows.every(row => row.style.top === `${16 + (Number(row.dataset.line) - 1) * 22 - 1100}px`));
+  assert.match($('editorCursor').textContent, /150 行/);
+});
+
+test('ordinary mouse selection, IME, readonly documents and file changes keep column edits isolated', async t => {
+  const state = await setup(t), { editor, $, key, calls } = state;
+  let fixture = columnFixture(state, 'xxabcYY\nzzdefZZ');
+  assert.equal(fixture.pointer('pointerdown', 0, 2, { altKey: false }).defaultPrevented, false);
+  assert.equal(editor.current.columnSelection, false);
+  fixture.drag([0, 2], [1, 5]); fixture.input.dispatchEvent(new window.CompositionEvent('compositionstart'));
+  assert.equal(editor.current.columnSelection, false); assert.equal(editor.current.composing, true); key('Backspace', { isComposing: true });
+  assert.equal(fixture.input.value, 'xxabcYY\nzzdefZZ'); fixture.input.dispatchEvent(new window.CompositionEvent('compositionend'));
+  await editor.open({ cwd: '/project', path: 'readonly.sql' }); fixture = columnFixture(state, 'xxabcYY\nzzdefZZ');
+  fixture.drag([0, 2], [1, 5]); fixture.textInput('Q'); fixture.clipboard('cut');
+  assert.equal(fixture.input.value, 'xxabcYY\nzzdefZZ'); assert.equal(fixture.clipboard('copy').text, 'abc\ndef');
+  fixture.pointer('pointerdown', 0, 2); await editor.open({ cwd: '/project', path: 'other.sql' });
+  const other = $('fileEditorText'), before = other.value; fixture.pointer('pointermove', 1, 5); fixture.pointer('pointerup', 1, 5);
+  assert.equal(editor.current.columnSelection, false); assert.equal(other.value, before); assert.equal(calls.filter(call => call.body).length, 0);
+});
 
 test('indent guides paint only the viewport and track both scroll axes without changing code or selection', async t => {
   const { editor, $, calls } = await setup(t), input = $('fileEditorText');

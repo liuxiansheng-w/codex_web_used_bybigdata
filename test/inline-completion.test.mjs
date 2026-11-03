@@ -39,6 +39,23 @@ test('typing se suggests SELECT and accepting the word schedules a logical conti
   assert.equal(calls.some(call => /save|sql\/query/.test(call.route)), false);
 });
 
+test('column mouse selection cancels pending AI and does not request or accept single-cursor completions', async t => {
+  const { $, type, key, editor, completion, completions } = await setup(t);
+  type('SELECT a\nSELECT b'); await pause(25); assert.equal(completions.length, 1);
+  const input = $('fileEditorText');
+  Object.assign(input.style, { fontSize: '10px', fontFamily: 'monospace', lineHeight: '22px', paddingTop: '0px', paddingLeft: '0px' });
+  input.getBoundingClientRect = () => ({ left: 0, top: 0, right: 640, bottom: 220 });
+  for (const [type, x, y] of [['pointerdown', 42, 11], ['pointermove', 48, 33], ['pointerup', 48, 33]]) {
+    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y, shiftKey: true, altKey: true });
+    Object.defineProperties(event, { pointerId: { value: 7 }, pointerType: { value: 'mouse' } });
+    (type === 'pointerdown' ? input : document).dispatchEvent(event);
+  }
+  assert.equal(editor.current.columnSelection, true); assert.equal(completions[0].signal.aborted, true);
+  completion.showWords(true); await completion.suggest(true); await pause(25);
+  assert.equal($('editorCompletionList').hidden, true); assert.equal(completions.length, 1);
+  key('Tab'); assert.equal(editor.current.content, 'SELECT   \nSELECT   '); assert.equal(editor.current.columnSelection, true);
+});
+
 test('multiline AI is preview-only, escaped, and inserts at the exact cursor while preserving suffix', async t => {
   const { $, type, key, editor, completions, calls } = await setup(t);
   const text = '-- orders(id, amount)\nSELECT \nFROM orders;', caret = text.indexOf('\nFROM'); type(text, caret);

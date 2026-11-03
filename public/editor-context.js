@@ -6,15 +6,28 @@ const lineAt = (text, offset) => { let line = 1; for (let at = text.indexOf('\n'
 export function editorContextSnapshot(editor, cwd) {
   const file = editor.current;
   if (!editor.visible || globalThis.document?.getElementById('workspacePanes')?.classList.contains('toolbox-docked') || !file || file.cwd !== cwd || file.loading || file.composing || (file.preview && !file.markdownMode) || typeof file.content !== 'string') return null;
-  const text = file.content, selected = file.end > file.start;
-  let start = selected ? file.start : Math.max(0, file.start - MAX_EXCERPT / 2);
+  const text = file.content, ranges = file.columnSelection ? file.selections : null;
+  if (ranges && !ranges.some(range => range.end > range.start)) return null;
+  const selected = ranges ? true : file.end > file.start;
+  let start = ranges ? ranges[0].start : selected ? file.start : Math.max(0, file.start - MAX_EXCERPT / 2);
   if (!selected && text.length <= MAX_EXCERPT) start = 0;
-  const end = Math.min(text.length, selected ? file.end : start + MAX_EXCERPT, start + MAX_EXCERPT);
-  const from = lineAt(text, start), to = lineAt(text, end), partial = selected ? end < file.end : start > 0 || end < text.length;
+  const end = ranges ? ranges.at(-1).end : Math.min(text.length, selected ? file.end : start + MAX_EXCERPT, start + MAX_EXCERPT);
+  let excerpt = ranges ? '' : text.slice(start, end), partial = selected ? end < file.end : start > 0 || end < text.length;
+  if (ranges) {
+    const parts = []; let budget = MAX_EXCERPT;
+    for (const range of ranges) {
+      if (parts.length) { parts.push('\n'); budget--; }
+      if (budget <= 0) break;
+      const part = text.slice(range.start, Math.min(range.end, range.start + budget)); parts.push(part); budget -= part.length;
+    }
+    excerpt = parts.join('').slice(0, MAX_EXCERPT);
+    partial = ranges.reduce((size, range) => size + range.end - range.start, ranges.length - 1) > MAX_EXCERPT;
+  }
+  const from = lineAt(text, start), to = lineAt(text, end);
   const dirty = editor.tabs.some(tab => tab.id === file.id && tab.dirty);
-  const label = `${file.path.split('/').at(-1).slice(0, 180)}:${from}-${to} · ${selected ? '选区' : partial ? '光标附近' : '当前文件'}${dirty ? ' · 未保存' : ''}${partial ? ' · 节选' : ''}`;
+  const label = `${file.path.split('/').at(-1).slice(0, 180)}:${from}-${to} · ${ranges ? '列选区' : selected ? '选区' : partial ? '光标附近' : '当前文件'}${dirty ? ' · 未保存' : ''}${partial ? ' · 节选' : ''}`;
   const tabs = editor.tabs.filter(tab => tab.cwd === cwd && !tab.loading).slice(0, 8).map(tab => tab.path.slice(0, 200));
-  return { cwd, path: file.path, label, text: `当前文件：${file.path}\n来源：发送时的编辑器快照${dirty ? '（尚未保存，可能与磁盘不同）' : ''}\n范围：第 ${from}–${to} 行${partial ? '（仅节选，未包含全文）' : ''}\n已打开文件（最多 8 个，仅路径）：${JSON.stringify(tabs)}\n\n${text.slice(start, end)}` };
+  return { cwd, path: file.path, label, text: `当前文件：${file.path}\n来源：发送时的编辑器快照${dirty ? '（尚未保存，可能与磁盘不同）' : ''}\n范围：第 ${from}–${to} 行${ranges ? '（矩形列选区，按行拼接）' : ''}${partial ? '（仅节选，未包含全文）' : ''}\n已打开文件（最多 8 个，仅路径）：${JSON.stringify(tabs)}\n\n${excerpt}` };
 }
 
 export function createEditorContext({ editor, getContext, storage = localStorage }) {
