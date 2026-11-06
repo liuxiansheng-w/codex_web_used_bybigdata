@@ -1,3 +1,7 @@
+import { tmpdir } from 'node:os';
+import { BrowserWorkspace } from './lib/browser-workspace.mjs';
+import { BrowserTools } from './lib/browser-tools.mjs';
+import { ThreadMemories } from './lib/thread-memories.mjs';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -70,7 +74,7 @@ const assets = new Map([
   ['/product-ui.js', ['product-ui.js', 'text/javascript; charset=utf-8']],
   ['/task-results.js', ['task-results.js', 'text/javascript; charset=utf-8']],
   ['/execution-view.js', ['execution-view.js', 'text/javascript; charset=utf-8']],
-  ...['draft-journal', 'project-paths', 'message-renderer', 'submission-state'].map(name => ['/' + name + '.js', [name + '.js', 'text/javascript; charset=utf-8']]),
+  ...['draft-journal', 'project-paths', 'message-renderer', 'submission-state', 'chat-navigation', 'slash-commands', 'thread-memories', 'browser-workspace'].map(name => ['/' + name + '.js', [name + '.js', 'text/javascript; charset=utf-8']]),
   ['/live-edits.js', ['live-edits.js', 'text/javascript; charset=utf-8']],
   ['/message-timing.js', ['message-timing.js', 'text/javascript; charset=utf-8']],
   ['/sql-query.js', ['sql-query.js', 'text/javascript; charset=utf-8']],
@@ -102,8 +106,12 @@ async function readBody(req) {
   } catch { throw Object.assign(new Error('无效的 JSON。'), { status: 400 }); }
 }
 
-export function createApplication({ cwd = defaultWorkspace(), bridge = new CodexBridge({ cwd }), stateDir = path.join(root, '.local'), readAsset = readFile, sqlRunner = new SqlRunner(), appApprovals = new AppApprovals(), memories = new Memories(bridge), titleGenerator = bridge instanceof CodexBridge ? new TitleGenerator({ stateDir, executable: bridge.executable }) : null, sqlCompletion = bridge instanceof CodexBridge ? new SqlCompletion({ stateDir, executable: bridge.executable }) : null, modelConnections = new ModelConnections({ stateDir, ephemeral: !(bridge instanceof CodexBridge) }) } = {}) {
-  const workspace = new Workspace(bridge, cwd, { titleGenerator, modelConnections });
+export function createApplication({ cwd = defaultWorkspace(), bridge = new CodexBridge({ cwd }), stateDir = path.join(root, '.local'), readAsset = readFile, sqlRunner = new SqlRunner(), appApprovals = new AppApprovals(), memories = new Memories(bridge), titleGenerator = bridge instanceof CodexBridge ? new TitleGenerator({ stateDir, executable: bridge.executable }) : null, sqlCompletion = bridge instanceof CodexBridge ? new SqlCompletion({ stateDir, executable: bridge.executable }) : null, modelConnections = new ModelConnections({ stateDir, ephemeral: !(bridge instanceof CodexBridge) }), browser: providedBrowser } = {}) {
+  const adapterStateDir = !(bridge instanceof CodexBridge) && stateDir === path.join(root, '.local') ? path.join(tmpdir(), 'lemon-test-adapters-' + randomBytes(8).toString('hex')) : stateDir;
+  const threadMemories = new ThreadMemories(adapterStateDir, memories);
+  const workspace = new Workspace(bridge, cwd, { titleGenerator, modelConnections, threadMemories });
+  const browser = providedBrowser || new BrowserWorkspace({ stateDir: adapterStateDir, workspace });
+  const browserTools = new BrowserTools(browser); workspace.browserTools = browserTools;
   const projectFiles = new ProjectFiles();
   const fileTools = new FileTools(projectFiles);
   const workbench = new Workbench(workspace, projectFiles, stateDir);
@@ -204,9 +212,15 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       if (url.pathname === '/api/bootstrap' && req.method === 'GET') {
         const data = bridge.ready ? await workspace.bootstrap() : { connected: false, cwd, models: [], error: startupError || '柠檬正在连接，请稍候或点击重新连接。' };
         const connections = await modelConnections.status().catch(error => ({ error: error.message }));
-        json({ ...data, submissionRecovery: true, submissionEpoch: workspace.submissions.epoch, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true, mcpAppApprovalPersistence: true, computerUseAppApprovals: true, questionInputs: true, memorySettings: true, threadOrganization: true, threadOrganizationBatch: true }); return;
+        json({ ...data, submissionRecovery: true, submissionEpoch: workspace.submissions.epoch, csrf, modelConnections: connections, aiCompletionAvailable: !!sqlCompletion, workbenchFeatures: true, mcpAppApprovalPersistence: true, computerUseAppApprovals: true, questionInputs: true, memorySettings: true, threadOrganization: true, threadOrganizationBatch: true, sharedBrowser: true, threadMemories: true }); return;
       }
       if (url.pathname === '/api/model-connections' && req.method === 'GET') { json(await modelConnections.status()); return; }
+      if (url.pathname === '/api/browser' && req.method === 'GET') { json(await browser.list(url.searchParams.get('cwd'), url.searchParams.get('threadId'))); return; }
+      if (url.pathname === '/api/browser/settings' && req.method === 'GET') { json(await browser.settings()); return; }
+      if (url.pathname === '/api/browser/frame' && req.method === 'GET') {
+        const frame = await browser.image(url.searchParams.get('cwd'), url.searchParams.get('tabId'));
+        res.writeHead(200, { 'Content-Type': frame.type, 'Content-Length': frame.bytes.length, 'X-Browser-Revision': String(frame.revision), 'Cross-Origin-Resource-Policy': 'same-origin' }); res.end(frame.bytes); return;
+      }
       const submissionRoute = url.pathname.match(/^\/api\/submissions\/([a-f0-9-]{36})$/i);
       if (submissionRoute && req.method === 'GET') { json(workspace.submissions.get(submissionRoute[1], url.searchParams.get('epoch'))); return; }
       if (url.pathname === '/api/models' && req.method === 'GET') {
@@ -281,8 +295,10 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
           const artifact = await workbench.artifact(query);
           check(['.html', '.htm'].includes(artifact.extension), '此预览接口只支持 HTML。');
           // A separate document policy permits its layout CSS without weakening
-          // the application's script/style policy. No scripts, network or origin access.
-          res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+          // the application's script/style policy. Script mode still has an opaque
+          // origin and cannot fetch resources, submit forms or reach the parent.
+          const interactive = query.interactive === '1';
+          res.setHeader('Content-Security-Policy', `sandbox${interactive ? ' allow-scripts' : ''}; default-src 'none'; script-src ${interactive ? "'unsafe-inline'" : "'none'"}; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
           res.setHeader('X-Frame-Options', 'SAMEORIGIN');
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(Buffer.from(artifact.base64, 'base64')); return;
         }
@@ -328,13 +344,22 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
       }
       if (url.pathname === '/api/connections' && req.method === 'GET') { json(await workbench.connections(Object.fromEntries(url.searchParams))); return; }
       if (url.pathname === '/api/usage' && req.method === 'GET') { json(await bridge.request('account/rateLimits/read', {})); return; }
+      const threadMemoryRoute = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9_-]+)\/memories$/);
+      if (threadMemoryRoute && req.method === 'GET') { workspace.validId(threadMemoryRoute[1]); await workspace.get(threadMemoryRoute[1]); json(await threadMemories.status(threadMemoryRoute[1])); return; }
+      const threadPathRoute = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9_-]+)\/path$/);
+      if (threadPathRoute && req.method === 'GET') { json(await workspace.conversationPath(threadPathRoute[1])); return; }
       const threadRoute = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9_-]+)$/);
       if (threadRoute && req.method === 'GET') { json(await workspace.get(threadRoute[1], { refreshTitle: true })); return; }
       if (req.method === 'POST') {
         const body = await readBody(req);
+        if (url.pathname === '/api/browser/action') { json(await browser.action(body)); return; }
+        if (url.pathname === '/api/browser/share') { json(await browser.share(body)); return; }
+        if (url.pathname === '/api/browser/settings') { json(await browser.updateSettings(body)); return; }
+        if (url.pathname === '/api/browser/download') { json(await (body.action === 'dismiss' ? browser.dismissDownload(body) : browser.saveDownload(body))); return; }
         if (url.pathname === '/api/send') { json(await workspace.send(body)); return; }
         if (url.pathname === '/api/followup') { json(await workspace.followup(body)); return; }
         if (url.pathname === '/api/queue') { json(workspace.queueAction(body)); return; }
+        if (url.pathname === '/api/threads/memories') { json(await workspace.updateThreadMemories(body)); return; }
         if (url.pathname === '/api/threads/action') { json(await workspace.threadAction(body)); return; }
         if (url.pathname === '/api/review') { json(await workspace.review(body)); return; }
         if (url.pathname === '/api/terminal/start') { json(await workbench.terminal(body)); return; }
@@ -358,16 +383,19 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
   server.headersTimeout = 15_000;
 
   return {
-    server, workspace, bridge, workbench, modelConnections, projectFavorites, threadOrganization,
+    server, workspace, bridge, workbench, modelConnections, projectFavorites, threadOrganization, browser, browserTools,
     async start(port = Number(process.env.PORT || 4317)) {
       check(Number.isInteger(port) && port >= 0 && port <= 65535, 'PORT 必须是有效端口。');
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
       modelConnections.origin = `http://127.0.0.1:${server.address().port}`;
       await modelConnections.loading;
+      browser.blockedOrigins.add(modelConnections.origin); browser.blockedOrigins.add(`http://localhost:${server.address().port}`);
+      await browserTools.start();
       bridge.start().catch(error => { startupError = error.message; });
       return server.address().port;
     },
     async close() {
+      await browser.close(); await browserTools.close();
       titleGenerator?.close();
       sqlCompletion?.close();
       spreadsheets.close();

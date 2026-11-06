@@ -3,6 +3,7 @@ import { createEditorLayout } from './editor-window.js';
 import { popupLayout } from './interactions.js';
 import { markdown } from './markdown.js';
 import { enhanceMarkdown } from './markdown-preview.js';
+import { explicitFilePath } from './project-paths.js';
 
 const $ = id => document.getElementById(id);
 const sessionKey = 'lemon:openFiles:v1';
@@ -34,6 +35,7 @@ export function resolveMarkdownLink(target, entry) {
   }
   path = parts.join('/');
   if (!validFile(path)) throw new Error('文件链接无效。');
+  if (entry.external && !explicitFilePath(`${root}/${path}`)) throw new Error('文件路径无效，或属于凭据、缓存及项目排除项。');
   return { cwd: entry.cwd, path, line: Number(match[2] || match[3]?.match(/^L(\d+)$/)?.[1] || 0), anchor: match[3] || '' };
 }
 
@@ -122,9 +124,10 @@ export function normalizeEditorSession(value) {
   const files = new Map(), projects = new Map();
   for (const file of value.files) {
     if (!file || !validRoot(file.cwd) || !validFile(file.path)) continue;
-    files.set(JSON.stringify([file.cwd, file.path]), { cwd: file.cwd, path: file.path, language: ['auto', 'sql', 'python', 'text'].includes(file.language) ? file.language : 'auto', start: positionNumber(file.start), end: positionNumber(file.end), direction: ['forward', 'backward'].includes(file.direction) ? file.direction : 'none', top: positionNumber(file.top), left: positionNumber(file.left), preview: readingPosition(file.preview || {}), ...(markdownFile(file.path) ? { markdown: markdownPosition(file.markdown) } : {}) });
+    const viewCwd = validRoot(file.viewCwd) && file.viewCwd !== file.cwd ? file.viewCwd : undefined;
+    files.set(JSON.stringify([viewCwd || file.cwd, file.cwd, file.path]), { cwd: file.cwd, path: file.path, ...(viewCwd ? { viewCwd } : {}), language: ['auto', 'sql', 'python', 'text'].includes(file.language) ? file.language : 'auto', start: positionNumber(file.start), end: positionNumber(file.end), direction: ['forward', 'backward'].includes(file.direction) ? file.direction : 'none', top: positionNumber(file.top), left: positionNumber(file.left), preview: readingPosition(file.preview || {}), ...(markdownFile(file.path) ? { markdown: markdownPosition(file.markdown) } : {}) });
   }
-  for (const project of value.projects) if (project && validRoot(project.cwd)) projects.set(project.cwd, { cwd: project.cwd, active: validFile(project.active) ? project.active : null, visible: project.visible !== false });
+  for (const project of value.projects) if (project && validRoot(project.cwd)) projects.set(project.cwd, { cwd: project.cwd, active: validFile(project.active) ? project.active : null, ...(validRoot(project.activeCwd) && project.activeCwd !== project.cwd ? { activeCwd: project.activeCwd } : {}), visible: project.visible !== false });
   return { version: 1, files: [...files.values()], projects: [...projects.values()] };
 }
 
@@ -431,9 +434,10 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   const exists = doc => documents.includes(doc);
   const dirty = doc => !doc?.preview && !!doc?.file && doc.view.input.value !== doc.baseline;
   const anyDirty = () => documents.some(dirty);
-  const sameProject = doc => !project || doc?.aliases.has(project);
+  const sameProject = doc => !project || (doc?.viewCwd ? doc.viewCwd === project : doc?.aliases.has(project));
+  const external = doc => !!doc?.viewCwd;
   const projectDocuments = () => documents.filter(sameProject);
-  const writable = doc => !!doc?.file?.writable && sameProject(doc);
+  const writable = doc => !!doc?.file?.writable && sameProject(doc) && !external(doc);
   const busySaving = () => savingAll || documents.some(doc => doc.saving);
   const uiLocked = () => !!guard || closingAll;
   const filename = doc => doc.path.split('/').at(-1);
@@ -449,6 +453,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     if (!exists(doc) || !sameProject(doc)) return;
     closeTabMenu(); menuTarget = doc; menuOpener = opener; tabMenuPath.value = fullPath(doc); tabMenuPath.title = tabMenuPath.value; tabMenuStatus.textContent = '';
     tabMenu.hidden = false; opener.setAttribute('aria-expanded', 'true');
+    const reveal = tabMenu.querySelector('[data-tab-action=reveal]'); reveal.disabled = external(doc); reveal.title = external(doc) ? '请切换到文件所属项目后在目录中定位' : '';
     const anchor = pointer ? { left: pointer.clientX, top: pointer.clientY, bottom: pointer.clientY } : opener.getBoundingClientRect();
     const layout = popupLayout(anchor, { width: window.innerWidth, height: window.innerHeight }, 340, tabMenu.getBoundingClientRect().height);
     for (const [key, value] of Object.entries({ left: layout.left, top: layout.top, width: layout.width, maxHeight: layout.maxHeight })) tabMenu.style[key] = `${value}px`;
@@ -457,7 +462,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   for (const button of tabMenu.querySelectorAll('[data-tab-action]')) button.addEventListener('click', async () => {
     const doc = menuTarget; if (!doc || !exists(doc)) return closeTabMenu();
     const action = button.dataset.tabAction;
-    if (action === 'reveal') { closeTabMenu(true); activate(doc, { focus: false }); await onReveal({ cwd: doc.file?.cwd || doc.cwd, path: doc.path }); return; }
+    if (action === 'reveal') { if (external(doc)) return; closeTabMenu(true); activate(doc, { focus: false }); await onReveal({ cwd: doc.file?.cwd || doc.cwd, path: doc.path }); return; }
     const text = action === 'name' ? filename(doc) : action === 'relative' ? doc.path : fullPath(doc);
     try { await window.navigator.clipboard.writeText(text); if (menuTarget === doc) tabMenuStatus.textContent = `${button.textContent.replace('复制', '已复制')}。`; }
     catch { if (menuTarget === doc) { tabMenuPath.value = text; tabMenuPath.focus(); tabMenuPath.select(); tabMenuStatus.textContent = '剪贴板不可用，已选中文本，请按 ⌘ / Ctrl + C 复制。'; } }
@@ -465,7 +470,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   tabMenu.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeTabMenu(true); return; }
     if (event.target === tabMenuPath) return;
-    const buttons = [...tabMenu.querySelectorAll('[role=menuitem]')], index = buttons.indexOf(document.activeElement);
+    const buttons = [...tabMenu.querySelectorAll('[role=menuitem]')].filter(button => !button.disabled), index = buttons.indexOf(document.activeElement);
     const next = event.key === 'ArrowDown' ? (index + 1) % buttons.length : event.key === 'ArrowUp' ? (index + buttons.length - 1) % buttons.length : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : -1;
     if (next >= 0) { event.preventDefault(); buttons[next].focus(); }
   });
@@ -481,10 +486,10 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     const projects = new Map(projectViews);
     projects.set(project, { id: active?.id, visible: visible() });
     const data = JSON.stringify(normalizeEditorSession({ version: 1,
-      files: documents.map(doc => ({ cwd: doc.cwd, path: doc.path, language: doc.language,
+      files: documents.filter(doc => !doc.diff).map(doc => ({ cwd: doc.cwd, path: doc.path, viewCwd: doc.viewCwd, language: doc.language,
         start: doc.sessionPosition?.start ?? doc.view.input.selectionStart, end: doc.sessionPosition?.end ?? doc.view.input.selectionEnd, direction: doc.sessionPosition?.direction ?? doc.view.input.selectionDirection,
         top: doc.sessionPosition?.top ?? (active === doc && visible() && !markdownPreview(doc) ? doc.view.input.scrollTop : doc.position?.top), left: doc.sessionPosition?.left ?? (active === doc && visible() && !markdownPreview(doc) ? doc.view.input.scrollLeft : doc.position?.left), preview: doc.previewState, markdown: doc.markdown })),
-      projects: [...projects].map(([cwd, view]) => ({ cwd, active: documents.find(doc => doc.id === view.id)?.path, visible: view.visible })) }));
+      projects: [...projects].map(([cwd, view]) => { const doc = documents.find(doc => doc.id === view.id); return { cwd, active: doc?.diff ? undefined : doc?.path, activeCwd: doc?.cwd, visible: view.visible }; }) }));
     if (data === lastSession) return;
     try { if (data.length > 2000000) throw new Error(); workspaceStorage.setItem(sessionKey, data); lastSession = data; sessionErrorShown = false; }
     catch { if (!sessionErrorShown) { sessionErrorShown = true; onSessionError('打开的文件标签未能记住，请检查浏览器存储空间。当前文件仍可继续使用。'); } }
@@ -500,7 +505,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       doc.markdownViewer?.dispose();
       article.innerHTML = input.value.trim() ? markdown(input.value, { document: true }) : '<p class="markdown-empty">这个 Markdown 文件还是空的，切换到源码开始编写。</p>';
       doc.renderedMarkdown = input.value;
-      doc.markdownViewer = enhanceMarkdown(article, { api, entry: { cwd: doc.file.cwd, path: doc.path }, resolveLink: resolveMarkdownLink });
+      doc.markdownViewer = enhanceMarkdown(article, { api, entry: { cwd: doc.file.cwd, path: doc.path, external: external(doc) }, resolveLink: resolveMarkdownLink });
     }
     if (showing) doc.markdownViewer?.refresh();
     if (showing) { reader.scrollTop = doc.markdown.top; reader.scrollLeft = doc.markdown.left; }
@@ -682,17 +687,18 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     for (const doc of documents) {
       const tab = views.get(doc.id), changed = dirty(doc), selected = active === doc;
       const duplicateName = documents.some(other => other !== doc && filename(other) === filename(doc));
-      if (tab.label.textContent !== filename(doc)) tab.label.textContent = filename(doc);
-      tab.parent.textContent = duplicateName ? doc.path.split('/').slice(0, -1).join('/') || doc.cwd : '';
-      tab.parent.hidden = !duplicateName;
+      const label = filename(doc) + (doc.diff ? ' · 差异' : '');
+      if (tab.label.textContent !== label) tab.label.textContent = label;
+      tab.parent.textContent = external(doc) ? `${doc.cwd.split('/').filter(Boolean).at(-1) || '外部文件'} · 只读` : duplicateName ? doc.path.split('/').slice(0, -1).join('/') || doc.cwd : '';
+      tab.parent.hidden = !duplicateName && !external(doc);
       tab.state.textContent = doc.loading || doc.saving ? '…' : doc.error ? '!' : changed ? '●' : '';
       tab.state.title = doc.error || (changed ? '未保存' : '');
       tab.row.classList.toggle('is-active', selected); tab.row.classList.toggle('is-dirty', changed);
       tab.row.classList.toggle('has-error', !!doc.error);
       tab.row.hidden = !sameProject(doc);
       tab.button.setAttribute('aria-selected', String(selected)); tab.button.tabIndex = selected ? 0 : -1;
-      tab.button.setAttribute('aria-label', `${doc.path}${changed ? '，未保存' : ''}${doc.error ? '，需要处理' : ''}`);
-      tab.button.title = `${doc.cwd}/${doc.path}`;
+      tab.button.setAttribute('aria-label', `${doc.path}${doc.diff ? '，Git 差异' : ''}${changed ? '，未保存' : ''}${doc.error ? '，需要处理' : ''}`);
+      tab.button.title = fullPath(doc);
       tab.button.disabled = uiLocked();
       tab.close.disabled = doc.saving || doc.closing || uiLocked() || savingAll;
       doc.view.input.readOnly = !writable(doc) || doc.loading;
@@ -702,15 +708,15 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     $('editorTabCount').textContent = `${currentDocuments.length} 个文件${unsaved ? ` · ${unsaved} 未保存` : ''}`;
     $('editorDirty').hidden = !changed;
     $('editorFilename').textContent = active ? filename(active) : '打开项目文件';
-    $('editorPath').textContent = active ? `${active.file?.cwd || active.cwd}/${active.path}` : '';
+    $('editorPath').textContent = active ? fullPath(active) : '';
     $('editorPath').title = $('editorPath').textContent;
     $('editorFormat').textContent = active?.file ? `UTF-8${active.file.bom ? ' BOM' : ''} · ${active.file.newline}` : 'UTF-8';
     $('editorSave').disabled = !changed || !writable(active) || saving || loading || savingAll || uiLocked();
     $('editorSave').textContent = saving ? '保存中…' : '保存';
     $('editorSaveAll').disabled = !unsaved || busySaving() || uiLocked();
     $('editorSaveAll').textContent = savingAll ? '正在全部保存…' : '全部保存';
-    $('editorReload').disabled = !active || saving || loading || uiLocked() || savingAll;
-    $('editorAttach').disabled = !active?.file || saving || loading || active.attaching || !sameProject(active) || uiLocked();
+    $('editorReload').disabled = !active || !!active.diff || saving || loading || uiLocked() || savingAll;
+    $('editorAttach').disabled = !active?.file || !!active.diff || saving || loading || active.attaching || !sameProject(active) || external(active) || uiLocked();
     $('editorClose').disabled = busySaving() || uiLocked();
     $('editorLanguage').disabled = !active;
     $('editorLanguage').value = active?.language || 'auto';
@@ -722,13 +728,14 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     $('viewLatestFile').disabled = $('compareFileVersions').disabled;
     $('undoFileSync').hidden = !active?.mergeUndo || !!active?.conflict;
     $('undoFileSync').disabled = !active || active.view.input.value !== active.mergeUndo?.after || loading || saving || uiLocked();
-    $('editorStatus').textContent = loading ? '正在读取文件…' : saving ? '正在写入磁盘…' : !active?.file ? '尚未读取文件' : !sameProject(active) ? '请切回原项目' : active.diskChanged ? '磁盘有更新 · 草稿已保留' : active.syncError ? '自动同步暂不可用' : !active.file.writable ? active.file.readOnlyReason : changed ? active.mergeUndo ? '已合并磁盘更新 · 未保存' : '未保存' : active.syncedAt ? '已自动同步' : '已同步';
+    $('editorStatus').textContent = loading ? '正在读取文件…' : saving ? '正在写入磁盘…' : !active?.file ? '尚未读取文件' : external(active) ? '其他项目 · 只读；切换到所属项目后可编辑' : !sameProject(active) ? '请切回原项目' : active.diskChanged ? '磁盘有更新 · 草稿已保留' : active.syncError ? '自动同步暂不可用' : !active.file.writable ? active.file.readOnlyReason : changed ? active.mergeUndo ? '已合并磁盘更新 · 未保存' : '未保存' : active.syncedAt ? '已自动同步' : '已同步';
     $('editorVersionBadge').textContent = loading ? '读取中' : changed ? '未保存草稿' : active?.preview ? '磁盘预览' : '当前磁盘';
     $('editorVersionBadge').dataset.versionKind = changed ? 'draft' : 'disk';
     $('editorDiskVersion').hidden = !changed || !!active?.preview; $('editorDiskVersion').disabled = !active || loading || saving || uiLocked();
     $('editorStatus').title = active?.syncError || (active?.syncedAt ? `最近同步：${new Date(active.syncedAt).toLocaleTimeString('zh-CN')}` : '自动检查磁盘更新；未保存的编辑不会被覆盖');
     $('fileEditor').classList.toggle('preview-active', !!active?.preview);
     if (active?.preview) { $('editorStatus').textContent = loading ? '正在读取文档…' : active.error || (active.syncError ? '文档自动同步暂不可用' : active.diskChanged ? '文件已更新，可重新读取' : '文档预览 · 自动检查文件更新'); $('editorFormat').textContent = ''; $('editorCursor').textContent = ''; }
+    if (active?.diff) { $('editorVersionBadge').textContent = 'Git 差异'; $('editorVersionBadge').dataset.versionKind = 'diff'; $('editorStatus').textContent = '工作区差异快照 · 只读 · 在左侧点击文件可更新'; }
     highlight(active);
     $('editorMarkdownModes').hidden = !active?.markdown;
     for (const [id, mode] of [['editorMarkdownPreview', 'preview'], ['editorMarkdownSource', 'source']]) {
@@ -756,6 +763,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     $('fileEditor').hidden = false; $('appShell').classList.add('editor-open'); floating.show(); update({ restoring });
     if (doc.preview) doc.viewer?.resume?.();
     if (focus && !doc.preview) (markdownPreview(doc) ? doc.view.reader : doc.view.input).focus({ preventScroll: true });
+    if (focus && doc.diff) doc.previewHost.focus({ preventScroll: true });
     doc.view.input.scrollTop = doc.position?.top || 0; doc.view.input.scrollLeft = doc.position?.left || 0;
     syncScroll(doc); views.get(doc.id).button.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     if (doc.sessionPosition && !doc.file) void ensureLoaded(doc);
@@ -783,7 +791,8 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     } else update();
   }
   function makeDocument(entry) {
-    const doc = { preview: /\.(pdf|xlsx|xls|xlsm)$/i.test(entry.path), markdown: markdownFile(entry.path) ? markdownPosition(entry.markdown) : null, previewState: {}, id: ++nextId, cwd: entry.cwd, path: entry.path, aliases: new Set([entry.cwd]), file: null, baseline: '', language: 'auto', loading: false, saving: false, error: '', conflict: false, readSequence: 0 };
+    const diff = entry.kind === 'git-diff';
+    const doc = { diff, preview: diff || /\.(pdf|xlsx|xls|xlsm)$/i.test(entry.path), markdown: !diff && markdownFile(entry.path) ? markdownPosition(entry.markdown) : null, previewState: {}, id: ++nextId, cwd: entry.cwd, viewCwd: entry.viewCwd || undefined, path: entry.path, aliases: new Set([entry.cwd]), file: null, baseline: '', language: 'auto', loading: false, saving: false, error: '', conflict: false, readSequence: 0 };
     const panel = document.createElement('div'); panel.className = 'editor-code'; panel.id = `editorPanel-${doc.id}`; panel.hidden = true;
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `editorTab-${doc.id}`);
     const numbers = document.createElement('pre'); numbers.className = 'editor-line-numbers'; numbers.setAttribute('aria-hidden', 'true');
@@ -813,7 +822,8 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
         const link = event.target.closest?.('[data-file-link], [data-markdown-anchor]'); if (!link) return;
         if (link.hasAttribute('data-markdown-anchor')) { scrollMarkdownAnchor(doc, link.dataset.markdownAnchor); return; }
         try {
-          const entry = resolveMarkdownLink(link.dataset.fileLink, { cwd: doc.file.cwd, path: doc.path });
+          const entry = resolveMarkdownLink(link.dataset.fileLink, { cwd: doc.file.cwd, path: doc.path, external: external(doc) });
+          if (doc.viewCwd) entry.viewCwd = doc.viewCwd;
           if (!await openFile(entry) || active?.file?.cwd !== entry.cwd || active?.path !== entry.path) return;
           if (entry.line) selectText(active.view.input.value.split('\n').slice(0, entry.line - 1).reduce((n, line) => n + line.length + 1, 0));
           else if (entry.anchor && active.markdown) { setMarkdownMode('preview'); scrollMarkdownAnchor(active, entry.anchor); }
@@ -910,7 +920,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       const result = await api(`/api/project/file?cwd=${encodeURIComponent(doc.file?.cwd || doc.cwd)}&path=${encodeURIComponent(doc.path)}`);
       if (!exists(doc) || expected !== doc.readSequence) return false;
       if (initial) {
-        const duplicate = documents.find(other => other !== doc && other.file?.cwd === result.cwd && other.path === result.path);
+        const duplicate = documents.find(other => !other.diff && other !== doc && other.viewCwd === doc.viewCwd && other.file?.cwd === result.cwd && other.path === result.path);
         if (duplicate) {
           duplicate.aliases.add(doc.cwd); const selected = active === doc;
           removeDocument(doc); if (selected) activate(duplicate, { force: true }); return true;
@@ -932,13 +942,39 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   }
   async function openFile(entry) {
     if (uiLocked()) return false;
-    const existing = documents.find(doc => doc.path === entry.path && doc.aliases.has(entry.cwd));
+    const existing = documents.find(doc => !doc.diff && doc.viewCwd === (entry.viewCwd || undefined) && doc.path === entry.path && doc.aliases.has(entry.cwd));
     if (existing) { activate(existing); return existing.file ? true : ensureLoaded(existing); }
     const doc = makeDocument(entry); activate(doc);
     return readDocument(doc, true);
   }
+  function openDiff(entry) {
+    if (uiLocked() || !validRoot(entry.cwd) || !validFile(entry.path) || typeof entry.diff !== 'string') return false;
+    const viewCwd = project && project !== entry.cwd ? project : undefined;
+    let doc = documents.find(item => item.diff && item.cwd === entry.cwd && item.path === entry.path && item.viewCwd === viewCwd);
+    if (!doc) doc = makeDocument({ ...entry, kind: 'git-diff', viewCwd });
+    doc.file = { cwd: entry.cwd, path: entry.path, version: entry.version, writable: false, readOnlyReason: 'Git 差异快照', content: '' };
+    doc.previewHost.replaceChildren(); doc.previewHost.tabIndex = 0; doc.previewHost.setAttribute('aria-label', `${entry.path} 的 Git 差异`); doc.previewHost.classList.add('git-diff-document');
+    const heading = document.createElement('div'); heading.className = 'git-diff-heading'; heading.textContent = `${entry.path} · 当前磁盘与 Git 的差异，不包含未保存草稿`;
+    const body = document.createElement('div'); body.className = 'git-diff-lines';
+    const lines = entry.diff.split('\n'); let at = 0, old = 0, next = 0, hunk = false;
+    const more = document.createElement('button'); more.type = 'button'; more.className = 'secondary-button';
+    function append() {
+      const end = Math.min(lines.length, at + 500);
+      for (; at < end; at++) {
+        const text = lines[at], match = text.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (match) { old = Number(match[1]); next = Number(match[2]); hunk = true; }
+        const add = hunk && !match && text.startsWith('+'), remove = hunk && !match && text.startsWith('-'), same = hunk && text.startsWith(' ');
+        const row = document.createElement('div'); row.className = 'git-diff-row' + (match ? ' git-line-hunk' : add ? ' git-line-add' : remove ? ' git-line-delete' : '');
+        for (const value of [remove || same ? String(old++) : '', add || same ? String(next++) : '']) { const number = document.createElement('span'); number.className = 'git-diff-number'; number.setAttribute('aria-hidden', 'true'); number.textContent = value; row.append(number); }
+        const code = document.createElement('span'); code.className = 'git-diff-code'; code.textContent = text || ' '; row.append(code); body.append(row);
+      }
+      more.hidden = at >= lines.length; more.textContent = `继续显示差异 · 已显示 ${at} / ${lines.length} 行`;
+    }
+    more.addEventListener('click', append); doc.previewHost.append(heading, body, more); append();
+    return activate(doc);
+  }
   async function syncDocument(doc) {
-    if (!doc?.file || !exists(doc) || doc.loading || doc.saving || doc.checking || doc.composing || doc.comparing || comparison === doc && $('fileConflictDialog').open || uiLocked()) return;
+    if (!doc?.file || doc.diff || !exists(doc) || doc.loading || doc.saving || doc.checking || doc.composing || doc.comparing || comparison === doc && $('fileConflictDialog').open || uiLocked()) return;
     if (doc.preview) {
       const version = doc.file.version, sequence = doc.readSequence;
       doc.checking = true;
@@ -1053,7 +1089,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     } finally { closingAll = false; update(); }
   }
   async function reload(doc = active) {
-    if (!doc || uiLocked() || savingAll || doc.loading || doc.saving || !(await confirmChange(doc))) return false;
+    if (!doc || doc.diff || uiLocked() || savingAll || doc.loading || doc.saving || !(await confirmChange(doc))) return false;
     return readDocument(doc);
   }
 
@@ -1063,7 +1099,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   $('editorReload').addEventListener('click', () => reload());
   $('editorAttach').addEventListener('click', async () => {
     const doc = active;
-    if (!doc?.file || !sameProject(doc) || doc.attaching) return;
+    if (!doc?.file || doc.diff || !sameProject(doc) || external(doc) || doc.attaching) return;
     doc.attaching = true; update();
     try {
       await onAttach({ cwd: doc.cwd, path: doc.path });
@@ -1131,14 +1167,14 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   for (const saved of savedSession.files) {
     const doc = makeDocument(saved); doc.sessionPosition = saved; doc.position = { top: saved.top, left: saved.left }; doc.language = saved.language; doc.previewState = saved.preview;
   }
-  for (const saved of savedSession.projects) projectViews.set(saved.cwd, { id: documents.find(doc => doc.cwd === saved.cwd && doc.path === saved.active)?.id, visible: saved.visible });
+  for (const saved of savedSession.projects) projectViews.set(saved.cwd, { id: documents.find(doc => doc.cwd === (saved.activeCwd || saved.cwd) && (doc.viewCwd || doc.cwd) === saved.cwd && doc.path === saved.active)?.id, visible: saved.visible });
   observer?.observe(emptyView.input); update();
   return {
-    open: openFile, close, closeTab, save: () => save(), saveAll, refresh, setMarkdownMode,
-    inspect(entry) { const doc = documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd)); return doc?.file ? { ...doc.file, content: doc.view.input.value, dirty: dirty(doc), saving: doc.saving, loading: doc.loading } : null; },
-    saveFile(entry) { return save(documents.find(item => item.path === entry.path && item.aliases.has(entry.cwd))); },
+    open: openFile, openDiff, close, closeTab, save: () => save(), saveAll, refresh, setMarkdownMode,
+    inspect(entry) { const doc = documents.find(item => !item.diff && item.viewCwd === (entry.viewCwd || undefined) && item.path === entry.path && item.aliases.has(entry.cwd)); return doc?.file ? { ...doc.file, id: doc.id, content: doc.view.input.value, dirty: dirty(doc), saving: doc.saving, loading: doc.loading } : null; },
+    saveFile(entry) { return save(documents.find(item => !item.diff && item.viewCwd === (entry.viewCwd || undefined) && item.path === entry.path && item.aliases.has(entry.cwd))); },
     hide() { active?.view.columns?.clear(false); rememberSource(active); $('fileEditor').hidden = true; $('appShell').classList.remove('editor-open'); floating.hide(); onChange(); queueSession(); },
-    get current() { return active?.file ? { ...active.file, id: active.id, content: active.view.input.value, dirty: dirty(active), start: active.view.input.selectionStart, end: active.view.input.selectionEnd, columnSelection: !!active.view.columns?.ranges, selections: active.view.columns?.ranges?.map(({ start, end }) => ({ start, end })), composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
+    get current() { return active?.file ? { ...active.file, writable: writable(active), external: external(active), id: active.id, content: active.view.input.value, dirty: dirty(active), start: active.view.input.selectionStart, end: active.view.input.selectionEnd, columnSelection: !!active.view.columns?.ranges, selections: active.view.columns?.ranges?.map(({ start, end }) => ({ start, end })), composing: !!active.composing, loading: !!active.loading, preview: active.preview || markdownPreview(active), markdownMode: active.markdown?.mode, language: active.preview || markdownPreview(active) ? 'preview' : active.language === 'auto' ? detectLanguage(active.path) : active.language } : null; },
     previewCompletion(text = '', snapshot) {
       if (text && (!matches(snapshot) || snapshot.language !== 'sql' || snapshot.content.length > 200000)) return false;
       for (const doc of documents) { if (doc.view.ghost) { doc.view.ghost = null; doc.view.lastText = null; } }
@@ -1186,12 +1222,12 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       highlight(active); queueSession();
     },
     select: selectText,
-    snapshots() { return documents.filter(doc => dirty(doc)).map(doc => ({ cwd: doc.file.cwd, path: doc.path, version: doc.file.version, baseline: doc.baseline, content: doc.view.input.value })); },
-    async restore(snapshots) { for (const snapshot of snapshots) { await openFile(snapshot); const doc = documents.find(item => item.path === snapshot.path && item.file?.cwd === snapshot.cwd); if (!doc || dirty(doc)) continue; doc.view.input.value = snapshot.content; doc.baseline = snapshot.baseline; if (doc.file.version !== snapshot.version) { doc.file.version = snapshot.version; setError(doc, '恢复的草稿与磁盘版本不同，请对照后保存。', true); } update(); } },
+    snapshots() { return documents.filter(doc => !external(doc) && dirty(doc)).map(doc => ({ cwd: doc.file.cwd, path: doc.path, version: doc.file.version, baseline: doc.baseline, content: doc.view.input.value })); },
+    async restore(snapshots) { for (const snapshot of snapshots) { await openFile(snapshot); const doc = documents.find(item => !item.diff && !external(item) && item.path === snapshot.path && item.file?.cwd === snapshot.cwd); if (!doc || dirty(doc)) continue; doc.view.input.value = snapshot.content; doc.baseline = snapshot.baseline; if (doc.file.version !== snapshot.version) { doc.file.version = snapshot.version; setError(doc, '恢复的草稿与磁盘版本不同，请对照后保存。', true); } update(); } },
     get dirty() { return anyDirty(); }, get visible() { return visible(); },
     get cwd() { return project; },
     get locked() { return uiLocked() || savingAll; },
-    get tabs() { return documents.map(doc => ({ id: doc.id, path: doc.path, cwd: doc.cwd, active: active === doc, dirty: dirty(doc), loading: doc.loading, saving: doc.saving })); },
+    get tabs() { return documents.map(doc => ({ id: doc.id, path: doc.path, cwd: doc.cwd, ...(doc.viewCwd ? { viewCwd: doc.viewCwd, external: true } : {}), active: active === doc, dirty: dirty(doc), loading: doc.loading, saving: doc.saving })); },
     setProject(cwd) {
       if (cwd === project) return;
       closeTabMenu();

@@ -3,6 +3,21 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { createGitSubmit } from '../public/git-submit.js';
 const wait = () => new Promise(resolve => setTimeout(resolve, 5));
+test('inline Git cancels stale status reads and replaces interrupted loading text when reopening', async t => {
+  const dom = new JSDOM('<div class="breadcrumb"></div><div id="sidebarGitHost"></div>', { url: 'http://localhost' });
+  const previous = { window: globalThis.window, document: globalThis.document }; Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+  t.after(() => { Object.assign(globalThis, previous); dom.window.close(); });
+  let finish, reads = 0;
+  const snapshot = { cwd: '/fixture', head: 'head', version: 'v2', branch: 'main', ahead: 0, files: [{ path: 'current.txt', status: ' M' }] };
+  const control = createGitSubmit({ getContext: () => ({ cwd: '/fixture' }), api: async (route, body) => {
+    assert.equal(body, undefined); if (++reads === 1) return new Promise(resolve => { finish = resolve; }); return snapshot;
+  } });
+  const first = control.show(); await wait(); assert.match(document.querySelector('[data-ui=status]').textContent, /正在读取/);
+  control.hide(); await control.show(); assert.equal(document.getElementById('gitSubmitDialog').tagName, 'SECTION');
+  assert.match(document.querySelector('[data-ui=status]').textContent, /状态已更新/); assert.doesNotMatch(document.querySelector('[data-ui=status]').textContent, /正在读取/);
+  finish({ ...snapshot, files: [{ path: 'stale.txt', status: ' M' }] }); await first;
+  assert.match(document.querySelector('[data-ui=files]').textContent, /current.txt/); assert.doesNotMatch(document.querySelector('[data-ui=files]').textContent, /stale.txt/);
+});
 test('Git dialog can read another sidebar project without switching context or mixing drafts', async t => {
   const dom = new JSDOM('<div class="breadcrumb"></div>', { url: 'http://localhost' });
   const old = { window: globalThis.window, document: globalThis.document }; Object.assign(globalThis, { window: dom.window, document: dom.window.document });

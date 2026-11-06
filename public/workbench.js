@@ -3,14 +3,18 @@ import { createAgentCards, agentSummary, subtaskGroups } from './task-results.js
 import { projectPath } from './project-paths.js';
 import { popupLayout } from './interactions.js';
 import { createSchedules } from './schedules.js';
+const createBrowserWorkspace = (await import('./browser-workspace.js').catch(() => null))?.createBrowserWorkspace;
+const createThreadMemories = (await import('./thread-memories.js').catch(() => null))?.createThreadMemories;
 const $ = id => document.getElementById(id);
 const node = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
 const button = (text, fn) => { const el = node('button', text, 'secondary-button'); el.type = 'button'; el.addEventListener('click', fn); return el; };
-export function createWorkbench({ api, editor, getContext, onContext, onThread, onProject, projects, refreshFiles, getDraftPreference, setDraftPreference, clearDrafts, restoreDrafts, showDraftVersions = () => {}, onGitSubmit = () => {}, bottomPanel, getArtifacts = () => [], getChanges = () => [] }) {
+export function createWorkbench({ api, editor, getContext, onContext, onThread, onProject, projects, refreshFiles, getDraftPreference, setDraftPreference, clearDrafts, restoreDrafts, showDraftVersions = () => {}, onGitSubmit = () => {}, onSidebar, bottomPanel, getArtifacts = () => [], getChanges = () => [] }) {
   let tab = 'search', searchResult = null, preview = null, git = null, sequence = 0, artifactUrl = null, pendingActions = 0, opener = null, contextKey = '', artifactSignature = '', changesSignature = '';
   let artifactViewer = null, lastArtifact = null, agentsTimer = null, agentGeneration = 0, restorePreview = null, reviewChanges = null;
   let agentsData = null, agentsPromise = null, agentsLast = 0, agentsError = '', agentsRevision = 0;
   let searchController, searchPage = 0, searchLoading = false;
+  let searchSequence = 0, searchCwd = '', actionSequence = 0;
+  const searchStates = new Map();
   let appApprovalData = null, appApprovalRead = 0, appApprovalWriting = false;
   let memoryData = null, memoryRead = 0, memoryWriting = false, memoryFileRead = 0;
   const inlineGroups = new Map();
@@ -24,13 +28,14 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     <section data-panel="terminal" hidden></section>
     <section data-panel="appApprovals" hidden><h3>电脑操作 · 应用授权</h3><p class="field-hint">查看官方客户端在本机保存的“始终允许”应用。会话授权、组织策略和 macOS 系统权限分别生效。</p><div class="inline-fields"><button id="appApprovalsRefresh" type="button" class="secondary-button">刷新授权列表</button><a class="text-button" href="codex://">打开官方客户端 ↗</a></div><p id="appApprovalsHint" role="status" class="field-hint"></p><div id="appApprovalsList" class="app-approvals-list"></div><p class="field-hint">撤销将在后续授权检查中生效；当前会话已获得的授权可能继续有效。</p></section>
     <section data-panel="connections" hidden><h3>插件与 MCP 连接</h3><div class="inline-fields"><button id="connectionsRefresh" class="secondary-button">刷新状态</button><button id="connectionsReload" class="secondary-button">重新载入 MCP 配置…</button></div><div id="connectionsResults"></div><div class="native-card"><strong>安装 / 移除插件</strong><p>已安装的技能与插件可从输入框「＋」选择，网页支持连接状态、登录授权和表单交互；插件安装与移除请在官方客户端完成。</p><a class="secondary-button" href="codex://">打开本机桌面客户端 ↗</a></div></section>
-    <section data-panel="artifacts" hidden><h3>本轮成果与相关文件</h3><div id="artifactList" class="artifact-list"></div><details><summary>按路径打开其他文件</summary><form id="artifactForm"><label>项目内的文件路径<input id="artifactPath" required placeholder="report.html / chart.png / result.pdf"></label><button class="primary-button">预览 / 下载</button></form></details><p class="field-hint">支持图片、PDF、Excel 工作表、Markdown、文本和静态 HTML 预览。Office 文档保留原文件下载；HTML 禁止脚本、联网和表单。</p><div id="artifactResults"></div></section>
+    <section data-panel="artifacts" hidden><h3>本轮成果与相关文件</h3><div id="artifactList" class="artifact-list"></div><details><summary>按路径打开其他文件</summary><form id="artifactForm"><label>项目内的文件路径<input id="artifactPath" required placeholder="report.html / chart.png / result.pdf"></label><button class="primary-button">预览 / 下载</button></form></details><p class="field-hint">支持图片、PDF、Excel 工作表、Markdown、文本及 HTML。HTML 可切换隔离的交互预览，运行本文件内脚本；禁止联网和表单提交。</p><div id="artifactResults"></div></section>
     <section data-panel="projects" hidden><h3>项目与工作树</h3><form id="projectForm"><label>工作目录绝对路径<input id="projectRoot" required placeholder="/Users/…/project"></label><div class="inline-fields"><button class="primary-button">切换主项目</button><button id="projectRemember" class="secondary-button" type="button">保存到项目列表</button><button id="projectAttach" class="secondary-button" type="button">作为附加目录引用</button></div></form><p class="field-hint">一个会话只有一个主工作目录；附加目录按引用加入对话，不会自动扩展写权限。</p><div id="projectFavorites"></div><hr><h4>创建隔离工作树</h4><label>新分支<input id="worktreeBranch" placeholder="lemon/my-task"></label><label>新工作树绝对路径<input id="worktreeDestination" placeholder="/Users/…/my-task"></label><button id="worktreeCreate" class="secondary-button">确认创建工作树…</button><pre id="worktreeList" class="workbench-output"></pre></section>
     <section data-panel="schedules" hidden></section>
-    <section data-panel="preferences" hidden><h3>偏好与用量</h3><label class="risk-confirm"><input id="persistDrafts" type="checkbox"><span>在此浏览器保存输入与编辑草稿（可能含敏感内容，不加密，不共享到其他设备）</span></label><div class="action-grid"><button id="recoverDrafts">恢复上次编辑草稿</button><button id="showDraftVersions">查看各窗口草稿版本</button><button id="clearSavedDrafts">清除本机草稿缓存</button></div><label>输入框发送方式<select id="enterBehavior"><option value="enter">Enter 发送，Shift+Enter 换行</option><option value="cmd">⌘ / Ctrl + Enter 发送，Enter 换行</option></select></label><button id="notifyEnable" class="secondary-button">请求浏览器任务通知权限</button><p class="field-hint">通知只写任务状态，不显示代码或消息内容；关闭页面后无法接收。</p><button id="usageRefresh" class="secondary-button">刷新账户额度</button><pre id="usageResult" class="workbench-output"></pre><p class="field-hint">对话 token 用量在输入框下方显示；额度不等同于费用账单。</p></section>
+    <section data-panel="preferences" hidden><h3>偏好与用量</h3><button id="browserSettingsEntry" type="button" class="secondary-button">浏览器与下载设置</button><label class="risk-confirm"><input id="persistDrafts" type="checkbox"><span>在此浏览器保存输入与编辑草稿（可能含敏感内容，不加密，不共享到其他设备）</span></label><div class="action-grid"><button id="recoverDrafts">恢复上次编辑草稿</button><button id="showDraftVersions">查看各窗口草稿版本</button><button id="clearSavedDrafts">清除本机草稿缓存</button></div><label>输入框发送方式<select id="enterBehavior"><option value="enter">Enter 发送，Shift+Enter 换行</option><option value="cmd">⌘ / Ctrl + Enter 发送，Enter 换行</option></select></label><button id="notifyEnable" class="secondary-button">请求浏览器任务通知权限</button><p class="field-hint">通知只写任务状态，不显示代码或消息内容；关闭页面后无法接收。</p><button id="usageRefresh" class="secondary-button">刷新账户额度</button><pre id="usageResult" class="workbench-output"></pre><p class="field-hint">对话 token 用量在输入框下方显示；额度不等同于费用账单。</p></section>
     <section data-panel="native" hidden><h3>桌面客户端能力</h3><p>以下功能依赖本机桌面集成，当前网页暂不支持。点击入口不会自动授予录屏、麦克风或电脑控制权限。</p><div id="nativeCapabilities"></div><a class="primary-button" href="codex://">打开本机桌面客户端 ↗</a><p class="field-hint">若浏览器未唤起客户端，请手动打开本机桌面应用。</p><a href="https://learn.chatgpt.com/docs/overview" target="_blank" rel="noopener noreferrer">查看客户端说明 ↗</a></section>
     </div></div>`;
   $('workSurface').append(dialog);
+  const searchPanel = dialog.querySelector('[data-panel="search"]'), sidebarSearchHost = $('sidebarSearchHost');
   const agentsPanel = node('section'); agentsPanel.dataset.panel = 'agents'; agentsPanel.hidden = true;
   agentsPanel.innerHTML = '<h3>子任务</h3><div class="agents-toolbar"><span id="agentsSummary" role="status"></span><button id="agentsRefresh" class="text-button">刷新状态</button><button id="agentsParent" class="text-button" hidden>返回主任务</button></div><p id="agentsNotice" class="agent-hint" role="status"></p><p id="agentsEmpty" class="field-hint" hidden></p><div id="agentResults"></div>';
   dialog.querySelector('.workbench-main').append(agentsPanel);
@@ -45,6 +50,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     <h4>查看本机记忆</h4><p id="memoriesFilesHint" class="field-hint"></p><div id="memoriesFiles" class="memory-files"></div>
     <section id="memoriesPreview" hidden><div class="inline-fields"><strong id="memoriesPreviewTitle"></strong><button id="memoriesPreviewClose" type="button" class="text-button">收起</button></div><p id="memoriesPreviewHint" class="field-hint"></p><pre id="memoriesPreviewContent" class="workbench-output memory-content"></pre></section>`;
   dialog.querySelector('.workbench-main').append(memoryPanel);
+  const chatMemories = createThreadMemories?.({ root: memoryPanel, api, getContext }) || { load() {}, reset() {} };
   const history = node('section'); history.className = 'file-history'; history.innerHTML = '<h4>文件保存历史</h4><form id="fileHistoryForm"><label>文件路径<input id="fileHistoryPath" required placeholder="选择当前文件，或输入项目内路径"></label><div class="inline-fields"><button class="secondary-button">查看历史</button><button id="fileHistoryCurrent" type="button" class="secondary-button">当前编辑文件</button></div></form><p class="field-hint">记录启用后通过网页保存的旧版本；每文件最多 20 份，总计最多 100 份 / 24 MB，保存在本机。AI 改动可从下方修改记录回退。</p><div id="fileHistoryResults"></div>';
   $('turnChanges').before(history);
   const gitPanel = dialog.querySelector('[data-panel="git"]'), reviewSections = new Map(), reviewNav = node('div', null, 'review-navigation');
@@ -72,32 +78,56 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   for (const element of [...artifactPanel.children].filter(el => el.tagName !== 'H3' && el.id !== 'artifactResults')) artifactBrowser.append(element);
   $('artifactResults').before(artifactBrowser);
   function disposeArtifact() { artifactViewer?.dispose(); artifactViewer = null; }
-  function close() { searchController?.abort(); fileManager.hide(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools'); disposeArtifact(); sequence++; scheduleAgents(); opener?.focus(); }
+  function close({ restoreFocus = true } = {}) { browserWorkspace.setVisible(false); dockBrowser(false); fileManager.hide(); dialog.hidden = true; schedules.setVisible(false); $('workSurface').classList.remove('with-tools'); disposeArtifact(); sequence++; scheduleAgents(); if (restoreFocus) opener?.focus(); }
   function contextChanged() {
-    const key = JSON.stringify([context().cwd, context().thread?.id]); if (key === contextKey) return; searchController?.abort(); contextKey = key; artifactSignature = ''; changesSignature = ''; sequence++; searchResult = null; preview = null; git = null;
+    const key = JSON.stringify([context().cwd, context().thread?.id]); if (key === contextKey) return;
+    if (searchCwd !== context().cwd) {
+      if (searchCwd) searchStates.set(searchCwd, { query: $('projectSearchQuery').value, filenames: $('searchFilenames').checked, caseSensitive: $('searchCase').checked, replacement: $('projectReplaceText').value, result: searchResult, page: searchPage, status: searchLoading ? '搜索已停止；点击搜索可重新开始。' : $('sidebarSearchStatus')?.textContent || '' });
+      searchController?.abort(); searchSequence++; searchCwd = context().cwd;
+      for (const control of searchPanel.querySelectorAll('[data-pending]')) { delete control.dataset.pending; if (control.tagName === 'BUTTON') control.disabled = false; }
+      const saved = searchStates.get(searchCwd);
+      $('projectSearchQuery').value = saved?.query || ''; $('searchFilenames').checked = !!saved?.filenames; $('searchCase').checked = !!saved?.caseSensitive; $('projectReplaceText').value = saved?.replacement || '';
+      searchResult = saved?.result || null; searchPage = saved?.page || 0; searchLoading = false; preview = null;
+      $('projectReplaceResults').replaceChildren(); $('projectReplaceApply').hidden = true; searchStatus(saved?.status || ''); renderSearchResults();
+    }
+    contextKey = key; chatMemories.reset(); browserWorkspace.sync(); artifactSignature = ''; changesSignature = ''; sequence++; git = null;
     disposeArtifact(); lastArtifact = null; artifactBrowser.open = true; dialog.classList.remove('has-artifact'); clearTimeout(agentsTimer); agentsTimer = null; agentGeneration++; agentsData = null; agentsPromise = null; agentsLast = 0; agentsError = ''; inlineGroups.clear(); panelAgentCards.update([]); reviewChanges = null; restorePreview = null; restoreDialog.close(); $('fileHistoryResults').replaceChildren(); $('agentResults').replaceChildren();
     artifactPanel.querySelector('h3').textContent = '成果与文件预览'; $('fileHistoryPath').value = '';
-    for (const id of ['projectSearchResults', 'projectReplaceResults', 'gitFiles', 'gitFileDiff', 'gitStatus', 'gitUnstaged', 'gitStaged', 'artifactList', 'artifactResults', 'turnChanges', 'connectionsResults']) $(id).replaceChildren();
+    for (const id of ['gitFiles', 'gitFileDiff', 'gitStatus', 'gitUnstaged', 'gitStaged', 'artifactList', 'artifactResults', 'turnChanges', 'connectionsResults']) $(id).replaceChildren();
     for (const id of ['gitPath', 'reviewLocation', 'reviewComment', 'artifactPath']) $(id).value = '';
     terminalConsole.syncContext(); schedules.render();
     fileManager.reset();
-    $('projectReplaceApply').hidden = true; $('turnChanges').hidden = true;
+    $('turnChanges').hidden = true;
     if (artifactUrl) { URL.revokeObjectURL(artifactUrl); artifactUrl = null; }
     renderProjectPath(); status('');
-    if (!dialog.hidden) { if (tab === 'artifacts') renderArtifacts(); if (tab === 'projects') renderProjects(); if (tab === 'git') renderTurnChanges(); if (tab === 'agents') void pollAgents(); }
+    if (!dialog.hidden) { if (tab === 'artifacts') renderArtifacts(); if (tab === 'projects') renderProjects(); if (tab === 'git') renderTurnChanges(); if (tab === 'agents') void pollAgents(); if (tab === 'memories') void loadMemories(); }
   }
   const status = (text, terminal = false) => { (terminal && $('terminalStatus') || $('workbenchStatus')).textContent = text || ''; };
+  function searchStatus(text) { const label = $('sidebarSearchStatus'); if (label) label.textContent = text || ''; else $('workbenchStatus').textContent = text || ''; }
   const context = () => getContext();
   const hasEditorDraftCache = () => { try { return !!localStorage.getItem('codex-desk:editorDrafts') || Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).some(key => key?.startsWith('codex-desk:editorDrafts:v2:')); } catch { return false; } };
   function syncDraftControls() { const cached = hasEditorDraftCache(); $('recoverDrafts').disabled = !editor.snapshots?.()?.length && !cached; $('clearSavedDrafts').disabled = !getDraftPreference() && !cached; $('persistDrafts').checked = getDraftPreference(); }
   const scoped = route => `${route}?cwd=${encodeURIComponent(context().cwd)}`;
-  const run = (fn, terminal = false) => async event => { const control = event?.currentTarget; if (control?.dataset?.pending) { event.preventDefault(); return; } if (control) control.dataset.pending = 'true'; if (control?.tagName === 'BUTTON') control.disabled = true; status('', terminal); pendingActions++; const expected = terminal ? context().cwd : contextKey; try { return await fn(event); } catch (error) { if ((terminal ? context().cwd : contextKey) === expected) status(error.message, terminal); } finally { pendingActions--; if (control) delete control.dataset.pending; if (control?.tagName === 'BUTTON') control.disabled = false; } };
+  const run = (fn, terminal = false) => async event => { const control = event?.currentTarget, searching = control && searchPanel.contains(control), blocking = !searching || control.id === 'projectReplaceApply'; if (control?.dataset?.pending) { event.preventDefault(); return; } const operation = String(++actionSequence); if (control) control.dataset.pending = operation; if (control?.tagName === 'BUTTON') control.disabled = true; if (searching) searchStatus(''); else status('', terminal); if (blocking) pendingActions++; const expected = terminal || searching ? context().cwd : contextKey; try { return await fn(event); } catch (error) { if ((terminal || searching ? context().cwd : contextKey) === expected) { if (searching) searchStatus(error.message); else status(error.message, terminal); } } finally { if (blocking) pendingActions--; if (control?.dataset.pending === operation) { delete control.dataset.pending; if (control.tagName === 'BUTTON') control.disabled = false; } } };
   const bind = (id, fn) => $(id).addEventListener('click', run(fn));
   const form = (id, fn) => $(id).addEventListener('submit', run(async event => { event.preventDefault(); await fn(); }));
-  const tabs = { search: '项目搜索', files: '文件管理', git: '变更与审查', agents: 'AI 子任务', terminal: '命令', artifacts: '文件预览', preferences: '常规与草稿', memories: '跨会话记忆', connections: '插件连接', appApprovals: '应用授权', projects: '项目管理', schedules: '定时任务', native: '帮助与客户端' };
-  const taskTabs = new Set(['search', 'files', 'git', 'agents', 'terminal', 'artifacts']);
-  for (const [id, title] of Object.entries(tabs)) { const el = button(title, () => show(id)); el.dataset.tab = id; el.id = `workbench-tab-${id}`; el.setAttribute('role', 'tab'); el.setAttribute('aria-controls', `workbench-${id}`); $('workbenchNav').append(el); }
+  const browserPanel = node('section'); browserPanel.dataset.panel = 'browser'; browserPanel.hidden = true; dialog.querySelector('.workbench-main').append(browserPanel);
+  const browserWorkspace = createBrowserWorkspace?.({ root: browserPanel, api, getContext, notify: text => status(text) }) || { setVisible() {}, sync() {}, showSettings() {}, pending: false };
+  function dockBrowser(active) {
+    const panes = $('workspacePanes'); panes.classList.toggle('browser-docked', active); $('workSurface').classList.toggle('with-browser', active);
+    if (active) { panes.prepend(dialog); $('workSurface').classList.remove('with-tools'); }
+    else if (dialog.parentNode === panes) $('workSurface').append(dialog);
+  }
+  const tabs = { search: '项目搜索', files: '文件管理', git: '修改与审查', agents: 'AI 子任务', browser: '共享浏览器', terminal: '命令', artifacts: '文件预览', preferences: '常规与草稿', memories: '跨会话记忆', connections: '插件连接', appApprovals: '应用授权', projects: '项目管理', schedules: '定时任务', native: '帮助与客户端' };
+  const taskTabs = new Set(['search', 'files', 'git', 'agents', 'terminal', 'artifacts', 'browser']);
+  const openTool = id => show(id, id === 'git' ? { section: 'changes' } : undefined);
+  for (const [id, title] of Object.entries(tabs)) { const el = button(title, () => openTool(id)); el.dataset.tab = id; el.id = `workbench-tab-${id}`; el.setAttribute('role', 'tab'); el.setAttribute('aria-controls', `workbench-${id}`); $('workbenchNav').append(el); }
   for (const panel of dialog.querySelectorAll('[data-panel]')) { panel.id = `workbench-${panel.dataset.panel}`; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `workbench-tab-${panel.dataset.panel}`); }
+  if (sidebarSearchHost) {
+    sidebarSearchHost.append(searchPanel); searchPanel.hidden = false; searchPanel.setAttribute('role', 'region'); searchPanel.setAttribute('aria-labelledby', 'sidebar-tab-search');
+    const label = node('p', '', 'sidebar-search-status'); label.id = 'sidebarSearchStatus'; label.setAttribute('role', 'status'); searchPanel.querySelector('form').after(label);
+    searchPanel.querySelector('h3').textContent = '项目搜索';
+  }
   const terminalPanel = dialog.querySelector('[data-panel=terminal]');
   const terminalConsole = createTerminalConsole({ root: terminalPanel, api, getContext,
     isVisible: () => bottomPanel.visible('terminal'),
@@ -106,10 +136,20 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bottomPanel.attachTerminal(terminalPanel); $('quickTerminal').textContent = '终端';
   bottomPanel.subscribe(() => { if (bottomPanel.visible('terminal')) void terminalConsole.refresh(); else terminalConsole.hide(); });
   const fileManager = createFileManager({ root: dialog.querySelector('[data-panel=files]'), api, getContext, editor, openFile, previewFile: previewArtifact, refreshFiles, isVisible: () => !dialog.hidden && tab === 'files' });
-  for (const text of ['录制技能与操作回放', '浏览器标签页工作区与页面批注', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
+  for (const text of ['录制技能与操作回放', '网页元素与区域批注', '原生语音与屏幕上下文', 'Office 成果原生版式预览', '云端任务委派、托管环境及 Pull Request 流程']) { const item = node('div', null, 'native-card'); item.append(node('strong', text), node('p', '网页暂不支持 · 请在本机桌面客户端完成')); $('nativeCapabilities').append(item); }
   async function show(id = tab, entry) {
+    if (id === 'search' && sidebarSearchHost) {
+      contextChanged(); if (!dialog.hidden) close({ restoreFocus: false }); tab = 'search';
+      if (onSidebar) onSidebar('search'); else { $('sidebarFileView').hidden = true; $('sidebarGitView').hidden = true; $('sidebarSearchView').hidden = false; }
+      renderSearchResults();
+      if (entry?.query != null) { $('projectSearchQuery').value = entry.query; $('searchFilenames').checked = !!entry.filenames; $('projectSearchForm').requestSubmit(); }
+      if (entry?.focus !== false) $('projectSearchQuery').focus();
+      return;
+    }
+    if (id === 'git' && !entry) return onGitSubmit(context().cwd);
+    if (id === 'browser' && !context().sharedBrowser) { status('当前服务尚未加载共享浏览器，请等待后端升级后刷新。'); return; }
     if (id === 'terminal') { contextChanged(); close(); bottomPanel.show('terminal'); $('terminalCommand').focus(); return; }
-    searchController?.abort();
+    browserWorkspace.setVisible(false); dockBrowser(id === 'browser');
     contextChanged(); tab = id; sequence++; status(''); searchLoading = false;
     if (id === 'search') renderSearchResults();
     if (id === 'git') reviewChanges = entry?.changes?.map(change => ({ ...change, path: projectPath(change.path, context().cwd) })).filter(change => change.path) || null; renderProjectPath();
@@ -119,13 +159,14 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     dialog.classList.toggle('document-wide', id === 'artifacts'); dialog.classList.toggle('agents-view', id === 'agents'); dialog.classList.toggle('schedules-view', id === 'schedules'); schedules.setVisible(id === 'schedules');
     for (const panel of dialog.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== id;
     const task = taskTabs.has(id); $('workbenchTitle').textContent = task ? '项目工具' : '设置';
-    for (const el of $('workbenchNav').children) { el.hidden = taskTabs.has(el.dataset.tab) !== task || el.dataset.tab === 'appApprovals' && !context().appApprovals || el.dataset.tab === 'memories' && !context().memorySettings; el.setAttribute('aria-selected', String(el.dataset.tab === id)); el.tabIndex = el.dataset.tab === id ? 0 : -1; }
+    for (const el of $('workbenchNav').children) { el.hidden = el.dataset.tab === 'search' && !!sidebarSearchHost || taskTabs.has(el.dataset.tab) !== task || el.dataset.tab === 'appApprovals' && !context().appApprovals || el.dataset.tab === 'memories' && !context().memorySettings || el.dataset.tab === 'browser' && !context().sharedBrowser; el.setAttribute('aria-selected', String(el.dataset.tab === id)); el.tabIndex = el.dataset.tab === id ? 0 : -1; }
     $('showTaskTools').setAttribute('aria-pressed', String(task)); $('showSettingsTools').setAttribute('aria-pressed', String(!task));
     if (dialog.hidden) opener = document.activeElement;
-    dialog.hidden = false; $('workSurface').classList.add('with-tools');
+    dialog.hidden = false; if (id !== 'browser') $('workSurface').classList.add('with-tools');
     $('workbenchNav').querySelector(`[data-tab=${id}]`)?.focus();
     if (entry?.query != null) { $('projectSearchQuery').value = entry.query; $('searchFilenames').checked = !!entry.filenames; $('projectSearchForm').requestSubmit(); }
     if (id === 'git') { renderTurnChanges(); selectReviewSection(entry?.section || 'changes'); if (entry?.section === 'git') await run(loadGit)(); }
+    if (id === 'browser') { browserWorkspace.setVisible(true); if (entry?.settings) browserWorkspace.showSettings(); }
     if (id === 'files') await fileManager.show(entry);
     if (id === 'artifacts') { renderArtifacts(); if (!entry?.loadingArtifact && lastArtifact && !artifactViewer) void run(() => previewArtifact(lastArtifact))(); }
     if (id === 'agents') { renderAgentViews(); void pollAgents(true); }
@@ -136,14 +177,20 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     if (id === 'memories') await run(loadMemories)();
     if (id === 'schedules') await schedules.load();
   }
-  bind('closeWorkbench', close); bind('showTaskTools', () => show('search')); bind('showSettingsTools', () => show('preferences'));
+  bind('browserSettingsEntry', () => show('browser', { settings: true }));
+  bind('closeWorkbench', close); bind('showTaskTools', () => show('files')); bind('showSettingsTools', () => show('preferences'));
   dialog.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.querySelector('dialog[open]')) { event.preventDefault(); close(); } });
-  $('workbenchNav').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const items = [...$('workbenchNav').children].filter(el => !el.hidden); const index = items.findIndex(el => el.dataset.tab === tab); const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length; show(items[next].dataset.tab); });
-  async function openFile(entry) { if (await editor.open(entry)) { if (entry.line) { const content = editor.current?.content || ''; editor.select(content.split('\n').slice(0, entry.line - 1).reduce((n, line) => n + line.length + 1, 0)); } return true; } return false; }
+  $('workbenchNav').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const items = [...$('workbenchNav').children].filter(el => !el.hidden); const index = items.findIndex(el => el.dataset.tab === tab); const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length; openTool(items[next].dataset.tab); });
+  async function openFile(entry) { if (await editor.open(entry)) { const file = editor.current; if (entry.line && file && editor.inspect(entry)?.id === file.id && (!entry.viewCwd || editor.cwd === entry.viewCwd)) { editor.select(file.content.split('\n').slice(0, entry.line - 1).reduce((n, line) => n + line.length + 1, 0)); } return true; } return false; }
   function renderSearchResults() {
+    const expanded = new Map([...$('projectSearchResults').querySelectorAll('[data-search-file]')].map(item => [item.dataset.searchFile, item.open]));
     $('projectSearchResults').replaceChildren();
     if (!searchResult) return;
-    for (const hit of searchResult.results.slice(searchPage * 200, (searchPage + 1) * 200)) { const item = button(`${hit.path}:${hit.line}\n${hit.text}`, run(() => openFile({ cwd: searchResult.cwd, ...hit }))); item.className = 'search-result'; $('projectSearchResults').append(item); }
+    const result = searchResult, groups = new Map();
+    for (const hit of result.results.slice(searchPage * 200, (searchPage + 1) * 200)) {
+      if (!groups.has(hit.path)) { const group = node('details', null, 'sidebar-search-file'); group.dataset.searchFile = hit.path; group.open = expanded.get(hit.path) !== false; group.append(node('summary', hit.path)); groups.set(hit.path, group); $('projectSearchResults').append(group); }
+      const item = button(`${result.filenames ? '打开文件' : `第 ${hit.line} 行`}\n${hit.text}`, run(() => openFile({ cwd: result.cwd, ...hit }))); item.className = 'search-result'; item.title = `${hit.path}:${hit.line}`; groups.get(hit.path).append(item);
+    }
     if (!searchLoading && (searchPage || searchResult.results.length > 200 || searchResult.nextCursor)) {
       const row = node('div', null, 'inline-fields'), previous = button('上一页', () => { searchPage--; renderSearchResults(); }); previous.disabled = searchPage === 0;
       const next = button('下一页', run(async () => { searchPage++; if (searchResult.nextCursor && searchResult.results.length < (searchPage + 1) * 200) await searchProject(true); else renderSearchResults(); })); next.disabled = !searchResult.nextCursor && searchResult.results.length <= (searchPage + 1) * 200;
@@ -152,29 +199,32 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   }
   async function searchProject(append = false) {
     searchController?.abort(); searchController = new AbortController(); const controller = searchController;
-    const expected = ++sequence, cwd = context().cwd, query = append ? searchResult.query : $('projectSearchQuery').value;
+    const expected = ++searchSequence, cwd = context().cwd, query = append ? searchResult.query : $('projectSearchQuery').value;
     const filenames = append ? searchResult.filenames : $('searchFilenames').checked, caseSensitive = append ? searchResult.caseSensitive : $('searchCase').checked;
     let cursor = append ? searchResult.nextCursor : null;
     const hits = new Map((append ? searchResult.results : []).map(hit => [`${hit.path}:${hit.line}`, hit]));
     if (!append) { searchPage = 0; searchResult = null; }
-    preview = null; $('projectReplaceApply').hidden = true; $('projectReplaceResults').replaceChildren(); searchLoading = true; status('搜索中…'); renderSearchResults();
+    preview = null; $('projectReplaceApply').hidden = true; $('projectReplaceResults').replaceChildren(); searchLoading = true; searchStatus('搜索中…'); renderSearchResults();
     try { do {
       const result = await api(`/api/project/search?cwd=${encodeURIComponent(cwd)}&query=${encodeURIComponent(query)}&filenames=${filenames ? 1 : 0}&caseSensitive=${caseSensitive ? 1 : 0}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, undefined, { signal: controller.signal });
-      if (expected !== sequence) return;
+      if (expected !== searchSequence || cwd !== context().cwd || controller.signal.aborted) return;
       for (const hit of result.results) hits.set(`${hit.path}:${hit.line}`, hit);
       searchResult = { ...result, query, filenames, caseSensitive, results: [...hits.values()] }; cursor = result.nextCursor;
-      status(`搜索中…已检查 ${result.scanned} 项，找到 ${hits.size} 条结果`); renderSearchResults();
+      searchStatus(`搜索中…已检查 ${result.scanned} 项，找到 ${hits.size} 条结果`); renderSearchResults();
     } while (cursor && hits.size < (searchPage + 1) * 200);
     if (!cursor) searchPage = Math.min(searchPage, Math.max(0, Math.ceil(hits.size / 200) - 1));
-    status(`${hits.size} 条结果 · 已扫描 ${searchResult.scanned} 项${cursor ? ' · 下一页继续搜索' : ''}${searchResult.skipped ? ` · ${searchResult.skipped} 个目录无法读取` : ''}${searchResult.limited ? ' · 内容搜索结果不完整，请缩小搜索范围' : ''}`);
-    } catch (error) { if (!controller.signal.aborted && expected === sequence) throw error; }
-    finally { if (expected === sequence) { searchLoading = false; renderSearchResults(); } }
+    searchStatus(`${hits.size} 条结果 · 已扫描 ${searchResult.scanned} 项${cursor ? ' · 下一页继续搜索' : ''}${searchResult.skipped ? ` · ${searchResult.skipped} 个目录无法读取` : ''}${searchResult.limited ? ' · 内容搜索结果不完整，请缩小搜索范围' : ''}`);
+    } catch (error) { if (!controller.signal.aborted && expected === searchSequence) throw error; }
+    finally { if (expected === searchSequence) { searchLoading = false; renderSearchResults(); } }
   }
   form('projectSearchForm', () => searchProject());
   bind('projectReplacePreview', async () => {
     if (editor.dirty) throw new Error('请先保存或关闭编辑器中的草稿，避免批量替换与未保存内容冲突。');
     if (!searchResult?.results.length || searchResult.cwd !== context().cwd) throw new Error('请先搜索当前项目。');
-    preview = await api('/api/project/replace-preview', { cwd: searchResult.cwd, query: searchResult.query, replacement: $('projectReplaceText').value, paths: [...new Set(searchResult.results.map(hit => hit.path))] });
+    const result = searchResult, replacement = $('projectReplaceText').value;
+    const plan = await api('/api/project/replace-preview', { cwd: result.cwd, query: result.query, replacement, paths: [...new Set(result.results.map(hit => hit.path))] });
+    if (result !== searchResult || result.cwd !== context().cwd || replacement !== $('projectReplaceText').value) return;
+    preview = plan;
     $('projectReplaceResults').replaceChildren();
     for (const file of preview.files) { const item = node('details'); item.append(node('summary', `${file.path} · ${file.count} 处`)); const columns = node('div', null, 'version-columns'); for (const [title, text] of [['替换前', file.before], ['替换后', file.after]]) { const label = node('label', title), area = node('textarea'); area.value = text; area.readOnly = true; label.append(area); columns.append(label); } item.append(columns); $('projectReplaceResults').append(item); }
     $('projectReplaceApply').hidden = !preview.files.length;
@@ -182,7 +232,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bind('projectReplaceApply', async () => {
     if (editor.dirty) throw new Error('请先保存编辑草稿。');
     if (!preview || !confirm(`将这份预览中的 ${preview.files.length} 个文件写入磁盘？多文件写入不是原子操作，发生冲突时会停止并报告已保存的文件。`)) return;
-    const result = await api('/api/project/replace-apply', { id: preview.id, confirmed: true }); status(`已保存：${result.saved.join('、') || '无'}${result.error ? `。${result.error}` : '。已打开的文件请重新载入。'}`); preview = null; $('projectReplaceApply').hidden = true; refreshFiles();
+    const result = await api('/api/project/replace-apply', { id: preview.id, confirmed: true }); searchStatus(`已保存：${result.saved.join('、') || '无'}${result.error ? `。${result.error}` : '。已打开的文件请重新载入。'}`); preview = null; $('projectReplaceApply').hidden = true; refreshFiles();
   });
   function renderProjectPath() {
     const cwd = context().cwd || '';
@@ -455,6 +505,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
     }
   }
   async function loadMemories() {
+    void chatMemories.load();
     if (!context().memorySettings || memoryWriting) return;
     const read = ++memoryRead, expected = sequence; memoryData = null; memoryControls();
     memoryFileRead++; $('memoriesPreview').hidden = true; $('memoriesPreviewContent').textContent = ''; $('memoriesFiles').replaceChildren();
@@ -521,7 +572,13 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
       artifactViewer = createArtifactViewer({ container, bytes, entry, result, api });
     }
     else if (type.startsWith('image/')) { const image = node('img'); image.src = artifactUrl; image.alt = result.name; image.className = 'artifact-image'; container.append(image); }
-    else if (ext === '.html' || ext === '.htm') { const frame = node('iframe'); frame.setAttribute('sandbox', ''); frame.title = `静态预览：${result.name}`; frame.src = `/api/project/preview?cwd=${encodeURIComponent(entry.cwd)}&path=${encodeURIComponent(entry.path)}`; container.append(frame); }
+    else if (ext === '.html' || ext === '.htm') {
+      const frame = node('iframe'), tools = node('div', null, 'document-toolbar'), hint = node('span', '静态模式 · 可切换交互预览', 'field-hint');
+      const base = `/api/project/preview?cwd=${encodeURIComponent(entry.cwd)}&path=${encodeURIComponent(entry.path)}`;
+      const load = interactive => { frame.setAttribute('sandbox', interactive ? 'allow-scripts' : ''); frame.title = `${interactive ? '交互' : '静态'}预览：${result.name}`; frame.src = base + (interactive ? '&interactive=1' : ''); interactiveButton.setAttribute('aria-pressed', String(interactive)); staticButton.setAttribute('aria-pressed', String(!interactive)); hint.textContent = interactive ? '脚本在隔离页面内运行 · 禁止联网、表单提交和访问主页面' : '静态模式 · 可切换交互预览'; };
+      const staticButton = button('静态预览', () => load(false)), interactiveButton = button('交互预览', () => load(true));
+      frame.setAttribute('referrerpolicy', 'no-referrer'); tools.append(staticButton, interactiveButton, hint); container.append(tools, frame); load(false);
+    }
     else if (['.md', '.txt', '.sql', '.py', '.json', '.csv', '.tsv', '.log'].includes(ext)) { const text = new TextDecoder().decode(bytes); if (ext === '.md') { const block = node('div', null, 'artifact-markdown'); block.innerHTML = markdown(text.slice(0, 200000)); container.append(block); } else container.append(node('pre', text.slice(0, 200000), 'workbench-output')); if (text.length > 200000) container.append(node('p', '预览已截断，下载保留完整文件。')); }
     else { container.append(node('p', '此格式不提供网页内版式预览，请下载后打开，或切换到本机桌面客户端。')); const link = node('a', '打开本机桌面客户端 ↗'); link.href = 'codex://'; container.append(link); }
     status('这是磁盘上的文件；编辑器未保存的草稿不会出现在此预览中。');
@@ -548,7 +605,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bind('notifyEnable', async () => { if (!('Notification' in window)) throw new Error('浏览器不支持系统通知。'); status(`通知权限：${await Notification.requestPermission()}`); });
   bind('usageRefresh', async () => { $('usageResult').textContent = JSON.stringify(await api('/api/usage'), null, 2); });
   document.addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); show('search'); } });
-  return { show, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft(); }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return pendingActions > 0 || fileManager.pending || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(fileManager.pending) + Number(terminalConsole.pending) + Number(schedules.pending); } };
+  return { show, close, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft(); }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return browserWorkspace.pending || pendingActions > 0 || fileManager.pending || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(fileManager.pending) + Number(terminalConsole.pending) + Number(schedules.pending); } };
 }
 
 // Browse first, then act on the selected item. Paths are navigation metadata;

@@ -9,6 +9,11 @@ import { markdown } from '../public/markdown.js';
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const content = '# 项目说明\n\n> 阅读文档\n\n## 功能\n\n- 文件编辑\n- **实时预览**\n\n| 模块 | 作用 |\n| --- | --- |\n| `public/` | 界面 |\n\n```sql\nSELECT 1;\n```\n\n[功能](#功能)\n\n[另一个文件](../other.MD)\n';
 const settle = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 2)); } assert.fail('editor did not settle'); };
+test('standalone Markdown links preserve complete-path exclusions when navigating from the filesystem root', () => {
+  const entry = { cwd: '/', path: 'unregistered/docs/readme.md', external: true };
+  assert.deepEqual(resolveMarkdownLink('../example.sql#L3', entry), { cwd: '/', path: 'unregistered/example.sql', line: 3, anchor: 'L3' });
+  for (const target of ['../.ssh/key.sql', '../.codex/MEMORY.md', '../node_modules/a.sql', '../待删除/a.sql']) assert.throws(() => resolveMarkdownLink(target, entry), /排除项/);
+});
 function browser(t, initial) {
   const errors = [], vc = new VirtualConsole(); vc.on('jsdomError', error => errors.push(error.message));
   const dom = new JSDOM(html, { url: 'http://localhost', pretendToBeVisual: true, virtualConsole: vc });

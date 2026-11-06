@@ -5,7 +5,7 @@ const lineAt = (text, offset) => { let line = 1; for (let at = text.indexOf('\n'
 // Only use the already open buffer. Never read files or persist their contents.
 export function editorContextSnapshot(editor, cwd) {
   const file = editor.current;
-  if (!editor.visible || globalThis.document?.getElementById('workspacePanes')?.classList.contains('toolbox-docked') || !file || file.cwd !== cwd || file.loading || file.composing || (file.preview && !file.markdownMode) || typeof file.content !== 'string') return null;
+  if (!editor.visible || globalThis.document?.getElementById('workspacePanes')?.classList.contains('toolbox-docked') || !file || file.external || file.cwd !== cwd || file.loading || file.composing || (file.preview && !file.markdownMode) || typeof file.content !== 'string') return null;
   const text = file.content, ranges = file.columnSelection ? file.selections : null;
   if (ranges && !ranges.some(range => range.end > range.start)) return null;
   const selected = ranges ? true : file.end > file.start;
@@ -26,7 +26,7 @@ export function editorContextSnapshot(editor, cwd) {
   const from = lineAt(text, start), to = lineAt(text, end);
   const dirty = editor.tabs.some(tab => tab.id === file.id && tab.dirty);
   const label = `${file.path.split('/').at(-1).slice(0, 180)}:${from}-${to} · ${ranges ? '列选区' : selected ? '选区' : partial ? '光标附近' : '当前文件'}${dirty ? ' · 未保存' : ''}${partial ? ' · 节选' : ''}`;
-  const tabs = editor.tabs.filter(tab => tab.cwd === cwd && !tab.loading).slice(0, 8).map(tab => tab.path.slice(0, 200));
+  const tabs = editor.tabs.filter(tab => tab.cwd === cwd && !tab.external && !tab.loading).slice(0, 8).map(tab => tab.path.slice(0, 200));
   return { cwd, path: file.path, label, text: `当前文件：${file.path}\n来源：发送时的编辑器快照${dirty ? '（尚未保存，可能与磁盘不同）' : ''}\n范围：第 ${from}–${to} 行${ranges ? '（矩形列选区，按行拼接）' : ''}${partial ? '（仅节选，未包含全文）' : ''}\n已打开文件（最多 8 个，仅路径）：${JSON.stringify(tabs)}\n\n${excerpt}` };
 }
 

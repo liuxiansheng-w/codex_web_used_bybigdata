@@ -9,6 +9,92 @@ import { createDraftJournal } from '../public/draft-journal.js';
 import { createDraftStore } from '../public/interactions.js';
 import { runTool } from '../public/toolbox-core.js';
 
+test('sidebar files, search and inline Git preserve editor, chat and bottom terminal while diffs open as separate central tabs', async t => {
+  const { $, document, window, input, open, settle, requests } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  await open('a.py'); input('fileEditorText', 'unsaved editor draft'); input('prompt', 'keep chat draft'); const source = $('fileEditorText');
+  $('quickTerminal').click(); await settle(() => !$('terminalCommand').disabled); input('terminalCommand', 'keep command draft'); const terminal = $('terminalResults');
+  $('sidebar-tab-search').click(); assert.equal($('sidebarSearchView').hidden, false); assert.equal($('sidebarFileView').hidden, true); assert.equal($('workbenchDialog').hidden, true);
+  input('projectSearchQuery', 'nested'); $('projectSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(() => document.querySelector('.sidebar-search-file'));
+  const query = $('projectSearchQuery'), composer = $('composer'), main = $('mainPanel');
+  $('sidebar-tab-git').click(); await settle(() => document.querySelector('#gitSubmitDialog .git-submit-name'));
+  assert.equal($('gitSubmitDialog').tagName, 'SECTION'); assert.equal($('gitSubmitDialog').closest('#sidebarGitView'), $('sidebarGitView')); assert.equal(document.querySelector('dialog.git-submit-dialog'), null);
+  const message = document.querySelector('#gitSubmitDialog [data-ui=message]'); message.value = 'keep Git draft'; message.dispatchEvent(new window.Event('input'));
+  document.querySelector('#gitSubmitDialog .git-submit-file input').click(); document.querySelector('#gitSubmitDialog .git-submit-name').click();
+  await settle(() => document.querySelector('.git-diff-document')); assert.match(document.querySelector('.git-diff-document').textContent, /x=1[\s\S]*x=2/);
+  assert.match(document.querySelector('#editorTabs [role=tab][aria-selected=true]').getAttribute('aria-label'), /Git 差异/);
+  assert.equal(source.value, 'unsaved editor draft'); assert.equal($('editorVersionBadge').textContent, 'Git 差异'); assert.equal($('editorSave').disabled, true);
+  $('sidebar-tab-search').click(); assert.equal($('projectSearchQuery'), query); assert.equal(query.value, 'nested'); assert.ok(document.querySelector('.sidebar-search-file'));
+  $('sidebar-tab-git').click(); await settle(() => !document.querySelector('#gitSubmitDialog [data-ui=message]').disabled);
+  assert.equal(message.value, 'keep Git draft'); assert.equal(document.querySelector('#gitSubmitDialog .git-submit-file input').checked, true);
+  $('sidebar-tab-files').click(); document.querySelector('.file-main[aria-label="打开编辑：a.py"]').click(); await settle(() => $('fileEditorText') === source);
+  assert.equal(source.value, 'unsaved editor draft'); assert.equal(source.readOnly, false); assert.equal($('prompt').value, 'keep chat draft'); assert.equal($('composer'), composer); assert.equal($('mainPanel'), main);
+  assert.equal($('terminalResults'), terminal); assert.equal($('terminalCommand').value, 'keep command draft'); assert.equal($('bottomPanel').parentElement, $('workSurface'));
+  window.dispatchEvent(new window.Event('pagehide')); const stored = JSON.parse(window.localStorage.getItem('lemon:openFiles:v1')); assert.equal(stored.files.length, 1); assert.doesNotMatch(JSON.stringify(stored), /x=2|Git 差异|diff --git/);
+  assert.equal(requests.some(request => ['/api/send', '/api/sql/query', '/api/terminal/start', '/api/project/save'].includes(request.route)), false);
+  assert.equal(requests.some(request => request.route === '/api/git/submit' && request.body), false);
+});
+
+test('inline Git preserves failed submissions across view changes and sends only one confirmed commit request', async t => {
+  const { $, document, window, settle, input, requests } = await page(t);
+  input('prompt', 'keep chat draft'); window.confirm = () => true;
+  const original = globalThis.fetch, actions = []; let fail = true, finish;
+  globalThis.fetch = async (route, options = {}) => {
+    if (route !== '/api/git/submit' || !options.body) return original(route, options);
+    const body = JSON.parse(options.body); actions.push(body);
+    if (fail) return { ok: false, status: 409, json: async () => ({ error: '模拟版本冲突' }) };
+    return new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ committed: true, commit: 'abcdef123456', pushed: false }) }); });
+  };
+  $('sidebar-tab-git').click(); await settle(() => document.querySelector('#gitSubmitDialog .git-submit-file input'));
+  const field = name => document.querySelector(`#gitSubmitDialog [data-ui="${name}"]`);
+  field('files').querySelector('input').click(); field('message').value = 'reviewed change'; field('message').dispatchEvent(new window.Event('input'));
+  field('commit').click(); await settle(() => field('status').textContent.includes('模拟版本冲突') && !field('message').disabled);
+  $('sidebar-tab-files').click(); $('sidebar-tab-search').click(); $('sidebar-tab-git').click(); await settle(() => !field('message').disabled);
+  assert.equal(field('message').value, 'reviewed change'); assert.equal(field('files').querySelector('input').checked, true); assert.match(field('status').textContent, /模拟版本冲突/);
+  fail = false; field('commit').click(); field('commit').click(); await settle(() => finish); assert.equal(actions.length, 2); assert.deepEqual(actions[1].paths, ['a.py']); assert.equal(actions[1].message, 'reviewed change'); assert.equal(actions[1].confirmed, true);
+  finish(); await settle(() => !field('message').disabled && field('message').value === ''); assert.equal(field('files').querySelector('input').checked, false); assert.match(field('status').textContent, /本地已提交/);
+  assert.equal($('prompt').value, 'keep chat draft'); assert.equal(requests.some(request => request.route === '/api/git/action' || request.route === '/api/send'), false);
+});
+
+test('sidebar search isolates project drafts and rejects late results after switching projects', async t => {
+  const { $, document, window, input, settle } = await page(t, { 'codex-desk:projects': JSON.stringify(['/project', '/other']) });
+  const original = globalThis.fetch; let finish;
+  globalThis.fetch = async (route, options) => {
+    const url = new URL(route, 'http://localhost'), cwd = url.searchParams.get('cwd');
+    if (url.pathname === '/api/project/files' && cwd === '/other') return { ok: true, json: async () => ({ cwd, entries: [{ name: 'b.py', path: 'b.py', kind: 'file' }], nextOffset: null }) };
+    if (url.pathname === '/api/threads' && cwd === '/other') return { ok: true, json: async () => ({ cwd, threads: [] }) };
+    if (url.pathname === '/api/project/search') {
+      const payload = { cwd, scanned: 1, results: [{ path: cwd === '/project' ? 'a.py' : 'b.py', line: 1, text: cwd === '/project' ? 'old result must stay hidden' : 'other project result' }] };
+      if (cwd === '/project') return new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => payload }); });
+      return { ok: true, json: async () => payload };
+    }
+    return original(route, options);
+  };
+  $('sidebar-tab-search').click(); input('projectSearchQuery', 'slow original'); $('searchCase').checked = true;
+  $('projectSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(() => finish);
+  document.querySelector('.project-select[data-cwd="/other"]').click(); await settle(() => $('sidebarProjectName').textContent === 'other' && $('projectSearchQuery').value === '');
+  input('projectSearchQuery', 'other query'); $('projectSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(() => $('projectSearchResults').textContent.includes('other project result'));
+  finish(); await new Promise(setImmediate); assert.doesNotMatch($('projectSearchResults').textContent, /old result/); assert.equal($('projectSearchQuery').value, 'other query');
+  document.querySelector('.project-select[data-cwd="/project"]').click(); await settle(() => $('sidebarProjectName').textContent === 'project' && $('projectSearchQuery').value === 'slow original'); assert.equal($('searchCase').checked, true); assert.match($('sidebarSearchStatus').textContent, /已停止/);
+});
+
+test('sidebar keyboard navigation and search shortcuts retain chat text without sending work', async t => {
+  const { $, window, document, input, requests } = await page(t); input('prompt', 'keyboard draft');
+  const key = (node, values) => node.dispatchEvent(new window.KeyboardEvent('keydown', { ...values, bubbles: true, cancelable: true }));
+  $('sidebar-tab-files').focus(); key($('sidebar-tab-files'), { key: 'ArrowRight' }); assert.equal(document.activeElement, $('sidebar-tab-search')); assert.equal($('sidebarSearchView').hidden, false);
+  key($('sidebar-tab-search'), { key: 'Home' }); assert.equal(document.activeElement, $('sidebar-tab-files')); assert.equal($('sidebarFileView').hidden, false);
+  key($('prompt'), { key: 'F', metaKey: true, shiftKey: true }); assert.equal(document.activeElement, $('projectSearchQuery'));
+  key($('projectSearchQuery'), { key: 'E', metaKey: true, shiftKey: true }); assert.equal(document.activeElement, $('fileSearch')); assert.equal($('sidebarFileView').hidden, false);
+  assert.equal($('prompt').value, 'keyboard draft'); assert.equal(requests.some(request => request.body), false);
+});
+
+test('restoring the selected sidebar view respects the saved collapsed layout until the user opens it', async t => {
+  const { $, document, requests } = await page(t, { 'lemon:sidebarView': 'search', 'codex-desk:sidebarCollapsed': 'true' });
+  assert.equal($('appShell').classList.contains('sidebar-collapsed'), true); assert.equal($('sidebarSearchView').hidden, false);
+  $('menuButton').click(); assert.equal($('appShell').classList.contains('sidebar-collapsed'), false); assert.equal(document.activeElement, $('sidebar-tab-search'));
+  assert.equal(requests.some(request => request.body), false);
+});
+
 test('floating conversation preserves live messages, history, selection and unsaved buffers without submitting work', async t => {
   const { $, document, window, events, thread, input, open, settle, requests } = await page(t);
   document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
@@ -463,6 +549,8 @@ async function page(t, stored = {}, terminalProcesses = [], features = false, ap
       case '/api/respond': data = { ok: true }; break;
       case '/api/project/search': data = { cwd: '/project', results: [{ path: 'unloaded/nested.py', line: 1, text: 'unloaded/nested.py' }], scanned: 4 }; break;
       case '/api/git': data = { cwd: '/project', branch: 'main', files: [{ path: 'a.py', index: ' ', workingTree: 'M' }], version: 'v1', unstaged: 'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x=1\n+x=2\n', staged: '' }; break;
+      case '/api/git/submit': data = { cwd: url.searchParams.get('cwd') || '/project', branch: 'main', head: 'fictional-head', version: 'git-v1', files: [{ path: 'a.py', status: ' M' }], ahead: 0, behind: 0, tracking: 'origin/main', pullAvailable: true, pullBlocked: '', blocked: '', pushBlocked: '' }; break;
+      case '/api/git/submit/diff': data = { cwd: url.searchParams.get('cwd') || '/project', path: url.searchParams.get('path'), diff: 'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x=1\n+x=2\n' }; break;
       case '/api/git/action': data = { ok: true }; break;
       case '/api/terminal': data = { processes: terminalProcesses }; break;
       default: throw new Error(`Unexpected ${route}`);
@@ -858,7 +946,7 @@ test('unsent prompt exit protection, unified settings, full-project search and c
   assert.equal($('prompt').readOnly, false); assert.equal(document.querySelector('[data-tab=search]').hidden, true);
   $('closeWorkbench').click(); input('fileSearch', 'nested');
   await settle(() => $('projectFileTree').textContent.includes('unloaded/nested.py')); assert.match($('projectFileTree').textContent, /unloaded\/nested.py/); assert.ok(requests.some(r => r.route.includes('filenames=1')));
-  $('quickGit').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name'));
+  $('workbenchButton').click(); document.querySelector('#workbenchNav [data-tab=git]').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name'));
   document.querySelector('.git-file-name').click(); const line = document.querySelector('button.diff-add'); assert.ok(line); line.click();
   assert.equal($('reviewLocation').value, 'a.py:1'); assert.equal(document.activeElement, $('reviewComment'));
   $('quickTerminal').click(); assert.equal($('bottomTerminal').hidden, false); assert.equal($('workbenchDialog').hidden, true); assert.equal($('prompt').readOnly, false);
@@ -884,7 +972,7 @@ test('bottom terminal retains output and command drafts across tabs, collapse an
   $('quickTerminal').click(); await settle(() => $('terminal-running-demo'));
   input('terminalCommand', 'pending stdin');
   const output = $('terminal-running-demo'); assert.equal($('terminalCommand').getAttribute('aria-label'), '终端标准输入');
-  $('quickSearch').click(); assert.equal($('workbenchDialog').hidden, false);
+  $('quickSearch').click(); assert.equal($('workbenchDialog').hidden, true); assert.equal($('sidebarSearchView').hidden, false);
   document.querySelector('#workbenchNav [data-tab=terminal]').click();
   assert.equal($('workbenchDialog').hidden, true); assert.equal($('bottomTerminal').hidden, false);
   assert.equal($('terminalResults').closest('[data-panel=terminal]').parentElement, $('bottomTerminal'));
@@ -919,13 +1007,13 @@ test('chat shows a file summary without restoring the result dashboard, and revi
   assert.equal(document.querySelector('.message-time').getAttribute('datetime'), '2026-09-17T08:56:03.000Z');
   assert.equal(document.querySelector('.turn-duration').textContent, '用时 4 分钟 6 秒');
   assert.doesNotMatch($('scrollArea').textContent, /本轮结果|有异常 · 需检查|继续处理 \/ 补充验证/);
-  $('quickGit').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name'));
+  $('workbenchButton').click(); document.querySelector('#workbenchNav [data-tab=git]').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name'));
   assert.equal($('turnChanges').hidden, false); assert.match($('turnChanges').textContent, /a\.py/);
   $('quickArtifacts').click(); assert.match($('artifactList').textContent, /a\.py/);
   assert.equal($('prompt').value, ''); assert.equal(requests.some(r => r.route === '/api/send'), false);
   events.emit('thread', { ...thread, revision: 3, latestTurnId: 'next', busy: true, items: [{ id: 'old', turnId: 'done', type: 'agentMessage', text: '[旧文件](a.py)' }] });
   assert.doesNotMatch($('artifactList').textContent, /a\.py/);
-  $('quickGit').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name')); assert.equal($('turnChanges').hidden, true);
+  $('workbenchButton').click(); document.querySelector('#workbenchNav [data-tab=git]').click(); $('review-tab-git').click(); await settle(() => document.querySelector('.git-file-name')); assert.equal($('turnChanges').hidden, true);
   events.emit('thread', { ...thread, revision: 4, latestTurnId: 'next', completion: 'failed', items: [{ id: 'new', turnId: 'next', type: 'agentMessage', text: '未完成' }] });
   assert.equal($('currentThreadStatus').textContent, '需检查'); events.emit('error'); assert.equal($('currentThreadStatus').textContent, '待核实');
   document.querySelector('[data-tab=files]').click(); await settle(() => !$('manageCreateFile').disabled);
@@ -1293,6 +1381,64 @@ test('AI angle-delimited file citations open project files at the cited line wit
   assert.equal(requests.some(r => /\/save|\/sql\/query|\/send|\/terminal\/start/.test(r.route)), false);
 });
 
+test('chat links open registered and unregistered files without adding projects, switching chat, executing SQL or exposing automatic context', async t => {
+  const { $, document, window, settle, events, thread, files, requests, input, open } = await page(t, { 'codex-desk:projects': JSON.stringify(['/project', '/other']) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (route, options) => {
+    const response = await originalFetch(route, options), url = new URL(route, 'http://localhost');
+    const cwd = url.searchParams.get('cwd');
+    if (url.pathname !== '/api/project/file' || !['/other', '/'].includes(cwd)) return response;
+    const data = await response.json(); return { ok: true, json: async () => ({ ...data, cwd }) };
+  };
+  files['报告 (2).sql'] = '-- fictional line 1\n-- fictional line 2\nSELECT 1;';
+  files['unregistered/草稿.sql'] = '-- standalone fixture\nSELECT 2;';
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  await open('a.py'); input('fileEditorText', 'keep unsaved owner buffer'); const owner = $('fileEditorText');
+  input('prompt', '保留这份聊天草稿');
+  events.emit('thread', { ...thread, revision: 2, items: [{ id: 'cross-project-link', type: 'agentMessage', text: '[查看报告](</other/报告 (2).sql#L3>)、[未添加的项目](</unregistered/草稿.sql#L2>)、[受限文件](</unregistered/.ssh/key.sql>)' }] });
+  const links = [...document.querySelectorAll('#messages [data-file-link]')], before = requests.filter(r => r.route.startsWith('/api/project/file?')).length;
+  assert.equal(before, 1, 'rendering citations does not read their targets'); links[0].click();
+  await settle(() => $('editorFilename').textContent === '报告 (2).sql' && $('fileEditorText').value === files['报告 (2).sql']);
+  await settle(() => $('fileEditorText').selectionStart === files['报告 (2).sql'].indexOf('SELECT'));
+  assert.equal($('fileEditorText').readOnly, true); assert.equal($('sqlRun').disabled, true); assert.equal($('editorAttach').disabled, true);
+  assert.match($('editorStatus').textContent, /其他项目.*只读/); assert.equal($('editorContextPreview').hidden, true);
+  assert.equal(document.querySelector('.project-select[aria-current=true]').dataset.cwd, '/project'); assert.equal($('threadTitle').textContent, 'Task');
+  assert.equal($('prompt').value, '保留这份聊天草稿'); assert.equal(window.location.search, '?thread=t1');
+  $('fileEditorText').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }));
+  links[1].click(); await settle(() => $('editorFilename').textContent === '草稿.sql' && $('fileEditorText').value === files['unregistered/草稿.sql']);
+  await settle(() => $('fileEditorText').selectionStart === files['unregistered/草稿.sql'].indexOf('SELECT'));
+  assert.equal($('fileEditorText').readOnly, true); assert.equal($('sqlRun').disabled, true); assert.equal($('editorAttach').disabled, true);
+  assert.equal($('editorPath').textContent, '/unregistered/草稿.sql');
+  assert.deepEqual([...document.querySelectorAll('.project-select')].map(node => node.dataset.cwd), ['/project', '/other']);
+  assert.equal(requests.some(r => r.route.startsWith('/api/project/files?') && !['/project', '/other'].includes(new URL(r.route, 'http://localhost').searchParams.get('cwd'))), false, 'opening a file does not browse its parent');
+  $('fileEditorText').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }));
+  const reads = requests.filter(r => r.route.startsWith('/api/project/file?')).length; links[2].click();
+  await settle(() => $('noticeText').textContent.includes('排除项')); assert.equal(requests.filter(r => r.route.startsWith('/api/project/file?')).length, reads);
+  assert.equal($('threadTitle').textContent, 'Task'); assert.equal($('prompt').value, '保留这份聊天草稿');
+  const tab = [...$('editorTabs').querySelectorAll('[role=tab]')].find(node => node.textContent.includes('a.py')); tab.click();
+  assert.equal($('fileEditorText'), owner); assert.equal(owner.value, 'keep unsaved owner buffer'); assert.equal(owner.readOnly, false);
+  assert.equal(requests.some(r => /\/save|\/sql\/query|\/send|\/terminal\/start/.test(r.route)), false);
+});
+
+test('standalone temporary file aliases preserve line navigation and reuse the same read-only tab', async t => {
+  const { $, document, settle, events, thread, files } = await page(t);
+  const originalFetch = globalThis.fetch, path = 'fixture/临时草稿.sql';
+  files[path] = '-- fictional fixture\n-- read only\nSELECT 1;';
+  globalThis.fetch = async (route, options) => {
+    const response = await originalFetch(route, options), url = new URL(route, 'http://localhost');
+    if (url.pathname !== '/api/project/file' || !['/tmp', '/private/tmp'].includes(url.searchParams.get('cwd'))) return response;
+    const data = await response.json(); return { ok: true, json: async () => ({ ...data, cwd: '/private/tmp' }) };
+  };
+  document.querySelector('[data-thread-id=t1]').click(); await settle(() => $('threadTitle').textContent === 'Task');
+  events.emit('thread', { ...thread, revision: 2, items: [{ id: 'temporary', type: 'agentMessage', text: `[临时草稿](</tmp/${path}#L3>)、[同一文件](</private/tmp/${path}#L2>)` }] });
+  const links = [...document.querySelectorAll('#messages [data-file-link]')]; links[0].click();
+  await settle(() => $('fileEditorText').value === files[path] && $('fileEditorText').selectionStart === files[path].indexOf('SELECT'));
+  const input = $('fileEditorText'); assert.equal(input.readOnly, true); assert.equal($('editorPath').textContent, '/private/tmp/' + path);
+  links[1].click(); await settle(() => $('fileEditorText') === input && input.selectionStart === files[path].indexOf('-- read only'));
+  assert.equal($('editorTabs').querySelectorAll('[role=tab]').length, 1);
+  assert.deepEqual([...document.querySelectorAll('.project-select')].map(node => node.dataset.cwd), ['/project']);
+});
+
 test('native message citations open Excel only on click and followups preserve drafts without sending', async t => {
   const { $, document, settle, events, thread, requests, open, input } = await page(t);
   const path = 'AIdata/20260924/报表 明细.xlsx', previews = [], originalFetch = globalThis.fetch;
@@ -1454,9 +1600,9 @@ test('execution send controls describe their consequence and old Git commit entr
   }
   const original = globalThis.fetch;
   globalThis.fetch = async (route, options) => route.startsWith('/api/git/submit?') ? { ok: true, json: async () => ({ cwd: '/project', head: 'abc', branch: 'main', files: [], version: 'v1' }) } : original(route, options);
-  $('quickGit').click(); $('review-tab-git').click(); await settle(() => !$('gitSubmitOpen').hidden);
-  assert.equal(document.querySelector('[data-git=commit]'), null); $('gitSubmitOpen').click();
-  await settle(() => document.querySelector('#gitSubmitDialog')?.open); assert.equal($('prompt').value, '保留草稿');
+  $('quickGit').click(); await settle(() => document.querySelector('#gitSubmitDialog')?.hidden === false);
+  assert.equal(document.querySelector('[data-git=commit]'), null);
+  assert.equal($('sidebarGitView').hidden, false); assert.equal($('gitSubmitDialog').tagName, 'SECTION'); assert.equal($('prompt').value, '保留草稿');
   assert.equal(requests.filter(request => request.route === '/api/git/action' && request.body?.action === 'commit').length, 0);
 });
 

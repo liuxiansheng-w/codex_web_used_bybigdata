@@ -139,23 +139,72 @@ export function createTestPreview({ document = globalThis.document, getContext =
   return { sync, show() { show(); sync(); }, hide, destroy() { observer?.disconnect(); win.removeEventListener('resize', clamp); clear(); pane.remove(); trigger.remove(); } };
 }
 
-export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled = () => {} }) {
+export function createProjectSidebar({ onSelect = () => {}, onReveal = () => {}, storage = localStorage }) {
+  const tabs = document.getElementById('sidebarTabs');
+  const controls = [...tabs.querySelectorAll('[data-sidebar-view]')];
+  let view = 'files', cwd = '', restoring = false;
+  try { const saved = storage.getItem('lemon:sidebarView'); if (controls.some(control => control.dataset.sidebarView === saved)) view = saved; } catch {}
+  function show(next, { notify = true, focus = false } = {}) {
+    if (!controls.some(control => control.dataset.sidebarView === next)) return;
+    view = next; tabs.closest('.sidebar').dataset.view = view; if (!restoring) onReveal();
+    for (const control of controls) {
+      const active = control.dataset.sidebarView === view;
+      control.setAttribute('aria-selected', String(active)); control.tabIndex = active ? 0 : -1;
+      document.getElementById(control.getAttribute('aria-controls')).hidden = !active;
+    }
+    try { storage.setItem('lemon:sidebarView', view); } catch {}
+    if (notify) onSelect(view);
+    if (focus) controls.find(control => control.dataset.sidebarView === view)?.focus({ preventScroll: true });
+  }
+  for (const control of controls) control.addEventListener('click', () => show(control.dataset.sidebarView));
+  tabs.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation(); const index = controls.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : controls.length - 1)) % controls.length;
+    show(controls[next].dataset.sidebarView, { focus: true });
+  });
+  // Restore only the view identifier; project-specific data loads after bootstrap.
+  for (const control of controls) { const active = control.dataset.sidebarView === view; control.setAttribute('aria-selected', String(active)); control.tabIndex = active ? 0 : -1; document.getElementById(control.getAttribute('aria-controls')).hidden = !active; }
+  return { show, get active() { return view; }, sync(value) {
+    if (!value) return; const initial = !cwd, changed = cwd !== value; cwd = value;
+    const label = document.getElementById('sidebarProjectName'); label.textContent = cwd.split('/').filter(Boolean).at(-1) || '/'; label.title = cwd;
+    if (changed) { document.getElementById('sidebarProjects').open = false; const badge = document.getElementById('sidebarGitCount'); badge.hidden = true; badge.textContent = ''; restoring = initial; try { onSelect(view); } finally { restoring = false; } }
+  } };
+}
+
+export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled = () => {}, onShow = () => {}, onClose = () => {}, onOpenDiff, onSnapshot = () => {}, host = document.getElementById('sidebarGitHost') }) {
   const menu = el('details', null, 'project-actions-menu');
   const trigger = el('summary', '⋯', 'icon-button'); trigger.setAttribute('aria-label', '项目更多操作'); trigger.title = '项目更多操作';
   const entry = el('button', 'Git 提交与推送', 'project-git-entry'), pullEntry = el('button', '拉取远程更新…', 'project-git-entry'); entry.type = pullEntry.type = 'button';
   const popup = el('div', null, 'project-git-popup'); popup.append(entry, pullEntry); menu.append(trigger, popup);
   document.querySelector('.breadcrumb').append(menu);
-  const dialog = el('dialog', null, 'git-submit-dialog'); dialog.id = 'gitSubmitDialog'; dialog.setAttribute('aria-labelledby', 'gitSubmitHeading');
+  const docked = !!host;
+  const dialog = el(docked ? 'section' : 'dialog', null, 'git-submit-dialog' + (docked ? ' git-sidebar-panel' : '')); dialog.id = 'gitSubmitDialog'; dialog.setAttribute('aria-labelledby', 'gitSubmitHeading');
   dialog.innerHTML = `<header class="dialog-heading"><div><h2 id="gitSubmitHeading">Git 同步与提交</h2><p data-ui="project" class="field-hint"></p></div><button data-ui="close" class="icon-button" aria-label="关闭 Git 同步与提交">×</button></header>
     <div class="git-submit-meta"><span data-ui="branch"></span><span data-ui="remote"></span><span data-ui="ahead"></span><button data-ui="refresh" class="secondary-button">刷新状态</button><button data-ui="pull" class="secondary-button">拉取远程更新…</button></div>
     <p class="field-hint">拉取会下载当前上游并更新本地文件，仅允许快进；请先保存草稿并处理未提交修改。提交使用磁盘内容，推送包含全部未推送提交。计数基于最近同步，刷新状态不会访问远程。</p><p data-ui="pull-hint" class="field-hint"></p>
     <div class="git-submit-body"><section class="git-submit-list"><div class="git-submit-selection"><strong>变更文件</strong><button data-ui="all" class="text-button">全选</button><button data-ui="none" class="text-button">清空</button></div><div data-ui="files"></div></section><section class="git-submit-preview" aria-label="选中文件差异"><h3 data-ui="filename">选择文件查看差异</h3><pre data-ui="diff" tabindex="0"></pre></section></div>
     <footer><label>提交说明<textarea data-ui="message" rows="2" maxlength="1000" placeholder="简要说明这次修改…"></textarea></label><p data-ui="hint" class="field-hint"></p><p data-ui="status" role="status" aria-live="polite"></p><div class="git-submit-buttons"><span data-ui="count">已选 0 个文件</span><button data-ui="retry" class="secondary-button" hidden>核对 / 重试上次请求</button><button data-ui="push" class="secondary-button">仅推送已有提交…</button><button data-ui="commit" class="secondary-button">仅提交…</button><button data-ui="commit-push" class="primary-button">提交并推送…</button></div></footer>`;
-  document.body.append(dialog);
+  if (docked) { dialog.hidden = true; dialog.setAttribute('role', 'region'); host.append(dialog); }
+  else document.body.append(dialog);
   const $ = name => dialog.querySelector(`[data-ui="${name}"]`), drafts = new Map();
   let current, busy = false, loading = false, generation = 0, diffGeneration = 0;
+  if (docked) {
+    const heading = dialog.querySelector('header'), footer = dialog.querySelector('footer'), body = dialog.querySelector('.git-submit-body');
+    heading.querySelector('h2').textContent = '源代码管理';
+    $('close').title = '返回文件'; $('close').setAttribute('aria-label', '返回文件视图');
+    heading.insertBefore($('refresh'), $('close')); $('refresh').className = 'text-button'; $('refresh').textContent = '刷新';
+    $('project').classList.add('git-project-path');
+    const detail = el('details', null, 'git-sync-details'), summary = el('summary', '同步详情与限制'); detail.append(summary);
+    detail.append($('remote'), $('ahead'), dialog.querySelector(':scope > p.field-hint'), $('pull-hint'), $('hint'));
+    footer.append(detail); body.before(footer);
+    dialog.querySelector('.git-submit-selection').append($('count'));
+    $('commit').textContent = '提交'; $('commit-push').textContent = '提交并推送'; $('push').textContent = '推送'; $('pull').textContent = '拉取';
+    dialog.querySelector('.git-submit-meta').append($('push'));
+    if (onOpenDiff) { dialog.querySelector('.git-submit-preview').hidden = true; dialog.querySelector('.git-submit-list').prepend(el('p', '点击文件在中央查看差异', 'field-hint')); }
+  }
   const scoped = (route, params = {}) => `${route}?${new URLSearchParams({ cwd: current.cwd, ...params })}`;
-  function status(text, error = false) { $('status').textContent = text; $('status').className = error ? 'field-error' : ''; }
+  function status(text, error = false, transient = false) { if (current) { current.status = text; current.statusError = error; current.statusTransient = transient; } $('status').textContent = text; $('status').className = error ? 'field-error' : ''; }
   function pullBlocked() {
     if (!current?.snapshot?.pullAvailable) return '当前服务尚未加载拉取功能，请稍后刷新。';
     const prefix = current.cwd.replace(/\/+$/, '') + '/';
@@ -184,11 +233,15 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     $('remote').textContent = state.tracking ? `上游：${state.tracking}` : '未设置上游'; $('remote').title = `拉取：${state.fetchUrl || '未配置'}\n推送：${state.remoteUrl || '未配置'}`;
     $('ahead').textContent = `待推送 ${state.ahead ?? '未知'} · 落后 ${state.behind ?? '未知'}`;
     $('hint').textContent = [state.blocked || state.pushBlocked, state.excluded ? `${state.excluded} 项因隐藏、排除目录或特殊文件限制未列出。` : '', '未勾选的暂存内容不会纳入本次提交；重命名按删除＋新增列出，请同时勾选。'].filter(Boolean).join(' ');
+    onSnapshot(state);
     if (!state.files.length) $('files').append(el('p', '没有可提交的变更文件。', 'field-hint'));
     for (const file of state.files) {
       const row = el('div', null, 'git-submit-file'), box = el('input'); box.type = 'checkbox'; box.checked = current.selected.has(file.path); box.setAttribute('aria-label', `提交 ${file.path}`);
       box.onchange = () => { if (box.checked) current.selected.add(file.path); else current.selected.delete(file.path); controls(); };
-      const name = el('button', file.path, 'git-submit-name'); name.title = file.path; name.onclick = () => void preview(file.path);
+      const name = el('button', null, 'git-submit-name'); name.title = file.path;
+      if (docked) { name.append(el('span', file.path.split('/').at(-1)), el('small', file.path.split('/').slice(0, -1).join('/'))); }
+      else name.textContent = file.path;
+      name.onclick = () => void preview(file.path);
       const badge = el('code', file.status === '??' ? '新增' : file.status); badge.title = 'Git 状态：第一列暂存区，第二列工作区';
       row.append(box, name, badge); $('files').append(row);
     }
@@ -196,7 +249,7 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
   }
   async function refresh({ preserveStatus = false } = {}) {
     if (busy) return; const id = ++generation, draft = current; loading = true; controls();
-    if (!preserveStatus) status('正在读取 Git 状态…');
+    if (!preserveStatus) status('正在读取 Git 状态…', false, true);
     try {
       const snapshot = await api(scoped('/api/git/submit'));
       if (id !== generation || draft !== current) return;
@@ -210,10 +263,11 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     const id = ++diffGeneration, draft = current; $('filename').textContent = name; $('diff').textContent = '正在读取差异…';
     try {
       const result = await api(scoped('/api/git/submit/diff', { path: name, version: current.snapshot.version }));
-      if (id !== diffGeneration || current !== draft) return;
+      if (id !== diffGeneration || current !== draft || docked && dialog.hidden) return;
       $('diff').replaceChildren();
       for (const line of result.diff.split('\n')) $('diff').append(el('span', line + '\n', line.startsWith('+') ? 'git-line-add' : line.startsWith('-') ? 'git-line-delete' : line.startsWith('@@') ? 'git-line-hunk' : ''));
-    } catch (error) { if (id === diffGeneration) $('diff').textContent = error.message; }
+      if (onOpenDiff) await onOpenDiff({ cwd: draft.cwd, path: name, diff: result.diff, version: draft.snapshot.version });
+    } catch (error) { if (id === diffGeneration) { $('diff').textContent = error.message; if (docked) status(error.message, true); } }
   }
   async function execute(body) {
     if (busy || loading) return; busy = true; current.uncertain = body; controls(); status(body.action === 'pull' ? '正在拉取远程更新，请勿关闭页面…' : body.action === 'push' ? '正在推送，请勿关闭页面…' : '正在提交，请勿关闭页面；如选择推送将继续执行…');
@@ -244,15 +298,18 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     await execute({ cwd: current.cwd, version: s.version, head: s.head, action, paths: selected, message: current.message, confirmed: true, operationId: window.crypto.randomUUID() });
   }
   async function show(cwd = getContext().cwd, { action } = {}) {
-    if (busy) return; menu.open = false; if (!cwd) return;
+    if (busy) { if (docked && current?.cwd === cwd) { dialog.hidden = false; onShow(cwd); } return; } menu.open = false; if (!cwd) return;
     if (!drafts.has(cwd)) drafts.set(cwd, { cwd, selected: new Set(), message: '', snapshot: null, uncertain: null });
-    current = drafts.get(cwd); $('project').textContent = cwd; $('message').value = current.message;
+    current = drafts.get(cwd); $('project').textContent = cwd; $('project').title = cwd; $('message').value = current.message;
     $('files').replaceChildren(); $('diff').replaceChildren(); $('filename').textContent = '选择文件查看差异';
     for (const name of ['branch', 'remote', 'ahead', 'hint']) $(name).textContent = '';
-    dialog.showModal(); const draft = current; await refresh();
-    if (action === 'pull' && current === draft && dialog.open && !loading && current.snapshot) await submit('pull');
+    if (docked) { dialog.hidden = false; onShow(cwd); } else dialog.showModal();
+    const preserveStatus = !!current.status && !current.statusTransient;
+    status(preserveStatus ? current.status : '', preserveStatus && !!current.statusError); const draft = current; await refresh({ preserveStatus });
+    if (action === 'pull' && current === draft && (docked ? !dialog.hidden : dialog.open) && !loading && current.snapshot) await submit('pull');
   }
-  entry.onclick = () => void show(); $('close').onclick = () => { if (!busy) dialog.close(); };
+  function hide() { if (!docked) return; dialog.hidden = true; ++generation; ++diffGeneration; loading = false; }
+  entry.onclick = () => void show(); $('close').onclick = () => { if (!busy) { if (docked) { hide(); onClose(); } else dialog.close(); } };
   pullEntry.onclick = () => void show(getContext().cwd, { action: 'pull' });
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
   dialog.addEventListener('close', () => { ++generation; ++diffGeneration; loading = false; });
@@ -265,7 +322,7 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
   for (const action of ['commit', 'commit-push', 'push', 'pull']) $(action).onclick = () => void submit(action);
   $('retry').onclick = () => { if (current.uncertain && window.confirm('使用同一操作标识核对上次请求；服务未重启时不会重复执行。若服务重启且状态变化，将拒绝旧请求。确认继续？')) void execute(current.uncertain); };
   window.addEventListener('beforeunload', event => { if (busy || [...drafts.values()].some(draft => draft.uncertain)) { event.preventDefault(); event.returnValue = ''; } });
-  return { show, get busy() { return busy; } };
+  return { show, hide, refresh, get busy() { return busy; }, get cwd() { return current?.cwd; } };
 }
 
 const $ = id => document.getElementById(id);

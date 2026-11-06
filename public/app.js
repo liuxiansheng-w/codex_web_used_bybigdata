@@ -7,6 +7,7 @@ import { createPermissionControl, createApprovalBatch, createQuestionCard } from
 import { createDraftStore, positionPopover, createThemeControl, createAppearanceControl, createModuleThemeControls, threadDisplayState, createImageAttachment, createSidebarResize, userMessagePresentation, createFileAttachment, attachmentProjectEntry, createQuotaIndicator, applyThreadPatch, createModelSwitch, readableNotice } from './interactions.js';
 import { createFileTree } from './file-tree.js';
 import { createFileEditor } from './file-editor.js';
+import { chatFileLink } from './project-paths.js';
 import { createEditorTools, createInlineCompletion } from './editor-tools.js';
 import { createEditorContext } from './editor-context.js';
 import { createLiveEdits } from './live-edits.js';
@@ -15,7 +16,7 @@ import { createProjectList } from './project-list.js';
 import { taskResult, subtaskGroups, completedChangeSummaries, createChangeSummary } from './task-results.js';
 import { renderMessageTimes, requestDuration } from './message-timing.js';
 import { createSqlQuery, sqlFileFromRunnerLink } from './sql-query.js';
-import { createProductUI, createGitSubmit, createTestPreview } from './product-ui.js';
+import { createProductUI, createGitSubmit, createTestPreview, createProjectSidebar } from './product-ui.js';
 import { createBottomPanel } from './editor-window.js';
 import { renderActivity, renderExecutionGroup, executionLayout } from './execution-view.js';
 import { renderGeneratedImage, modelRetryLabel } from './interactions.js';
@@ -28,6 +29,8 @@ import { renderMcpFields } from './mcp-form-fields.js';
 // Keep the existing workbench usable until its tasks finish and it can upgrade.
 const createToolbox = (await import('./toolbox.js').catch(() => null))?.createToolbox;
 const createThreadOrganization = (await import('./thread-organization.js').catch(() => null))?.createThreadOrganization;
+const createChatNavigation = (await import('./chat-navigation.js').catch(() => null))?.createChatNavigation;
+const createSlashCommands = (await import('./slash-commands.js').catch(() => null))?.createSlashCommands;
 
 const $ = id => document.getElementById(id);
 bindMarkdownTableCopy(document, { notify: toast });
@@ -39,6 +42,7 @@ const storage = {
   set(key, value) { try { localStorage.setItem(`codex-desk:${key}`, value); } catch {} },
 };
 const state = { connected: false, streaming: false, authReady: null, csrf: '', cwd: '', active: null, threads: new Map(), history: [], cursor: null, sending: false, selecting: false, loadSequence: 0, archived: false };
+const chatNavigation = createChatNavigation?.({ select: id => selectThread(id), reset: () => newThread(), current: () => state.active, notify: notice }) || { initial: undefined, write() {}, link() { throw new Error('服务尚未加载聊天链接功能。'); } };
 const threadOrganization = createThreadOrganization?.({ api, getContext: () => ({ cwd: state.cwd, available: state.threadOrganization, batch: state.threadOrganizationBatch, scope: JSON.stringify([$('search').value.trim().toLowerCase(), $('threadSearchScope').value, state.archived]) }), onChange: renderHistory, notify: toast, notice, legacyPins: pinnedThreads });
 const modelCatalogRefresh = createModelCatalogRefresh({
   load: () => api('/api/models', undefined, { signal: AbortSignal.timeout(20_000) }),
@@ -78,7 +82,7 @@ let persistedEditorIds = new Set();
 
 let selectionSequence = 0, starterUndo = null;
 const projectThreads = new Map();
-let projectList, fileTree;
+let projectList, fileTree, projectSidebar, gitSubmit;
 let sqlQuery, inlineCompletion, productUI, editorContext, liveEdits, toolbox, testPreview;
 let renderedThread = null, executionStreamReady = false;
 let stream, reconnectTimer, recoveringStream;
@@ -110,7 +114,7 @@ const attachProjectFile = async entry => {
     if (await composerTools.addProjectReference({ ...entry, ...(choice === 'snapshot' ? { snapshot: file.content } : {}) })) { productUI?.showConversation(); saveDraft(); toast(`已加入${choice === 'snapshot' ? '未保存快照' : '磁盘引用'}：${entry.path}`); }
   } finally { attachingVersion = false; updateControls(); }
 };
-const fileEditor = createFileEditor({ api, onReveal: entry => { showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); editorContext?.schedule(); sqlQuery?.sync(); toolbox?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
+const fileEditor = createFileEditor({ api, onReveal: entry => { projectSidebar?.show('files', { notify: false }); showSidebar(); return fileTree.setActive(entry, { force: true }); }, onAttach: attachProjectFile, onSessionError: notice, onChange: ({ restoring = false } = {}) => { productUI?.sync({ restoring }); inlineCompletion?.sync(); editorContext?.schedule(); sqlQuery?.sync(); toolbox?.sync(); fileTree?.setActive(fileEditor.current); if (projectList) { updateControls(); projectList.refresh(); } clearTimeout(persistenceTimer); persistenceTimer = setTimeout(persistEditor, 500); } });
 editorContext = createEditorContext({ editor: fileEditor, getContext: () => ({ cwd: state.cwd, modelService: modelService() }) });
 fileTree = createFileTree({
   api, notice, hasAttachment: (cwd, path) => composerTools.hasProjectReference(cwd, path),
@@ -122,13 +126,19 @@ fileTree = createFileTree({
 projectList = createProjectList({ api, onSelect: switchProject, onGit: (cwd, action) => gitSubmit.show(cwd, { action }), getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, notice,
   remote: { load: () => api('/api/projects'), save: projects => api('/api/projects', { projects }) },
 });
+projectSidebar = createProjectSidebar({ onReveal: showSidebar, onSelect: view => {
+  if (view !== 'git') gitSubmit?.hide();
+  if (view === 'search') void workbench.show('search', { focus: false });
+  if (view === 'git') void gitSubmit?.show();
+} });
 const workbench = createWorkbench({
   bottomPanel,
-  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), model: $('model').value, features: state.workbenchFeatures, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
+  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), model: $('model').value, features: state.workbenchFeatures, sharedBrowser: state.sharedBrowser, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
   onContext: addContext, onThread: id => selectThread(id, true), onProject: cwd => switchProject(cwd, true), projects: projectList, refreshFiles: () => $('refreshFiles').click(),
   getDraftPreference: () => storage.get('persistDrafts') === 'true',
   setDraftPreference, clearDrafts: clearSavedDrafts, restoreDrafts, showDraftVersions,
   onGitSubmit: cwd => gitSubmit.show(cwd),
+  onSidebar: view => { projectSidebar.show(view, { notify: false }); if (view !== 'git') gitSubmit?.hide(); },
   getArtifacts: () => taskResult(selected()).artifacts,
   getChanges: () => taskResult(selected()).changes,
 });
@@ -142,7 +152,12 @@ if (!toolbox) {
   $('toolboxButton').onclick = () => notice('工具箱模块暂时无法加载，请刷新页面。若仍不可用，请检查服务是否已加载最新的工具箱资源。');
 }
 testPreview = createTestPreview({ getContext: () => ({ thread: selected(), cwd: state.cwd, live: state.connected && state.streaming && executionStreamReady && !selected()?.runtimeStale }) });
-const gitSubmit = createGitSubmit({ api, getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs, onPulled: async cwd => {
+gitSubmit = createGitSubmit({ api, getContext: () => ({ cwd: state.cwd }), getTabs: () => fileEditor.tabs,
+  onShow: () => { workbench.close({ restoreFocus: false }); projectSidebar.show('git', { notify: false }); },
+  onClose: () => projectSidebar.show('files'),
+  onOpenDiff: entry => { workbench.close({ restoreFocus: false }); return fileEditor.openDiff(entry); },
+  onSnapshot: snapshot => { const badge = $('sidebarGitCount'); badge.textContent = String(snapshot.files.length); badge.hidden = !snapshot.files.length; badge.title = `${snapshot.cwd} · ${snapshot.files.length} 个变更文件`; },
+  onPulled: async cwd => {
   await fileEditor.refresh({ all: true, cwd }); if (state.cwd === cwd) $('refreshFiles').click();
 } });
 liveEdits = createLiveEdits({ onOpen: async (file, thread) => { if (selected()?.id !== thread.id || state.cwd !== thread.cwd) throw new Error('请切回修改所属项目和会话。'); if (file.kind === 'delete') return workbench.show('git', { changes: [{ ...file, itemId: file.item.id, status: file.item.status }] }); return workbench.openFile({ cwd: thread.cwd, path: file.movePath || file.path }); }, getContext: () => ({ thread: selected(), live: state.connected && state.streaming && executionStreamReady && !selected()?.runtimeStale }) });
@@ -249,7 +264,7 @@ async function switchProject(cwd, fromWorkbench = false) {
     storage.set('cwd', state.cwd); storage.set('active', state.active || '');
     composerTools.reset(); permissionControl.reset();
     if (selected()) setThreadOptions(selected()); else renderModelConnection();
-    workspaceLabel(); workbench.contextChanged(); restoreDraft(); render(true); renderHistory(); notice(null);
+    workspaceLabel(); workbench.contextChanged(); restoreDraft(); render(true); renderHistory(); notice(null); chatNavigation.write(state.active);
     if (state.connected) loadHistory().catch(error => notice(`项目已打开，会话列表暂不可用：${error.message}`));
     return true;
   } finally { state.switchingProject = false; updateControls(); }
@@ -397,6 +412,7 @@ function workspaceLabel() {
   projectList.remember(state.cwd);
   fileTree.setProject(state.cwd);
   fileEditor.setProject(state.cwd);
+  projectSidebar.sync(state.cwd);
 }
 
 function renderHistory() {
@@ -514,12 +530,13 @@ function restoreDraft() {
   resizePrompt(); updateControls();
 }
 
-async function selectThread(id, fromWorkbench = false, { preserveLayout = false } = {}) {
-  if (gitSubmit.busy) return;
-  if (state.sending || state.switchingProject || attachingVersion || (workbench.busy && !(fromWorkbench && workbench.pending === 1)) || composerTools.uploading || fileEditor.locked) return;
+async function selectThread(id, fromWorkbench = false, { preserveLayout = false, initial = false } = {}) {
+  if (gitSubmit.busy) return false;
+  if (state.sending || state.switchingProject || attachingVersion || (workbench.busy && !(fromWorkbench && workbench.pending === 1)) || composerTools.uploading || fileEditor.locked) return false;
   productUI?.showConversation({ preserveLayout });
-  if (id === state.active && selected() && !state.selecting && renderedThread === id) { hideSidebar(); return; }
-  saveDraft(); projectThreads.set(state.cwd, state.active);
+  if (id === state.active && selected() && !state.selecting && renderedThread === id) { hideSidebar(); chatNavigation.write(id); return true; }
+  if (!initial) saveDraft(); projectThreads.set(state.cwd, state.active);
+  const previous = { id: state.active === id && !selected() ? null : state.active, cwd: state.cwd };
   const sequence = ++selectionSequence;
   state.selecting = true;
   $('prompt').value = ''; composerTools.reset(); permissionControl.reset();
@@ -532,9 +549,10 @@ async function selectThread(id, fromWorkbench = false, { preserveLayout = false 
       if (thread.cwd !== state.cwd) { state.cwd = thread.cwd; storage.set('cwd', state.cwd); workspaceLabel(); await loadHistory(); }
       if (sequence !== selectionSequence) return;
       workbench.contextChanged(); setThreadOptions(thread); restoreDraft(); render(true); renderHistory();
-      syncThreadNotice(thread, null, true);
+      syncThreadNotice(thread, null, true); chatNavigation.write(id); return true;
     }
-  } catch (error) { if (state.active === id) notice(error.message); }
+    return false;
+  } catch (error) { if (state.active === id && sequence === selectionSequence) { state.active = previous.id; state.cwd = previous.cwd; storage.set('active', previous.id || ''); workspaceLabel(); restoreDraft(); render(); renderHistory(); notice(`无法打开聊天：${error.message}`); chatNavigation.write(state.active, true); } return false; }
   finally { if (sequence === selectionSequence) { state.selecting = false; updateControls(); } }
 }
 
@@ -550,8 +568,8 @@ function setThreadOptions(thread) {
 }
 
 async function newThread(preserveDraft = true) {
-  if (gitSubmit.busy) return;
-  if (state.sending || state.switchingProject || attachingVersion || workbench.busy || composerTools.uploading) return;
+  if (gitSubmit.busy) return false;
+  if (state.sending || state.switchingProject || attachingVersion || workbench.busy || composerTools.uploading) return false;
   if (preserveDraft) saveDraft();
   selectionSequence++; state.selecting = false;
   state.active = null; storage.set('active', ''); productUI?.showConversation();
@@ -560,7 +578,7 @@ async function newThread(preserveDraft = true) {
   permissionControl.reset();
   restoreDraft();
   renderModelConnection(); inlineCompletion?.sync();
-  notice(null); hideSidebar(); render(); renderHistory(); $('prompt').focus();
+  notice(null); hideSidebar(); render(); renderHistory(); $('prompt').focus(); chatNavigation.write(null); return true;
 }
 
 function render(forceScroll = false) {
@@ -884,7 +902,7 @@ async function bootstrap(first = false, options) {
   threadOrganization?.sync();
   state.computerUseAppApprovals = !!data.computerUseAppApprovals;
   state.questionInputs = data.questionInputs === true;
-  state.memorySettings = data.memorySettings === true;
+  state.memorySettings = data.memorySettings === true; state.sharedBrowser = data.sharedBrowser === true; $('quickBrowser').hidden = !state.sharedBrowser;
   state.mcpAppApprovalPersistence = data.mcpAppApprovalPersistence === true;
   state.modelConnections = data.modelConnections || { active: 'codex' };
   state.modelCatalog = data.models;
@@ -894,7 +912,7 @@ async function bootstrap(first = false, options) {
   state.authReady = data.auth?.loggedIn ?? null;
   state.authType = data.auth?.type;
   setConnection(data.connected);
-  if (first) { state.cwd = storage.get('cwd') || data.cwd; state.active = storage.get('active') || null; workspaceLabel(); workbench.contextChanged(); }
+  if (first) { state.cwd = storage.get('cwd') || data.cwd; state.active = chatNavigation.initial === undefined ? storage.get('active') || null : chatNavigation.initial; if (chatNavigation.initial === null) notice('聊天链接中的会话编号无效。'); workspaceLabel(); workbench.contextChanged(); }
   renderModelConnection();
   inlineCompletion.sync();
   permissionControl.setAvailability(data.permissions);
@@ -915,7 +933,7 @@ async function acceptSubmission(record, result = record.result) {
   if (!sameDraft) { toast('上次消息已发送，可从会话列表查看。'); return; }
   // Preserve any draft typed while the request was being submitted.
   if ($('prompt').value === record.snapshot.draftText) { $('prompt').value = ''; resizePrompt(); }
-  state.active = result.threadId; storage.set('active', result.threadId);
+  state.active = result.threadId; storage.set('active', result.threadId); chatNavigation.write(result.threadId);
   if (!state.threads.has(result.threadId)) state.threads.set(result.threadId, await api(`/api/threads/${result.threadId}`));
   workbench.contextChanged();
   composerTools.sent(record.snapshot.composerContext);
@@ -981,6 +999,14 @@ $('stopButton').addEventListener('click', async () => {
 });
 function resizePrompt() { $('prompt').style.height = 'auto'; $('prompt').style.height = `${Math.min($('prompt').scrollHeight, 180)}px`; }
 $('prompt').addEventListener('input', () => { resizePrompt(); updateControls(); saveDraft(); });
+createSlashCommands?.({ input: $('prompt'), notify: notice, commands: [
+  { name: 'new', label: '新建聊天', run: () => newThread() },
+  { name: 'history', label: '搜索聊天', run: () => { showSidebar(); $('search').focus(); } },
+  ...[['files', '文件管理'], ['search', '搜索项目'], ['git', '变更与审查'], ['terminal', '打开终端'], ['browser', '共享浏览器'], ['memories', '本聊天与全局记忆'], ['schedules', '定时任务'], ['artifacts', '查看成果'], ['settings', '设置'], ['connections', '插件连接'], ['help', '帮助']].map(([name, label]) => ({ name, label, available: () => name !== 'browser' || state.sharedBrowser, run: () => workbench.show(({ settings: 'preferences', help: 'native' })[name] || name) })),
+  { name: 'plan', label: '切换计划模式（下次发送生效）', available: () => !$('togglePlan').disabled, run: () => $('togglePlan').click() },
+  { name: 'goal', label: '设置持续目标', available: () => !$('addGoal').disabled, run: () => $('addGoal').click() },
+  { name: 'chat', label: '聊天操作、复制链接或会话路径', available: () => !!selected(), run: () => openThreadActions() },
+] });
 $('prompt').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && (storage.get('enterBehavior') !== 'cmd' || event.metaKey || event.ctrlKey)) { event.preventDefault(); $('composer').requestSubmit(); }
 });
@@ -1001,7 +1027,7 @@ function showSidebar() {
 }
 $('appShell').classList.toggle('sidebar-collapsed', storage.get('sidebarCollapsed') === 'true');
 createSidebarResize({ shell: $('appShell'), sidebar: $('sidebar'), handle: $('sidebarResizeHandle'), storage: localStorage });
-$('menuButton').addEventListener('click', () => { showSidebar(); $('fileSearch').focus(); });
+$('menuButton').addEventListener('click', () => { showSidebar(); $(`sidebar-tab-${projectSidebar.active}`).focus(); });
 $('closeSidebar').addEventListener('click', () => {
   if (window.matchMedia('(max-width: 760px)').matches) hideSidebar();
   else { $('appShell').classList.add('sidebar-collapsed'); storage.set('sidebarCollapsed', 'true'); $('menuButton').focus(); }
@@ -1010,6 +1036,8 @@ $('scrim').addEventListener('click', hideSidebar);
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented || document.querySelector('dialog[open]') || event.target.closest?.('#toolboxPanel, #testPreviewWindow')) return;
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); newThread(); }
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.isComposing && event.key.toLowerCase() === 'f') { event.preventDefault(); void workbench.show('search'); return; }
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.isComposing && event.key.toLowerCase() === 'e') { event.preventDefault(); projectSidebar.show('files'); $('fileSearch').focus(); return; }
   if ((event.metaKey || event.ctrlKey) && event.key === '/') { event.preventDefault(); productUI.showHistory({ focusSearch: true }); }
   if (event.key === 'Escape') { if ($('mainPanel').dataset.chatView === 'history') { productUI.showConversation(); $('chatHistoryButton').focus(); return; } hideSidebar(); if (!event.defaultPrevented && !fileEditor.visible) $('prompt').focus(); }
 });
@@ -1045,6 +1073,11 @@ $('conversationTitleButton').addEventListener('click', () => openThreadActions()
 $('closeThreadActions').addEventListener('click', () => $('threadActionsDialog').close());
 for (const button of document.querySelectorAll('[data-thread-action]')) button.addEventListener('click', async () => {
   if (!actionThread) return; const thread = actionThread, action = button.dataset.threadAction;
+  if (action === 'copy-link' || action === 'copy-path') {
+    try { const text = action === 'copy-link' ? chatNavigation.link(thread.id) : (await api(`/api/threads/${encodeURIComponent(thread.id)}/path`)).path; await navigator.clipboard.writeText(text); toast(action === 'copy-link' ? '已复制聊天链接，打开后需本机登录。' : '已复制原生会话记录文件路径。'); }
+    catch (error) { $('threadActionError').textContent = error.message || '复制失败，请重试。'; }
+    return;
+  }
   for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = true;
   try {
     if (action === 'move' || action === 'pin' && threadOrganization?.supported()) await threadOrganization.act(action, thread);
@@ -1061,7 +1094,7 @@ for (const button of document.querySelectorAll('[data-thread-action]')) button.a
   } catch (error) { $('threadActionError').textContent = error.message; }
   finally { for (const control of document.querySelectorAll('[data-thread-action]')) control.disabled = false; threadOrganization?.sync(); }
 });
-for (const [id, tab] of [['workbenchButton', 'search'], ['quickSearch', 'search'], ['quickGit', 'git'], ['quickTerminal', 'terminal'], ['quickSchedules', 'schedules']]) $(id).addEventListener('click', () => workbench.show(tab));
+for (const [id, tab] of [['workbenchButton', 'files'], ['quickSearch', 'search'], ['quickGit', 'git'], ['quickTerminal', 'terminal'], ['quickBrowser', 'browser'], ['quickSchedules', 'schedules']]) $(id).addEventListener('click', () => workbench.show(tab));
 const nativeLink = document.createElement('a'); nativeLink.href = 'codex://'; nativeLink.textContent = '打开本机桌面客户端 ↗'; nativeLink.className = 'secondary-button'; $('recordingDialog').append(nativeLink);
 function notifyTask(text) { if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') { try { const notification = new Notification('柠檬', { body: text, tag: 'codex-desk-task' }); notification.onclick = () => { window.focus(); notification.close(); }; } catch {} } }
 function renderQueue(thread) {
@@ -1074,10 +1107,8 @@ function renderQueue(thread) {
 }
 async function openProjectLink(target) {
   try {
-    const match = target.match(/^(.*?)(?::(\d+)|#L(\d+))?$/), line = Number(match[2] || match[3] || 0);
-    let relative = match[1]; if (relative.startsWith(state.cwd + '/')) relative = relative.slice(state.cwd.length + 1);
-    if (relative.startsWith('/')) throw new Error('此文件不在当前项目中，请先切换项目。');
-    relative = relative.replace(/^\.\//, ''); await workbench.openFile({ cwd: state.cwd, path: relative, line });
+    const entry = chatFileLink(target, { cwd: state.cwd, projects: projectList.list() });
+    await workbench.openFile(entry);
   } catch (error) { notice(error.message); }
 }
 function renderMcpRequest(request) {
@@ -1119,7 +1150,7 @@ try {
   startStream();
   if (state.connected) {
     await loadHistory();
-    if (state.active) await selectThread(state.active, false, { preserveLayout: true });
+    if (state.active) await selectThread(state.active, false, { preserveLayout: true, initial: true });
     else restoreDraft();
   } else { render(); restoreDraft(); }
   updateDraftStatus();

@@ -1693,7 +1693,7 @@ button.attachment-file-main:hover { background: var(--accent-soft); }
 .markdown-code-tools > span,.markdown-diagram-tools > span,.markdown-dialog-tools > span { margin-right: auto; }
 .markdown-code-tools button,.markdown-diagram-tools button,.markdown-dialog-tools button { flex-shrink: 0; padding: 4px 8px; min-height: 28px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; }
 .markdown-code-tools button:hover,.markdown-diagram-tools button:hover,.markdown-dialog-tools button:hover { background: var(--surface-hover); color: var(--ink); border-color: var(--line); }
-.editor-markdown-content .markdown-diagram { margin: 24px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--code); overflow: hidden; }
+:is(.editor-markdown-content, .message-body) .markdown-diagram { margin: 24px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--code); overflow: hidden; }
 .markdown-diagram-tools { border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .markdown-diagram-canvas { overflow: auto; padding: 20px; min-height: 100px; max-height: 720px; scrollbar-gutter: stable; }
 .markdown-diagram-canvas > img { display: block; max-width: none; height: auto; margin: 0 auto; }
@@ -2935,3 +2935,154 @@ dialog.git-submit-dialog { width: min(1180px, 94vw); max-width: 94vw; max-height
 .toolbox-chart > .chart-controls { gap: 8px; }
 .toolbox-chart .chart-actions { gap: 2px 6px; }
 .toolbox-chart .chart-actions button { padding: 4px 7px; }
+.project-row .project-drag { flex: 0 0 22px; width: 22px; padding: 0; color: var(--muted); cursor: grab; opacity: .55; }
+.project-row:hover .project-drag, .project-drag:focus-visible { opacity: 1; }
+.project-row.is-dragging { opacity: .4; }
+.project-row[data-drop=before]::before, .project-row[data-drop=after]::after { content: ''; position: absolute; left: 6px; right: 6px; height: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
+.project-row[data-drop=before]::before { top: -2px; }
+.project-row[data-drop=after]::after { bottom: -2px; }
+.composer { position: relative; }
+.slash-commands { position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; max-height: min(350px, 50vh); overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-raised); color: var(--ink); z-index: 50; box-shadow: 0 10px 35px #0003; }
+.slash-commands[hidden] { display: none; }
+.slash-commands button { display: flex; width: 100%; align-items: center; gap: 14px; padding: 9px 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; }
+.slash-commands button[aria-selected=true], .slash-commands button:hover { background: var(--accent-soft); }
+.slash-commands strong { min-width: 105px; color: var(--accent); font: 12px var(--mono); }
+.slash-commands span { font-size: 12px; color: var(--muted); }
+.thread-memory-settings { padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+.thread-memory-settings form { display: grid; gap: 10px; }
+.thread-memory-settings select { width: 100%; }
+.workspace-panes.browser-docked > .editor-pane, .workspace-panes.browser-docked > .editor-divider { display: none !important; }
+.workspace-panes.browser-docked > .workbench-dialog { position: relative; inset: auto; flex: 0 0 var(--editor-split-size, 56%); width: var(--editor-split-size, 56%); height: 100%; min-width: 0; min-height: 0; max-height: none; border: 0; box-shadow: none; z-index: 1; }
+.work-surface[data-mode=files] .workspace-panes.browser-docked > .workbench-dialog, .workspace-panes.browser-docked.chat-floating > .workbench-dialog { flex: 1; width: 100%; }
+.work-surface.with-browser > .workspace-bar { grid-column: 1 / -1; }
+.workspace-panes.browser-docked .workbench-main { display: flex; flex-direction: column; overflow: hidden; padding: 8px 12px; }
+.browser-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; gap: 7px; }
+.browser-workspace[hidden], .browser-workspace [hidden] { display: none; }
+.browser-tabs { display: flex; flex: 0 0 auto; gap: 4px; overflow: auto; }
+.browser-tab { display: flex; flex: 0 0 auto; max-width: 210px; align-items: center; border-radius: 9px; background: var(--surface); }
+.browser-tab button { border: 0; background: transparent; color: var(--muted); padding: 5px 8px; font-size: 11px; }
+.browser-tab [role=tab] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-tab:has([aria-selected=true]) { background: var(--accent-soft); }
+.browser-tab [aria-selected=true] { color: var(--accent); }
+.browser-navigation { display: flex; flex: 0 0 auto; gap: 4px; align-items: center; }
+.browser-navigation input { flex: 1; width: 0; min-width: 65px; font-size: 12px; padding: 7px 9px; }
+.browser-navigation button { flex: 0 0 auto; min-width: 28px; padding: 5px; border: 0; border-radius: 8px; background: var(--surface); color: var(--ink); }
+.browser-options { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 6px 12px; }
+.browser-options label { display: flex; gap: 5px; align-items: center; font-size: 11px; color: var(--muted); margin: 0; }
+.browser-options input[type=checkbox] { width: auto; margin: 0; }
+.browser-options button { font-size: 11px; }
+.browser-status { flex: 0 0 auto; margin: 0; }
+.browser-status:empty { display: none; }
+.browser-viewport { position: relative; flex: 1; min-height: 180px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.browser-viewport:focus-within { outline: 1px solid var(--accent); outline-offset: -1px; }
+.browser-viewport img { display: block; width: 100%; height: auto; user-select: none; cursor: default; }
+.browser-keyboard { position: absolute; left: 1px; bottom: 1px; width: 1px !important; height: 1px !important; min-height: 0 !important; padding: 0 !important; border: 0 !important; opacity: .01; resize: none; }
+.browser-empty { padding: 40px 24px; text-align: center; color: #334155; font-size: 13px; }
+.browser-caption { flex: 0 0 auto; margin: 0; font-size: 10px; }
+.browser-settings { flex: 0 0 auto; max-height: 45%; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.browser-settings h3 { margin: 0 0 10px; }
+.browser-settings form > label { display: flex; flex-direction: column; gap: 5px; margin: 9px 0; }
+.browser-settings input:not([type=checkbox]) { width: 100%; font-size: 12px; }
+.browser-settings label.risk-confirm { flex-direction: row; align-items: center; }
+.browser-settings button, .browser-download button { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 11px; }
+.browser-directory-picker { display: flex; flex-wrap: wrap; gap: 6px; max-height: 180px; overflow: auto; padding: 8px 0; }
+.browser-directory-picker p { flex-basis: 100%; margin: 0; word-break: break-all; }
+.browser-downloads { flex: 0 0 auto; max-height: 32%; overflow: auto; }
+.browser-download { padding: 9px; border-radius: 10px; background: var(--surface); margin: 5px 0; }
+.browser-download strong { font-size: 12px; word-break: break-all; }
+.browser-download p { margin: 5px 0; word-break: break-all; }
+.browser-download form { display: flex; flex-wrap: wrap; gap: 5px; }
+.browser-download input { width: 100%; padding: 5px; font-size: 12px; }
+
+:root[data-theme] .workspace-panes.browser-docked > .workbench-dialog[data-module-theme] { box-shadow: none; backdrop-filter: none; }
+
+/* Files, search and source control share one persistent sidebar. */
+@media (min-width: 761px) { .sidebar { --sidebar-default-width: 280px; } }
+.sidebar .brand { margin-bottom: 13px; }
+.workspace-shortcuts > #quickSearch, .workspace-shortcuts > #quickGit { display: none; }
+.sidebar-tabs { display: flex; flex-shrink: 0; gap: 4px; padding: 4px; margin-bottom: 10px; border-radius: 12px; background: var(--surface); }
+.sidebar-tabs > button { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; min-width: 0; min-height: 38px; padding: 6px 5px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: 12px; }
+.sidebar-tabs > button:hover { background: var(--surface-hover); color: var(--ink); }
+.sidebar-tabs > button[aria-selected=true] { color: var(--accent); background: var(--accent-soft); }
+.sidebar-tabs svg { width: 17px; height: 17px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar-tabs > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 10px; }
+.sidebar-projects { flex-shrink: 0; min-width: 0; margin-bottom: 6px; }
+.sidebar-projects > summary { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 8px; border-radius: 9px; cursor: pointer; list-style: none; font-size: 12px; }
+.sidebar-projects > summary::-webkit-details-marker { display: none; }
+.sidebar-projects > summary:hover { background: var(--surface-hover); }
+.sidebar-projects > summary strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.sidebar-project-symbol { font-size: 19px; color: var(--muted); }
+.sidebar-projects .projects-heading { padding: 5px 6px; }
+.sidebar-projects .project-list { max-height: min(260px, 30vh); margin-bottom: 5px; overflow: auto; }
+.sidebar-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.sidebar-view[hidden], .sidebar-view [hidden] { display: none !important; }
+.sidebar-view > div { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.sidebar #workbenchButton { flex-shrink: 0; margin: 6px 0; padding: 8px 10px; font-size: 11px; }
+.sidebar #workbenchButton > span { font-size: 10px; }
+.sidebar .sidebar-bottom { padding: 10px 4px; }
+.sidebar .sidebar-model-button { padding: 8px 10px; }
+#sidebarSearchHost { overflow: auto; overscroll-behavior: contain; }
+#sidebarSearchHost > section { width: 100%; min-width: 0; padding: 5px 2px 12px; }
+#sidebarSearchHost h3 { margin: 5px 5px 12px; font-size: 14px; }
+#sidebarSearchHost label { display: block; font-size: 12px; color: var(--muted); }
+#sidebarSearchHost input:not([type=checkbox]), #sidebarSearchHost textarea { display: block; width: 100%; min-width: 0; min-height: 36px; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font: 12px/1.5 var(--mono); }
+#sidebarSearchHost input:focus, #sidebarSearchHost textarea:focus { outline: none; border-color: var(--accent); }
+#sidebarSearchHost .inline-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+#sidebarSearchHost .inline-fields label { display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 11px; }
+#sidebarSearchHost input[type=checkbox] { accent-color: var(--accent); margin: 0; }
+#sidebarSearchHost .primary-button, #sidebarSearchHost .secondary-button { min-height: 32px; padding: 7px 10px; font-size: 11px; }
+#sidebarSearchHost .workbench-form .primary-button { width: 100%; }
+#sidebarSearchHost .field-hint, .sidebar-search-status { margin: 8px 4px; color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.sidebar-search-status:empty { display: none; }
+#sidebarSearchHost > section > .field-hint { display: none; }
+.sidebar-search-file { margin: 6px 0; border-radius: 9px; background: var(--surface); }
+.sidebar-search-file > summary { cursor: pointer; padding: 9px 8px; overflow-wrap: anywhere; color: var(--ink); font-size: 11px; font-weight: 500; }
+#sidebarSearchHost .search-result { padding: 7px 10px; color: var(--muted); border: 0; border-radius: 6px; font-size: 11px; line-height: 1.65; }
+#sidebarSearchHost .search-result:hover, #sidebarSearchHost .search-result:focus-visible { color: var(--ink); background: var(--accent-soft); }
+#sidebarSearchHost > section > details { margin-top: 14px; font-size: 12px; }
+#sidebarSearchHost > section > details > summary { cursor: pointer; color: var(--muted); padding: 8px 4px; }
+#sidebarSearchHost .version-columns { grid-template-columns: minmax(0, 1fr); }
+#sidebarSearchHost .version-columns textarea { height: 160px; }
+.sidebar .git-sidebar-panel { width: 100%; max-width: none; height: 100%; max-height: none; min-height: 0; margin: 0; padding: 6px 2px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--ink); }
+.sidebar .git-sidebar-panel:not([hidden]) { display: flex; flex-direction: column; gap: 9px; }
+:root[data-theme=dark] .sidebar .git-sidebar-panel[data-theme=light],
+:root[data-theme=light] .sidebar .git-sidebar-panel[data-theme=dark] { background: var(--sidebar); border-radius: 12px; }
+.git-sidebar-panel .dialog-heading { gap: 3px; }
+.git-sidebar-panel .dialog-heading h2 { font-size: 14px; }
+.git-sidebar-panel .dialog-heading .text-button { padding: 6px; font-size: 11px; }
+.git-sidebar-panel .dialog-heading .icon-button { width: 28px; height: 28px; font-size: 18px; }
+.git-sidebar-panel .git-project-path { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.git-sidebar-panel .git-submit-meta { gap: 5px; padding: 2px 0; border-radius: 0; background: transparent; font-size: 11px; }
+.git-sidebar-panel .git-submit-meta > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.git-sidebar-panel .git-submit-meta > button { padding: 4px 7px; font-size: 11px; min-height: 28px; }
+.git-sidebar-panel footer { flex-shrink: 0; display: flex; flex-direction: column; gap: 7px; max-height: 48%; overflow: auto; }
+.git-sidebar-panel footer textarea { resize: vertical; min-height: 62px; max-height: 120px; padding: 8px; font: 12px/1.5 var(--sans, system-ui); }
+.git-sidebar-panel footer p { margin: 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.git-sidebar-panel footer [data-ui=status]:empty { display: none; }
+.git-sidebar-panel .git-submit-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-sidebar-panel .git-submit-buttons > button { flex: 1; min-height: 33px; padding: 6px 8px; font-size: 11px; }
+.git-sidebar-panel .git-submit-buttons > [data-ui=retry] { flex-basis: 100%; }
+.git-sidebar-panel .git-sync-details { color: var(--muted); font-size: 10px; line-height: 1.65; }
+.git-sidebar-panel .git-sync-details > summary { cursor: pointer; padding: 5px 0; }
+.git-sidebar-panel .git-sync-details > span { display: block; overflow-wrap: anywhere; }
+.git-sidebar-panel .git-submit-body { display: flex; flex: 1; min-height: 100px; height: auto; overflow: hidden; }
+.git-sidebar-panel .git-submit-list { flex: 1; min-width: 0; padding: 0; border-radius: 0; background: transparent; }
+.git-sidebar-panel .git-submit-list > .field-hint { margin: 4px 0 7px; font-size: 10px; }
+.git-sidebar-panel .git-submit-selection { position: sticky; top: 0; z-index: 1; gap: 5px; padding: 6px 0; margin-bottom: 3px; background: var(--sidebar); font-size: 11px; flex-wrap: wrap; }
+.git-sidebar-panel .git-submit-selection .text-button { padding: 4px; font-size: 10px; }
+.git-sidebar-panel [data-ui=count] { flex-basis: 100%; font-size: 10px; color: var(--muted); }
+.git-sidebar-panel .git-submit-file { padding: 5px 3px; gap: 6px; }
+.git-sidebar-panel .git-submit-file .git-submit-name { display: flex; flex-direction: column; gap: 2px; padding: 3px 0; overflow: hidden; }
+.git-sidebar-panel .git-submit-name > span, .git-sidebar-panel .git-submit-name > small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.git-sidebar-panel .git-submit-name > small { font-size: 10px; color: var(--muted); }
+.git-diff-document { height: 100%; overflow: auto; padding: 0 0 16px; background: var(--code); }
+.git-diff-heading { position: sticky; top: 0; left: 0; z-index: 1; padding: 12px 15px; font-size: 11px; color: var(--muted); background: var(--surface); overflow-wrap: anywhere; }
+.git-diff-lines { min-width: max-content; padding: 10px 0; font: 12px/1.8 var(--mono); }
+.git-diff-row { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); min-height: 22px; color: var(--ink); }
+.git-diff-number { padding-right: 8px; text-align: right; color: var(--muted); user-select: none; }
+.git-diff-code { white-space: pre; padding: 0 14px; }
+.git-diff-row.git-line-add { background: #3ba58120; }
+.git-diff-row.git-line-delete { background: #d6596f20; }
+.git-diff-row.git-line-hunk { color: var(--accent); background: var(--accent-soft); }
+.git-diff-document > button { margin: 8px 16px; font-size: 12px; }

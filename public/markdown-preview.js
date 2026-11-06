@@ -1,4 +1,4 @@
-// Rich document interactions are independent of the source textarea and chat.
+// Rich document/diagram interactions are independent of source editing.
 // Mermaid measures text in a dedicated, network-isolated document. The main
 // application keeps its existing strict CSP; only inert SVG images come back.
 const renderers = new WeakMap();
@@ -30,7 +30,7 @@ export function requestDiagram(source, dark, win = window) {
 }
 
 export function enhanceMarkdown(article, { api, entry, resolveLink, diagram = requestDiagram } = {}) {
-  const doc = article.ownerDocument, win = doc.defaultView, urls = new Set(), figures = [...article.querySelectorAll('[data-markdown-diagram]')];
+  const doc = article.ownerDocument, win = doc.defaultView, urls = new Set(), figures = article.matches('[data-markdown-diagram]') ? [article] : [...article.querySelectorAll('[data-markdown-diagram]')];
   let disposed = false, version = 0, theme, dialog;
   const live = node => !disposed && article.contains(node);
   const element = (tag, cls, text) => { const node = doc.createElement(tag); if (cls) node.className = cls; if (text) node.textContent = text; return node; };
@@ -47,8 +47,11 @@ export function enhanceMarkdown(article, { api, entry, resolveLink, diagram = re
     dialog?.close(); dialog?.remove();
     dialog = element('dialog', 'markdown-image-dialog'); mirrorTheme(dialog);
     const toolbar = element('div', 'markdown-dialog-tools'), stage = element('div', 'markdown-dialog-stage'), image = imageIn(stage, src, label);
-    let scale = 0;
-    const zoom = delta => { scale = Math.max(.25, Math.min(8, (scale || 1) + delta)); image.style.width = `${(image.naturalWidth || 1000) * scale}px`; image.style.maxWidth = 'none'; };
+    let scale = 0, fittedWidth = 0;
+    const zoom = delta => {
+      if (!scale) fittedWidth = image.getBoundingClientRect().width || stage.clientWidth || 1000;
+      scale = Math.max(.25, Math.min(8, (scale || 1) + delta)); image.style.width = `${fittedWidth * scale}px`; image.style.maxWidth = 'none';
+    };
     toolbar.append(element('span', '', label), button('−', () => zoom(-.25)), button('适应窗口', () => { scale = 0; image.style.width = ''; image.style.maxWidth = ''; }), button('＋', () => zoom(.25)), button('关闭', () => dialog.close()));
     dialog.append(toolbar, stage); doc.body.append(dialog);
     const currentDialog = dialog;

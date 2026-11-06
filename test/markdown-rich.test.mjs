@@ -51,6 +51,11 @@ test('diagrams support fit/zoom, source/copy, large view; theme regeneration ign
   figure.querySelector('[data-diagram-action="in"]').click(); assert.equal(image.style.width, '125%');
   figure.querySelector('[data-diagram-action="fit"]').click(); assert.equal(image.style.width, '100%');
   figure.querySelector('[data-diagram-action="expand"]').click(); assert.equal(p.window.document.querySelector('dialog').dataset.theme, 'light');
+  const dialog = p.window.document.querySelector('dialog'), enlarged = dialog.querySelector('img');
+  enlarged.getBoundingClientRect = () => ({ width: 600 }); Object.defineProperty(enlarged, 'naturalWidth', { value: 45 });
+  [...dialog.querySelectorAll('button')].find(button => button.textContent === '＋').click(); assert.equal(enlarged.style.width, '750px', 'zoom from displayed width, not an SVG percentage width');
+  [...dialog.querySelectorAll('button')].find(button => button.textContent === '−').click(); assert.equal(enlarged.style.width, '600px');
+  [...dialog.querySelectorAll('button')].find(button => button.textContent === '适应窗口').click(); assert.equal(enlarged.style.width, '');
   p.window.document.querySelector('dialog').close(); assert.equal(p.window.document.querySelector('dialog'), null);
   figure.querySelector('[data-markdown-copy]').click(); await tick(); assert.equal(p.calls[0].copied, 'flowchart TD\n A --> B');
   p.viewer.refresh(); assert.equal(p.jobs.length, 2); p.viewer.dispose(); assert.equal(p.revoked.length, 1);

@@ -92,3 +92,41 @@ test('session records whitelist navigation, sanitize malformed positions and kee
   assert.equal(result.projects[0].active, null); assert.doesNotMatch(JSON.stringify(result), /private|secret|sensitive|token|baseline|content/);
   assert.deepEqual(normalizeEditorSession({ files: [] }).files, []);
 });
+
+test('cross-project references keep separate read-only tabs and preserve the owning project draft', async t => {
+  const files = mockFiles(), page = browser(t, null, files.api), { editor, $ } = page;
+  editor.setProject('/two'); await editor.open({ cwd: '/two', path: 'a.sql' });
+  $('fileEditorText').value = 'unsaved owner draft'; $('fileEditorText').dispatchEvent(new page.window.Event('input'));
+  const ownerId = editor.current.id;
+  editor.setProject('/one'); await editor.open({ cwd: '/one', path: 'a.sql' });
+  const entry = { cwd: '/two', path: 'a.sql', viewCwd: '/one' };
+  await editor.open(entry);
+  assert.equal(editor.visible, true); assert.equal(editor.current.cwd, '/two'); assert.equal(editor.cwd, '/one');
+  assert.notEqual(editor.current.id, ownerId); assert.match(editor.current.content, /^disk version/);
+  assert.equal(editor.current.external, true); assert.equal(editor.current.writable, false); assert.equal($('fileEditorText').readOnly, true);
+  assert.match($('editorStatus').textContent, /其他项目.*只读/); assert.equal($('editorAttach').disabled, true);
+  assert.equal(await editor.save(), false); assert.equal(await editor.saveFile(entry), false);
+  assert.equal(editor.snapshots().length, 1); assert.equal(editor.snapshots()[0].content, 'unsaved owner draft');
+  const id = editor.current.id; await editor.open(entry); assert.equal(editor.current.id, id, 'repeated clicks reuse the reference');
+  await editor.closeTab(); assert.equal(editor.current.cwd, '/one');
+  editor.setProject('/two'); assert.equal(editor.current.id, ownerId); assert.equal(editor.current.content, 'unsaved owner draft');
+  assert.equal(editor.current.writable, true); assert.equal($('fileEditorText').readOnly, false);
+  assert.equal(editor.inspect({ cwd: '/two', path: 'a.sql' }).content, 'unsaved owner draft');
+});
+
+test('refresh restores the exact cross-project tab even when several projects use the same file name', async t => {
+  const files = mockFiles(); let page = browser(t, null, files.api);
+  page.editor.setProject('/one'); await page.editor.open({ cwd: '/one', path: 'a.sql' });
+  await page.editor.open({ cwd: '/two', path: 'a.sql', viewCwd: '/one' });
+  page.$('fileEditorText').setSelectionRange(4, 7);
+  const stored = page.flush(); assert.doesNotMatch(stored, /disk version|content|baseline/); page.close();
+  files.calls.length = 0; page = browser(t, stored, files.api); page.editor.setProject('/one');
+  await settle(() => page.editor.current?.cwd === '/two');
+  assert.equal(page.editor.current.external, true); assert.equal(page.editor.current.writable, false);
+  assert.equal(page.editor.current.start, 4); assert.equal(page.editor.current.end, 7);
+  assert.deepEqual(files.calls, [['/two', 'a.sql']]);
+  assert.equal(page.$('editorTabs').querySelectorAll('[role=tab]').length, 2);
+  await page.editor.closeTab(); const next = page.flush(); page.close();
+  page = browser(t, next, files.api); page.editor.setProject('/one'); await settle(() => page.editor.current?.cwd === '/one');
+  assert.equal(page.editor.tabs.length, 1, 'closing a reference does not resurrect it after refresh');
+});

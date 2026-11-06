@@ -15,7 +15,10 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   const git = document.createElement('button'); git.type = 'button'; git.textContent = 'Git 提交与推送'; git.setAttribute('role', 'menuitem'); actions.append(git); document.body.append(actions);
   const pull = document.createElement('button'); pull.type = 'button'; pull.textContent = '拉取远程更新…'; pull.setAttribute('role', 'menuitem'); actions.append(pull);
   const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = '复制项目路径'; copy.setAttribute('role', 'menuitem'); actions.append(copy);
-  let actionProject = null, actionTrigger = null;
+  let actionProject = null, actionTrigger = null, dragging = null;
+  const removed = new Set(), orderStatus = document.createElement('span'); orderStatus.className = 'sr-only'; orderStatus.setAttribute('role', 'status'); $('projectList').after(orderStatus);
+  const moveUp = document.createElement('button'), moveDown = document.createElement('button');
+  for (const [control, label, delta] of [[moveUp, '上移项目', -1], [moveDown, '下移项目', 1]]) { control.type = 'button'; control.textContent = label; control.setAttribute('role', 'menuitem'); control.addEventListener('click', () => { const cwd = actionProject; closeActions(); move(cwd, projects.indexOf(cwd) + delta); }); actions.append(control); }
   function closeActions(restoreFocus = false) {
     const trigger = actionTrigger; actions.hidden = true; actionProject = actionTrigger = null;
     trigger?.setAttribute('aria-expanded', 'false');
@@ -26,6 +29,7 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
     if (actionTrigger === trigger) { closeActions(true); return; }
     closeActions(); actionProject = cwd; actionTrigger = trigger;
     actions.setAttribute('aria-label', `${basename(cwd)} 项目操作`); actions.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+    moveUp.disabled = projects.indexOf(cwd) <= 0; moveDown.disabled = projects.indexOf(cwd) >= projects.length - 1;
     positionPopover(trigger, actions, 210); git.focus();
   }
   git.addEventListener('click', async () => {
@@ -48,7 +52,7 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
     if (event.key === 'Escape') { event.preventDefault(); closeActions(true); }
     else if (event.key === 'Tab') closeActions(true);
     else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault(); const controls = [git, pull, copy], index = controls.indexOf(document.activeElement);
+      event.preventDefault(); const controls = [git, pull, copy, moveUp, moveDown].filter(el => !el.disabled), index = controls.indexOf(document.activeElement);
       controls[event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : controls.length - 1)) % controls.length].focus();
     }
   });
@@ -71,7 +75,7 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
       const result = await remote.load();
       if (!Array.isArray(result?.projects)) return;
       const serverProjects = [...new Set(result.projects.filter(path => typeof path === 'string' && path.startsWith('/')).map(normalize))];
-      const merged = [...new Set([...serverProjects, ...projects])];
+      const merged = revision === remoteRevision ? [...new Set([...serverProjects, ...projects])] : [...new Set([...projects, ...serverProjects.filter(cwd => !removed.has(cwd))])];
       if (revision !== remoteRevision && merged.length === projects.length && merged.every((cwd, index) => cwd === projects[index])) return;
       projects = merged;
       persist(); render();
@@ -82,18 +86,34 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
   function remember(cwd) {
     if (!cwd?.startsWith('/')) return;
     cwd = normalize(cwd);
+    removed.delete(cwd);
     if (!projects.includes(cwd)) { projects.push(cwd); persist(); remoteRevision++; syncRemote(); }
     render();
   }
   function forget(cwd) {
     if (cwd === getContext().cwd) throw new Error('请先切换到其他项目，再从列表移除此项目。');
-    projects = projects.filter(path => path !== cwd); persist(); remoteRevision++; syncRemote(); render();
+    removed.add(cwd); projects = projects.filter(path => path !== cwd); persist(); remoteRevision++; syncRemote(); render();
+  }
+  function move(cwd, destination) {
+    const from = projects.indexOf(cwd);
+    if (busy || from < 0 || !Number.isInteger(destination) || destination < 0 || destination >= projects.length || from === destination) return;
+    projects.splice(from, 1); projects.splice(destination, 0, cwd); persist(); remoteRevision++; syncRemote(); render();
+    orderStatus.textContent = `${basename(cwd)} 已移至第 ${destination + 1} 项`;
+    [...$('projectList').querySelectorAll('.project-drag')].find(el => el.dataset.cwd === cwd)?.focus({ preventScroll: true });
   }
   function render() {
+    if (dragging) return;
     closeActions();
     $('projectList').replaceChildren();
     for (const cwd of projects) {
-      const current = cwd === getContext().cwd, row = document.createElement('div'); row.className = 'project-row';
+      const current = cwd === getContext().cwd, row = document.createElement('div'); row.className = 'project-row'; row.dataset.cwd = cwd;
+      const handle = document.createElement('button'); handle.type = 'button'; handle.className = 'icon-button project-drag'; handle.textContent = '⠿'; handle.draggable = !busy; handle.disabled = busy; handle.dataset.cwd = cwd; handle.title = '拖动调整顺序；Option/Alt + ↑↓ 移动'; handle.setAttribute('aria-label', `调整项目 ${basename(cwd)} 的顺序`);
+      handle.addEventListener('keydown', event => { if (event.altKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); move(cwd, projects.indexOf(cwd) + (event.key === 'ArrowUp' ? -1 : 1)); } });
+      handle.addEventListener('dragstart', event => { if (busy) { event.preventDefault(); return; } closeActions(); dragging = cwd; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', cwd); row.classList.add('is-dragging'); });
+      handle.addEventListener('dragend', () => { dragging = null; render(); });
+      row.addEventListener('dragover', event => { if (!dragging || dragging === cwd || busy) return; event.preventDefault(); event.dataTransfer.dropEffect = 'move'; const after = event.clientY >= row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2; row.dataset.drop = after ? 'after' : 'before'; });
+      row.addEventListener('dragleave', event => { if (!row.contains(event.relatedTarget)) delete row.dataset.drop; });
+      row.addEventListener('drop', event => { if (!dragging || busy) return; event.preventDefault(); const source = dragging, from = projects.indexOf(source), target = projects.indexOf(cwd), after = row.dataset.drop === 'after'; dragging = null; delete row.dataset.drop; move(source, Math.max(0, Math.min(projects.length - 1, target + (after ? 1 : 0) - (from < target ? 1 : 0)))); render(); });
       const select = document.createElement('button'); select.type = 'button'; select.className = 'project-select'; select.innerHTML = folderIcon;
       select.title = cwd; select.dataset.cwd = cwd; select.disabled = busy; select.setAttribute('aria-current', String(current));
       const title = document.createElement('span'), name = document.createElement('strong'), hint = document.createElement('small');
@@ -107,7 +127,7 @@ export function createProjectList({ api, onSelect, onGit = () => {}, getContext,
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'project-remove'; remove.textContent = '×';
       remove.title = current ? '切换到其他项目后可从列表移除' : '从列表移除，不删除文件或草稿'; remove.setAttribute('aria-label', `从列表移除项目 ${basename(cwd)}`); remove.disabled = current || busy;
       remove.addEventListener('click', () => { try { forget(cwd); } catch (error) { notice(error.message); } });
-      row.append(select, more, remove); $('projectList').append(row);
+      row.append(handle, select, more, remove); $('projectList').append(row);
     }
     $('addProjectButton').disabled = busy; $('projectList').hidden = collapsed;
   }
