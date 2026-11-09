@@ -38,6 +38,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     finally { if (revision === searchRevision) { searchLoading = false; if (searchResult?.complete) searchPage = Math.min(searchPage, Math.max(0, Math.ceil(searchResult.results.length / searchPageSize) - 1)); render(); } }
   }
   const directories = new Map(), expanded = new Set(), rowControls = [];
+  let refreshTask = null;
   const selected = entry => hasAttachment(cwd, entry.path);
 
   function syncSelection() {
@@ -70,6 +71,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
     const item = document.createElement('li'); item.className = 'file-tree-item'; item.classList.toggle('is-hidden-file', entry.path.split('/').some(part => part.startsWith('.')));
     const row = document.createElement('div'); row.className = 'file-tree-row';
     const main = document.createElement('button'); main.type = 'button'; main.className = 'file-main'; main.title = entry.path;
+    main.dataset.focusKey = encodeURIComponent(entry.path);
     // Icon markup is a fixed application constant; filenames only use textContent.
     const icon = document.createElement('span'); icon.className = `file-icon ${entry.kind}`; icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[entry.kind] || icons.file}</svg>`;
     const label = document.createElement('span'); label.className = 'file-name';
@@ -87,10 +89,11 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
         revealRevision++; revealError = '';
         expanded.has(entry.path) ? expanded.delete(entry.path) : expanded.add(entry.path);
         render();
-        if (expanded.has(entry.path) && !directories.has(entry.path)) await load(entry.path);
-        $('projectFileTree').querySelector(`[data-focus-key="${encodeURIComponent(entry.path)}"]`)?.focus();
+        if (expanded.has(entry.path)) {
+          if (!directories.has(entry.path)) await load(entry.path);
+          else await refresh();
+        }
       });
-      main.dataset.focusKey = encodeURIComponent(entry.path);
       const add = document.createElement('button'); add.type = 'button'; add.className = 'file-add'; add.append(mark);
       add.addEventListener('click', () => attach(entry)); rowControls.push({ entry, button: add, mark }); row.append(main, add);
     } else {
@@ -129,6 +132,17 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
   }
 
   function render() {
+    const tree = $('projectFileTree'), viewport = tree.parentElement, focused = document.activeElement;
+    const row = tree.contains(focused) ? focused.closest('.file-tree-row') : null;
+    const focusKey = row?.querySelector('.file-main')?.dataset.focusKey;
+    const control = row ? [...row.querySelectorAll('button')].indexOf(focused) : -1;
+    const top = viewport.scrollTop, left = viewport.scrollLeft;
+    renderTree();
+    if (focusKey && control >= 0) tree.querySelector(`[data-focus-key="${focusKey}"]`)?.closest('.file-tree-row')?.querySelectorAll('button')[control]?.focus({ preventScroll: true });
+    viewport.scrollTop = top; viewport.scrollLeft = left;
+  }
+
+  function renderTree() {
     updateVisibilityButton();
     rowControls.length = 0; fileRows.clear(); $('projectFileTree').replaceChildren();
     if (!cwd) { note($('projectFileTree'), '选择项目后显示文件'); return; }
@@ -168,11 +182,82 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
         if (expected !== generation) return;
         data.entries = [...new Map([...data.entries, ...result.entries].map(entry => [entry.path, entry])).values()];
         data.nextOffset = result.nextOffset; data.limited = result.limited;
+        // A concurrent insertion can shift page boundaries. Rebuild that listing
+        // on the next refresh instead of accepting a mixed snapshot as current.
+        data.version = offset && old?.version !== result.version ? null : result.version;
       } catch (error) { if (expected === generation) data.error = error.message; }
       finally { if (expected === generation) { data.loading = false; render(); } }
     })();
     return data.promise;
   }
+
+  function visibleDirectories() {
+    const paths = [''];
+    for (let index = 0; index < paths.length; index++) {
+      for (const entry of directories.get(paths[index])?.entries || []) {
+        if (entry.kind === 'folder' && expanded.has(entry.path)) paths.push(entry.path);
+      }
+    }
+    return paths;
+  }
+
+  async function refresh({ force = false } = {}) {
+    if (!cwd) return;
+    const expected = generation, root = cwd;
+    while (refreshTask?.generation === expected) {
+      await refreshTask.promise;
+      if (!force || expected !== generation) return;
+    }
+    if ($('fileSearch').value.trim()) { if (force) await searchProject(); return; }
+    const current = () => expected === generation && root === cwd && !$('fileSearch').value.trim();
+    const task = { generation: expected };
+    refreshTask = task;
+    task.promise = (async () => {
+      // Check reachable, expanded folders only, never a recursive project scan.
+      for (const relative of visibleDirectories()) {
+        if (!current()) return;
+        if (!visibleDirectories().includes(relative)) continue;
+        let data = directories.get(relative);
+        if (!data) { await load(relative); continue; }
+        if (data.loading) { await data.promise; if (!current()) return; data = directories.get(relative); }
+        if (!data) continue;
+        const valid = () => current() && directories.get(relative) === data;
+        const entries = [], offsets = new Set();
+        let offset = 0, result, version;
+        try {
+          do {
+            const cached = !force && offset === 0 && data.version && !data.error ? `&ifVersion=${encodeURIComponent(data.version)}` : '';
+            result = await api(`/api/project/files?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(relative)}&offset=${offset}&showHidden=${Number(showHidden)}${cached}`);
+            if (!valid()) break;
+            if (result.unchanged) break;
+            if (offset && version !== result.version) { result = null; break; }
+            version = result.version;
+            entries.push(...result.entries); offsets.add(offset); offset = result.nextOffset;
+          } while (offset != null && !offsets.has(offset) && entries.length < Math.max(200, data.entries.length));
+          if (!valid() || !result || result.unchanged) continue;
+          const changed = data.error || data.nextOffset !== result.nextOffset || data.limited !== result.limited || JSON.stringify(data.entries) !== JSON.stringify(entries);
+          Object.assign(data, { entries, nextOffset: result.nextOffset, limited: result.limited, version, error: '' });
+          if (changed) render();
+        } catch (error) {
+          if (valid() && data.error !== error.message) { data.error = error.message; data.version = null; render(); }
+        }
+      }
+    })();
+    try { await task.promise; } finally { if (refreshTask === task) refreshTask = null; }
+  }
+
+  const refreshVisible = () => {
+    if (!document.hidden && $('projectFileTree').getClientRects().length) return refresh();
+  };
+  const view = document.defaultView;
+  let refreshTimer = view.setInterval(refreshVisible, 2000);
+  view.addEventListener('focus', refreshVisible);
+  document.addEventListener('visibilitychange', refreshVisible);
+  $('sidebar-tab-files')?.addEventListener('click', () => queueMicrotask(refreshVisible));
+  view.addEventListener('pagehide', () => { view.clearInterval(refreshTimer); refreshTimer = null; });
+  view.addEventListener('pageshow', () => {
+    if (refreshTimer == null) { refreshTimer = view.setInterval(refreshVisible, 2000); void refreshVisible(); }
+  });
 
   function resetSearch() {
     searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0;
@@ -228,7 +313,7 @@ export function createFileTree({ api, onOpen, onAttach, onManage, onSearch, hasA
   }
 
   $('fileSearch').addEventListener('input', () => { revealRevision++; revealError = ''; searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = !!$('fileSearch').value.trim(); searchError = ''; render(); searchTimer = setTimeout(searchProject, 280); });
-  $('refreshFiles').addEventListener('click', () => { generation++; revealRevision++; revealError = ''; directories.clear(); expanded.clear(); if ($('fileSearch').value.trim()) { void searchProject(); return load(); } return activePath && (showHidden || !activePath.split('/').some(part => part.startsWith('.'))) ? setActive({ cwd, path: activePath }, { force: true }) : load(); });
+  $('refreshFiles').addEventListener('click', () => { if (revealError) { revealError = ''; render(); } void refresh({ force: true }); });
   $('collapseFiles').addEventListener('click', () => { revealRevision++; revealError = ''; expanded.clear(); searchController?.abort(); clearTimeout(searchTimer); searchRevision++; searchPage = 0; searchResult = null; searchLoading = false; $('fileSearch').value = ''; render(); });
   hiddenToggle?.addEventListener('click', () => {
     showHidden = !showHidden;

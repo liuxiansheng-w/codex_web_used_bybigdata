@@ -234,6 +234,16 @@ test('new HTTP routes keep session/CSRF checks and operate only in a temporary p
   const { cwd } = await fixture(); await writeFile(path.join(cwd, 'sample.py'), 'x=1\n'); const app = createApplication({ bridge: new Mock(), cwd, stateDir: path.join(cwd, 'state') }); await app.start(0); t.after(() => app.close());
   const base = `http://127.0.0.1:${app.server.address().port}`, page = await fetch(base), cookie = page.headers.get('set-cookie').split(';')[0];
   const { csrf } = await (await fetch(base + '/api/bootstrap', { headers: { cookie } })).json(); const headers = { cookie, origin: base, 'content-type': 'application/json', 'x-codex-csrf': csrf };
+  const directoryUrl = `${base}/api/project/files?cwd=${encodeURIComponent(cwd)}`;
+  assert.equal((await fetch(directoryUrl)).status, 401);
+  const directory = await (await fetch(directoryUrl, { headers: { cookie } })).json();
+  assert.match(directory.version, /^[a-f0-9]{64}$/);
+  const cachedDirectory = await (await fetch(`${directoryUrl}&ifVersion=${directory.version}`, { headers: { cookie } })).json();
+  assert.equal(cachedDirectory.unchanged, true); assert.equal(cachedDirectory.entries, undefined);
+  await writeFile(path.join(cwd, 'added-tree-file.md'), 'new item');
+  const updatedDirectory = await (await fetch(`${directoryUrl}&ifVersion=${directory.version}`, { headers: { cookie } })).json();
+  assert.ok(updatedDirectory.entries.some(entry => entry.path === 'added-tree-file.md'));
+  assert.equal((await fetch(`${directoryUrl}&path=..&ifVersion=${directory.version}`, { headers: { cookie } })).status, 403);
   for (const asset of ['/markdown-preview.js', '/markdown-renderer.js', '/vendor/markdown/document.js', '/vendor/markdown/mermaid.js']) assert.equal((await fetch(base + asset, { headers: { cookie } })).status, 200);
   const frame = await fetch(base + '/markdown-renderer.html'); assert.equal(frame.headers.get('x-frame-options'), 'SAMEORIGIN'); assert.match(frame.headers.get('content-security-policy'), /connect-src 'none'/);
   assert.match(page.headers.get('content-security-policy'), /style-src 'self';/); assert.doesNotMatch(page.headers.get('content-security-policy'), /unsafe-inline/);

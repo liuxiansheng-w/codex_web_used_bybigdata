@@ -254,7 +254,7 @@ export function createApplication({ cwd = defaultWorkspace(), bridge = new Codex
         return;
       }
       if (url.pathname === '/api/project/files' && req.method === 'GET') {
-        json(await projectFiles.list({ cwd: url.searchParams.get('cwd') || cwd, path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset') || 0), showHidden: url.searchParams.get('showHidden') === '1' })); return;
+        json(await projectFiles.list({ cwd: url.searchParams.get('cwd') || cwd, path: url.searchParams.get('path') || '', offset: Number(url.searchParams.get('offset') || 0), showHidden: url.searchParams.get('showHidden') === '1', ifVersion: url.searchParams.get('ifVersion') || '' })); return;
       }
       if (url.pathname === '/api/projects' && req.method === 'GET') { json(await projectFavorites.list()); return; }
       if (url.pathname === '/api/projects' && req.method === 'POST') { json(await projectFavorites.replace((await readBody(req)).projects)); return; }
