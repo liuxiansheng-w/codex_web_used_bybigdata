@@ -35,6 +35,35 @@ test('sidebar files, search and inline Git preserve editor, chat and bottom term
   assert.equal(requests.some(request => request.route === '/api/git/submit' && request.body), false);
 });
 
+test('remote Git comparison opens two read-only sides, preserves drafts and reports failed fetch as cached', async t => {
+  const { $, document, window, input, open, settle } = await page(t);
+  await open('a.py'); input('fileEditorText', 'editor draft'); input('prompt', 'chat draft'); const source = $('fileEditorText');
+  const original = globalThis.fetch, calls = []; let fail = true;
+  globalThis.fetch = async (route, options = {}) => {
+    const url = new URL(route, 'http://localhost'); calls.push({ route: url.pathname, body: options.body });
+    const snapshot = { cwd: '/project', branch: 'main', head: 'head', version: 'v1', remoteComparisonAvailable: true, files: [{ path: 'a.py', status: ' M' }], ahead: 1, behind: 1, tracking: 'origin/main', blocked: '', pushBlocked: '', pullAvailable: true, pullBlocked: '' };
+    const comparison = { available: true, canFetch: true, tracking: 'origin/main', target: 'old-target', version: 'remote-v1', stateVersion: 'v1', ahead: 1, behind: 1, files: [{ path: 'a.py', status: 'M' }] };
+    if (url.pathname === '/api/git/submit' && !options.body) return { ok: true, json: async () => snapshot };
+    if (url.pathname === '/api/git/compare') return { ok: true, json: async () => comparison };
+    if (url.pathname === '/api/git/compare/diff') return { ok: true, json: async () => ({ tracking: 'origin/main', diff: 'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n' }) };
+    if (url.pathname === '/api/git/submit' && options.body) return { ok: true, json: async () => fail ? { fetched: false, fetchError: '离线，仍显示本地缓存。' } : { fetched: true, target: 'old-target' } };
+    return original(route, options);
+  };
+  $('sidebar-tab-git').click(); await settle(() => document.querySelector('[data-ui=compare-view]') && !document.querySelector('[data-ui=compare-view]').disabled);
+  const field = name => document.querySelector(`#gitSubmitDialog [data-ui="${name}"]`);
+  field('message').value = 'commit draft'; field('message').dispatchEvent(new window.Event('input'));
+  field('compare-view').click(); await settle(() => field('remote-files').textContent.includes('a.py') && !field('remote-fetch').disabled);
+  assert.match(field('remote-freshness').textContent, /本地缓存/); assert.equal(calls.filter(c => c.body).length, 0);
+  field('remote-files').querySelector('button').click(); await settle(() => document.querySelector('.git-split-lines'));
+  const cells = [...document.querySelectorAll('.git-split-cell')]; assert.equal(cells[0].textContent.trim(), '1old'); assert.equal(cells[1].textContent.trim(), '1new');
+  assert.match(document.querySelector('.git-split-titles').textContent, /远程.*origin\/main.*本地/); assert.equal(source.value, 'editor draft'); assert.equal($('prompt').value, 'chat draft'); assert.equal($('editorSave').disabled, true);
+  field('remote-fetch').click(); await settle(() => field('remote-status').textContent.includes('离线') && !field('remote-fetch').disabled);
+  assert.match(field('remote-freshness').textContent, /本地缓存/); fail = false;
+  field('remote-fetch').click(); await settle(() => field('remote-freshness').textContent.includes('已获取') && !field('remote-fetch').disabled);
+  field('local-view').click(); assert.equal(field('message').value, 'commit draft'); assert.equal(source.value, 'editor draft');
+  assert.equal(calls.filter(c => c.body).length, 2); assert.ok(calls.filter(c => c.body).every(c => JSON.parse(c.body).action === 'fetch'));
+});
+
 test('inline Git preserves failed submissions across view changes and sends only one confirmed commit request', async t => {
   const { $, document, window, settle, input, requests } = await page(t);
   input('prompt', 'keep chat draft'); window.confirm = () => true;
@@ -1243,6 +1272,25 @@ test('right-side conversation navigation preserves reading, drafts and running w
   await settle(() => $('prompt').value === '保留这条未发送的消息');
   assert.equal(editor.value, 'x=123\n');
   assert.equal(requests.some(r => /\/send|\/turn|\/stop|\/interrupt|\/sql\/query|\/terminal\/start/.test(r.route)), false);
+});
+
+test('a slow conversation selection keeps its draft safe until the selected chat finishes loading', async t => {
+  const { $, document, settle, input } = await page(t);
+  document.querySelector('[data-thread-id=t1]').click();
+  await settle(() => $('threadTitle').textContent === 'Task' && !$('prompt').readOnly);
+  input('prompt', '需要保留的草稿');
+  $('newThread').click(); $('chatHistoryButton').click();
+  const original = globalThis.fetch; let release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  globalThis.fetch = async (route, options) => {
+    if (route === '/api/threads/t1') await delayed;
+    return original(route, options);
+  };
+  document.querySelector('[data-thread-id=t1]').click();
+  assert.equal($('prompt').readOnly, true);
+  assert.equal($('conversationLoading').hidden, false);
+  release();
+  await settle(() => !$('prompt').readOnly && $('prompt').value === '需要保留的草稿');
 });
 
 test('batch conversation moves preserve selection on failure, commit once, and retain drafts and pinned state', async t => {

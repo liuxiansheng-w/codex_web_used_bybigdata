@@ -423,6 +423,23 @@ export function createComposerTools({ api, notice, getContext, onChange, onDraft
       if (text.length >= pasteThreshold || combined.length > promptLimit) return addPastedText(text);
       prompt.value = combined; inputChanged(); return true;
     },
+    async addBrowserAnnotations({ text, images, cwd, threadId }) {
+      if (uploading || hasPendingPaste() || submitting) throw new Error('正在提交或添加附件，请稍后再试。');
+      if (!Array.isArray(images) || !images.length || images.length > 5 || typeof text !== 'string' || !text.trim()) throw new Error('网页批注内容无效。');
+      if (files.length + images.length > 30 || images.some(file => file.size > 10 * 1024 * 1024)) throw new Error('图片附件数量或大小超出限制。');
+      const same = () => getContext().cwd === cwd && (getContext().thread?.id || null) === (threadId || null);
+      if (!same()) throw new Error('项目或聊天已切换，批注未加入草稿。');
+      if ($('prompt').value.length + text.length + 2 > promptLimit) throw new Error('聊天草稿过长，请先处理草稿。');
+      uploading = true; onChange();
+      try {
+        const uploaded = [];
+        for (const image of images) uploaded.push(await api('/api/attachments/upload', { name: image.name, base64: await fileBase64(image) }));
+        if (!same() || submitting) throw new Error('项目或聊天已切换，批注未加入草稿。');
+        const prompt = $('prompt'), combined = prompt.value + (prompt.value ? '\n\n' : '') + text;
+        if (combined.length > promptLimit) throw new Error('聊天草稿过长，请先处理草稿。');
+        files.push(...uploaded); prompt.value = combined; renderChips(); inputChanged(); onDraftChange(); return true;
+      } finally { uploading = false; onChange(); }
+    },
     addProjectReference,
     hasProjectReference,
     payload() { return { effort: $('effort').value, plan, attachments: files.filter(f => f.id && (!f.pasteState || f.pasteState === 'ready')).map(f => f.id), capabilities: [...chosen.keys()], ...(draftGoal ? { goal: draftGoal } : {}) }; },

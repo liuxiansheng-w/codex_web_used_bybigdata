@@ -3086,3 +3086,60 @@ dialog.git-submit-dialog { width: min(1180px, 94vw); max-width: 94vw; max-height
 .git-diff-row.git-line-delete { background: #d6596f20; }
 .git-diff-row.git-line-hunk { color: var(--accent); background: var(--accent-soft); }
 .git-diff-document > button { margin: 8px 16px; font-size: 12px; }
+
+/* Chat find, unread markers and shared browser annotations. */
+.chat-find[hidden], .chat-history-filters [hidden] { display: none !important; }
+#mainPanel[data-chat-view=history] > .chat-find,
+#mainPanel[data-chat-view=history] .chat-find-trigger { display: none; }
+.chat-find { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.chat-find input { flex: 1; min-width: 60px; margin: 0; padding: 5px 8px; }
+.chat-find button, .browser-annotation-panel button { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 8px; }
+.chat-find-count { min-width: 55px; text-align: right; color: var(--muted); font-size: 11px; white-space: nowrap; }
+::highlight(lemon-chat-find) { background: #4ea4f380; color: inherit; }
+::highlight(lemon-chat-find-current) { background: #61bcff; color: #091525; }
+.thread-button.has-unread::before { background: var(--accent); border-color: var(--accent); }
+.thread-row .thread-read-toggle { flex: 0 0 25px; width: 25px; height: 27px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--accent); font-size: 11px; }
+.thread-row .thread-read-toggle:hover, .thread-row .thread-read-toggle:focus-visible { background: var(--accent-soft); }
+.thread-project { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-canvas { position: relative; line-height: 0; }
+.browser-annotation-layer { position: absolute; inset: 0; pointer-events: none; }
+.browser-annotation-layer.active { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.browser-annotation-layer:focus-visible { outline: 2px solid #1685ff; outline-offset: -2px; }
+.browser-annotation-box { position: absolute; border: 2px solid #1685ff; background: #1685ff22; pointer-events: none; box-sizing: border-box; }
+.browser-annotation-cursor { position: absolute; width: 10px; height: 10px; transform: translate(-50%, -50%); border: 2px solid #1685ff; border-radius: 50%; background: #fff; pointer-events: none; }
+.browser-annotation-panel { flex: 0 0 auto; max-height: 40%; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.browser-annotation-heading, .browser-annotation-footer, .browser-annotation-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.browser-annotation-help { margin: 5px 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.browser-annotation-panel textarea { display: block; width: 100%; min-height: 56px; margin: 5px 0; resize: vertical; }
+.browser-annotation-row { padding: 5px 0; font-size: 12px; overflow-wrap: anywhere; }
+.browser-annotation-footer [role=status] { color: var(--muted); font-size: 11px; }
+
+/* Remote comparison remains in the existing Git sidebar and editor. */
+.git-view-switch { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.git-view-switch button { border: 0; border-bottom: 2px solid transparent; padding: 7px 9px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
+.git-view-switch button[aria-pressed=true] { color: var(--ink); border-color: var(--accent); }
+.git-view-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.git-remote-view { flex: 1; min-height: 120px; display: flex; flex-direction: column; gap: 7px; overflow: hidden; }
+.git-remote-view[hidden], .git-submit-dialog .git-submit-body[hidden], .git-submit-dialog footer[hidden] { display: none !important; }
+.git-remote-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.git-remote-actions button { min-height: 30px; padding: 5px 8px; font-size: 11px; }
+.git-remote-view p { margin: 0; line-height: 1.5; font-size: 11px; overflow-wrap: anywhere; }
+.git-remote-view [data-ui=remote-status]:empty { display: none; }
+.git-remote-files { flex: 1; min-height: 70px; overflow: auto; }
+.git-remote-summary { padding: 6px 2px; color: var(--muted); }
+.git-remote-preview { overflow: auto; max-height: 35vh; white-space: pre; font: 12px/1.6 var(--mono); }
+.git-remote-preview:empty { display: none; }
+.git-split-titles, .git-split-row { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr); }
+.git-split-titles { position: sticky; top: 38px; z-index: 1; min-width: 520px; background: var(--surface-raised); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.git-split-titles > strong { padding: 7px 12px; overflow-wrap: anywhere; }
+.git-split-titles > strong + strong { border-left: 1px solid var(--line); }
+.git-split-lines { min-width: 520px; padding: 8px 0; font: 12px/1.8 var(--mono); }
+.git-split-cell { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-width: 0; }
+.git-split-cell + .git-split-cell { border-left: 1px solid var(--line); }
+.git-split-code { padding: 0 10px; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.git-split-cell.git-line-add { background: #3ba58120; }
+.git-split-cell.git-line-delete { background: #d6596f20; }
+.git-split-note { display: block; padding: 2px 12px; color: var(--accent); background: var(--accent-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.git-remote-filter { width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); color: var(--ink); font: 11px var(--sans, system-ui); }
+.git-remote-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.git-file-more { width: 100%; padding: 8px; text-align: left; font-size: 11px; }

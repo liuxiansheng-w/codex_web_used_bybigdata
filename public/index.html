@@ -70,7 +70,7 @@
       <section id="historyPanel" class="chat-history-panel" aria-label="会话列表" hidden>
         <label class="search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="search" placeholder="搜索会话标题" aria-label="搜索会话标题"><kbd>⌘ /</kbd></label>
         <div class="chat-history-filters"><select id="threadSearchScope" aria-label="会话搜索范围"><option value="title">标题</option><option value="content">会话内容</option></select>
-        <label class="archive-toggle"><input id="archivedThreads" type="checkbox">显示归档会话</label></div>
+        <label class="archive-toggle"><input id="archivedThreads" type="checkbox">显示归档会话</label><label id="allProjectsLabel" class="archive-toggle" hidden><input id="allProjects" type="checkbox">全部项目</label><label id="unreadOnlyLabel" class="archive-toggle" hidden><input id="unreadOnly" type="checkbox">只看未读</label><button id="markAllRead" type="button" class="text-button" hidden>全部标为已读</button></div>
         <p id="threadSearchInfo" class="history-search-info"></p>
         <p id="historyError" class="field-error" role="alert" hidden></p>
       <section class="session-activity" aria-labelledby="activityHeading"><div class="history-heading"><span id="activityHeading">进行中的会话</span><span id="activityCount">0</span></div><div id="activeThreadList" class="active-thread-list"></div><p id="activityEmpty" class="activity-empty">暂无已同步的运行任务</p></section>

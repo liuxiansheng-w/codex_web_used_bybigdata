@@ -8,7 +8,7 @@ const createThreadMemories = (await import('./thread-memories.js').catch(() => n
 const $ = id => document.getElementById(id);
 const node = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
 const button = (text, fn) => { const el = node('button', text, 'secondary-button'); el.type = 'button'; el.addEventListener('click', fn); return el; };
-export function createWorkbench({ api, editor, getContext, onContext, onThread, onProject, projects, refreshFiles, getDraftPreference, setDraftPreference, clearDrafts, restoreDrafts, showDraftVersions = () => {}, onGitSubmit = () => {}, onSidebar, bottomPanel, getArtifacts = () => [], getChanges = () => [] }) {
+export function createWorkbench({ api, editor, getContext, onContext, onAnnotations, onThread, onProject, projects, refreshFiles, getDraftPreference, setDraftPreference, clearDrafts, restoreDrafts, showDraftVersions = () => {}, onGitSubmit = () => {}, onSidebar, bottomPanel, getArtifacts = () => [], getChanges = () => [] }) {
   let tab = 'search', searchResult = null, preview = null, git = null, sequence = 0, artifactUrl = null, pendingActions = 0, opener = null, contextKey = '', artifactSignature = '', changesSignature = '';
   let artifactViewer = null, lastArtifact = null, agentsTimer = null, agentGeneration = 0, restorePreview = null, reviewChanges = null;
   let agentsData = null, agentsPromise = null, agentsLast = 0, agentsError = '', agentsRevision = 0;
@@ -112,7 +112,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   const bind = (id, fn) => $(id).addEventListener('click', run(fn));
   const form = (id, fn) => $(id).addEventListener('submit', run(async event => { event.preventDefault(); await fn(); }));
   const browserPanel = node('section'); browserPanel.dataset.panel = 'browser'; browserPanel.hidden = true; dialog.querySelector('.workbench-main').append(browserPanel);
-  const browserWorkspace = createBrowserWorkspace?.({ root: browserPanel, api, getContext, notify: text => status(text) }) || { setVisible() {}, sync() {}, showSettings() {}, pending: false };
+  const browserWorkspace = createBrowserWorkspace?.({ root: browserPanel, api, getContext, onAnnotations, notify: text => status(text) }) || { setVisible() {}, sync() {}, showSettings() {}, pending: false };
   function dockBrowser(active) {
     const panes = $('workspacePanes'); panes.classList.toggle('browser-docked', active); $('workSurface').classList.toggle('with-browser', active);
     if (active) { panes.prepend(dialog); $('workSurface').classList.remove('with-tools'); }
@@ -605,7 +605,7 @@ export function createWorkbench({ api, editor, getContext, onContext, onThread, 
   bind('notifyEnable', async () => { if (!('Notification' in window)) throw new Error('浏览器不支持系统通知。'); status(`通知权限：${await Notification.requestPermission()}`); });
   bind('usageRefresh', async () => { $('usageResult').textContent = JSON.stringify(await api('/api/usage'), null, 2); });
   document.addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); show('search'); } });
-  return { show, close, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft(); }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return browserWorkspace.pending || pendingActions > 0 || fileManager.pending || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(fileManager.pending) + Number(terminalConsole.pending) + Number(schedules.pending); } };
+  return { show, close, showHistory, previewArtifact, openFile, contextChanged, renderAgentGroup, get hasDraft() { return schedules.hasDraft() || !!browserWorkspace.hasDraft; }, refreshResults() { if (wantsAgents() && !agentsPromise && !agentsTimer) void pollAgents(); if (dialog.hidden) return; if (tab === 'artifacts') renderArtifacts(); if (tab === 'git') renderTurnChanges(); }, get busy() { return browserWorkspace.pending || pendingActions > 0 || fileManager.pending || terminalConsole.pending || schedules.pending; }, get pending() { return pendingActions + Number(fileManager.pending) + Number(terminalConsole.pending) + Number(schedules.pending); } };
 }
 
 // Browse first, then act on the selected item. Paths are navigation metadata;

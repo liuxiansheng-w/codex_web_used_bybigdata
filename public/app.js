@@ -31,6 +31,8 @@ const createToolbox = (await import('./toolbox.js').catch(() => null))?.createTo
 const createThreadOrganization = (await import('./thread-organization.js').catch(() => null))?.createThreadOrganization;
 const createChatNavigation = (await import('./chat-navigation.js').catch(() => null))?.createChatNavigation;
 const createSlashCommands = (await import('./slash-commands.js').catch(() => null))?.createSlashCommands;
+const createThreadReads = (await import('./thread-reads.js').catch(() => null))?.createThreadReads;
+const createChatFind = (await import('./chat-find.js').catch(() => null))?.createChatFind;
 
 const $ = id => document.getElementById(id);
 bindMarkdownTableCopy(document, { notify: toast });
@@ -43,7 +45,12 @@ const storage = {
 };
 const state = { connected: false, streaming: false, authReady: null, csrf: '', cwd: '', active: null, threads: new Map(), history: [], cursor: null, sending: false, selecting: false, loadSequence: 0, archived: false };
 const chatNavigation = createChatNavigation?.({ select: id => selectThread(id), reset: () => newThread(), current: () => state.active, notify: notice }) || { initial: undefined, write() {}, link() { throw new Error('服务尚未加载聊天链接功能。'); } };
-const threadOrganization = createThreadOrganization?.({ api, getContext: () => ({ cwd: state.cwd, available: state.threadOrganization, batch: state.threadOrganizationBatch, scope: JSON.stringify([$('search').value.trim().toLowerCase(), $('threadSearchScope').value, state.archived]) }), onChange: renderHistory, notify: toast, notice, legacyPins: pinnedThreads });
+const threadOrganization = createThreadOrganization?.({ api, getContext: () => ({ cwd: state.cwd, available: state.threadOrganization && !$('allProjects').checked, batch: state.threadOrganizationBatch && !$('allProjects').checked, scope: JSON.stringify([$('search').value.trim().toLowerCase(), $('threadSearchScope').value, state.archived, $('allProjects').checked, $('unreadOnly').checked]) }), onChange: renderHistory, notify: toast, notice, legacyPins: pinnedThreads });
+const threadReads = createThreadReads?.({ api, getContext: () => ({
+  available: state.threadReads, cwd: state.cwd, thread: selected(), allProjects: $('allProjects').checked,
+  reading: !document.hidden && document.hasFocus() && $('mainPanel').dataset.chatView !== 'history'
+    && $('scrollArea').scrollHeight - $('scrollArea').scrollTop - $('scrollArea').clientHeight < 100,
+}), onChange: renderHistory, notice });
 const modelCatalogRefresh = createModelCatalogRefresh({
   load: () => api('/api/models', undefined, { signal: AbortSignal.timeout(20_000) }),
   available: () => state.connected && !document.hidden && modelService() === 'codex',
@@ -83,7 +90,7 @@ let persistedEditorIds = new Set();
 let selectionSequence = 0, starterUndo = null;
 const projectThreads = new Map();
 let projectList, fileTree, projectSidebar, gitSubmit;
-let sqlQuery, inlineCompletion, productUI, editorContext, liveEdits, toolbox, testPreview;
+let sqlQuery, inlineCompletion, productUI, editorContext, liveEdits, toolbox, testPreview, chatFind;
 let renderedThread = null, executionStreamReady = false;
 let stream, reconnectTimer, recoveringStream;
 let reconnectAttempts = 0;
@@ -133,8 +140,10 @@ projectSidebar = createProjectSidebar({ onReveal: showSidebar, onSelect: view =>
 } });
 const workbench = createWorkbench({
   bottomPanel,
-  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), model: $('model').value, features: state.workbenchFeatures, sharedBrowser: state.sharedBrowser, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
-  onContext: addContext, onThread: id => selectThread(id, true), onProject: cwd => switchProject(cwd, true), projects: projectList, refreshFiles: () => $('refreshFiles').click(),
+  api, editor: fileEditor, getContext: () => ({ cwd: state.cwd, thread: selected(), model: $('model').value, features: state.workbenchFeatures, sharedBrowser: state.sharedBrowser, browserAnnotations: state.browserAnnotations, appApprovals: state.computerUseAppApprovals, memorySettings: state.memorySettings, attachDirectory: async path => { const item = await api('/api/attachments/reference', { path }); const snapshot = composerTools.snapshot(); snapshot.files.push(item); composerTools.restoreDraft(snapshot); } }),
+  onContext: addContext, onAnnotations: async value => {
+    await composerTools.addBrowserAnnotations(value); productUI?.showConversation(); resizePrompt(); updateControls(); saveDraft(); $('prompt').focus(); toast('网页批注和截图已加入聊天草稿。'); return true;
+  }, onThread: id => selectThread(id, true), onProject: cwd => switchProject(cwd, true), projects: projectList, refreshFiles: () => $('refreshFiles').click(),
   getDraftPreference: () => storage.get('persistDrafts') === 'true',
   setDraftPreference, clearDrafts: clearSavedDrafts, restoreDrafts, showDraftVersions,
   onGitSubmit: cwd => gitSubmit.show(cwd),
@@ -146,6 +155,8 @@ inlineCompletion = createInlineCompletion({ editor: fileEditor, api, getConfig: 
 createEditorTools({ editor: fileEditor, api, notice, completion: inlineCompletion, onContext: addContext, onPreview: entry => workbench.previewArtifact(entry) });
 sqlQuery = createSqlQuery({ editor: fileEditor, api, onContext: addContext, onChartContext: addChartContext, notice, bottomPanel });
 productUI = createProductUI();
+chatFind = createChatFind?.({ getThread: selected, elementFor: id => elements.get(id), userText: item => userMessagePresentation(item).text,
+  ensureVisible: index => { const thread = selected(); if (!thread) return; visibleHistory = Math.max(visibleHistory, thread.items.length - index); render(); } });
 toolbox = createToolbox?.({ editor: fileEditor, notify: toast, onContext: addChartContext, getContextKey: () => JSON.stringify([state.cwd, state.active]), formatSql: (content, dialect, signal) => api('/api/project/language', { content, language: 'sql', dialect, action: 'format' }, { signal }) });
 if (!toolbox) {
   $('toolboxButton').title = '工具箱模块暂时无法加载，点击查看说明';
@@ -371,7 +382,7 @@ function updateControls() {
   $('stopButton').disabled = !thread?.turnId || !state.connected || state.sending;
   $('sendButton').disabled = !state.connected || !state.streaming || (state.authReady === false && modelService() !== 'cosmos') || state.sending || selecting || composerTools.uploading || !composerTools.canSend || !!submissions.get(state.cwd, state.active);
   $('model').disabled = busy || state.sending || selecting;
-  $('prompt').readOnly = !!state.switchingProject;
+  $('prompt').readOnly = !!state.switchingProject || state.selecting;
   $('mode').disabled = busy || state.sending;
   composerTools.setBusy(busy, state.sending || state.selecting || !!state.switchingProject);
   fileTree.setBusy(state.sending || selecting || composerTools.uploading);
@@ -383,7 +394,7 @@ function updateControls() {
   $('runStatus').hidden = !busy && !state.sending;
   renderRunStatus();
   $('composer').setAttribute('aria-busy', String(state.sending));
-  $('conversationLoading').hidden = !state.selecting || !!thread;
+  $('conversationLoading').hidden = !state.selecting;
   renderConversationHeading();
   updateDraftStatus();
 }
@@ -420,15 +431,18 @@ function renderHistory() {
   const focusedRow = $('threadList').contains(document.activeElement) ? document.activeElement.closest('.thread-row') : null;
   const focusedId = focusedRow?.querySelector('[data-thread-id]')?.dataset.threadId;
   const focusedMenu = document.activeElement?.classList.contains('thread-menu');
-  const focusedPin = document.activeElement?.classList.contains('thread-pin');
+  const focusedPin = document.activeElement?.classList.contains('thread-pin'), focusedRead = document.activeElement?.classList.contains('thread-read-toggle');
   const focusedSelection = document.activeElement?.classList.contains('thread-select');
   const focusedGroup = document.activeElement?.dataset.groupToggle, focusedFolder = document.activeElement?.dataset.folderEdit;
-  const query = $('search').value.trim().toLowerCase(), contentSearch = $('threadSearchScope')?.value === 'content' && !!query;
+  const query = $('search').value.trim().toLowerCase(), contentSearch = $('threadSearchScope')?.value === 'content' && !!query, allProjects = $('allProjects').checked;
   const merged = new Map(state.history.map(t => [t.id, t]));
-  for (const t of state.threads.values()) if (!contentSearch && t.cwd === state.cwd && !!t.archived === state.archived) merged.set(t.id, { ...merged.get(t.id), ...t, preview: t.items?.filter(item => ['userMessage', 'agentMessage'].includes(item.type)).at(-1)?.text || merged.get(t.id)?.preview || t.preview });
+  for (const t of state.threads.values()) if (!contentSearch && (allProjects || t.cwd === state.cwd) && !!t.archived === state.archived) {
+    const previous = merged.get(t.id), stamp = value => { const n = Number(value) || 0; return n < 1e12 ? n * 1000 : n; };
+    merged.set(t.id, { ...previous, ...t, updatedAt: Math.max(stamp(t.updatedAt), stamp(previous?.updatedAt)), preview: t.items?.filter(item => ['userMessage', 'agentMessage'].includes(item.type)).at(-1)?.text || previous?.preview || t.preview });
+  }
   const pins = threadOrganization ? new Set([...merged.values()].filter(t => threadOrganization.isPinned(t)).map(t => t.id)) : pinnedThreads();
   const timestamp = t => t.updatedAt ? Number(t.updatedAt) * (Number(t.updatedAt) < 1e12 ? 1000 : 1) : 0;
-  const list = [...merged.values()].filter(t => contentSearch || t.title.toLowerCase().includes(query)).sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || timestamp(b) - timestamp(a));
+  const list = [...merged.values()].filter(t => (contentSearch || t.title.toLowerCase().includes(query)) && (!$('unreadOnly').checked || threadReads?.isUnread(t))).sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || timestamp(b) - timestamp(a));
   $('threadList').replaceChildren();
   const rowFor = t => {
     const updated = t.updatedAt ? new Date(t.updatedAt < 1e12 ? t.updatedAt * 1000 : t.updatedAt) : null;
@@ -437,14 +451,19 @@ function renderHistory() {
     const status = displayState(t), content = document.createElement('span'); content.className = 'thread-content';
     const title = document.createElement('strong'); title.textContent = `${pins.has(t.id) && !threadOrganization?.ready() ? '⌑ ' : ''}${t.title}`;
     const meta = document.createElement('span'); meta.className = 'thread-meta'; if (!['done', 'idle', 'new'].includes(status.key)) meta.append(statusBadge(status)); if (updated) { const time = document.createElement('time'); time.textContent = updated >= today ? updated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : updated.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }); time.title = updated.toLocaleString('zh-CN'); time.dateTime = updated.toISOString(); meta.append(time); } content.append(title, meta); const preview = document.createElement('small'); preview.className = 'thread-preview'; preview.textContent = (t.preview || '').replace(/\s+/g, ' ').slice(0, 110); if (contentSearch && preview.textContent) content.append(preview); button.append(content); button.title = `${t.title}\n${status.label}${status.key === 'unknown' ? ' · 打开会话或恢复连接后核对' : ''}`;
+    if (allProjects && t.cwd) { const project = document.createElement('small'); project.className = 'thread-project'; project.textContent = t.cwd; project.title = t.cwd; content.append(project); }
+    const unread = !!threadReads?.isUnread(t);
+    if (unread) { button.classList.add('has-unread'); button.setAttribute('aria-label', t.title + ' · 未读'); }
     button.dataset.busy = String(status.key === 'running'); button.dataset.threadId = t.id;
     button.setAttribute('aria-current', t.id === state.active ? 'true' : 'false');
     button.addEventListener('click', () => { if (!threadOrganization?.activateSelection?.(t)) void selectThread(t.id); });
-    const folder = threadOrganization?.folderFor(t);
+    const folder = !allProjects && threadOrganization?.folderFor(t);
     if (folder && pins.has(t.id)) { const badge = document.createElement('small'); badge.className = 'thread-folder-badge'; badge.textContent = folder.name; content.append(badge); }
-    const row = document.createElement('div'); row.className = 'thread-row'; const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'thread-menu'; menu.textContent = '⋯'; menu.setAttribute('aria-label', `管理会话 ${t.title}`); menu.addEventListener('click', () => openThreadActions(t)); const selection = threadOrganization?.selectionControl?.(t); if (selection) { row.append(selection); row.classList.toggle('is-selected', selection.checked); button.setAttribute('aria-pressed', String(selection.checked)); } row.append(button); const pin = threadOrganization?.pinButton(t); if (pin) row.append(pin); row.append(menu); return row;
+    const row = document.createElement('div'); row.className = 'thread-row'; const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'thread-menu'; menu.textContent = '⋯'; menu.setAttribute('aria-label', `管理会话 ${t.title}`); menu.addEventListener('click', () => openThreadActions(t)); const selection = threadOrganization?.selectionControl?.(t); if (selection) { row.append(selection); row.classList.toggle('is-selected', selection.checked); button.setAttribute('aria-pressed', String(selection.checked)); } row.append(button);
+    if (state.threadReads && threadReads?.ready) { const read = document.createElement('button'); read.type = 'button'; read.className = 'thread-read-toggle'; read.textContent = unread ? '●' : '○'; read.title = unread ? '标为已读' : '标为未读'; read.setAttribute('aria-label', `${t.title}：${read.title}`); read.disabled = threadReads.busy; read.addEventListener('click', () => { void threadReads.toggle(t); }); row.append(read); }
+    const pin = !allProjects && threadOrganization?.pinButton(t); if (pin) row.append(pin); if (!allProjects || t.cwd === state.cwd) row.append(menu); return row;
   };
-  if (!threadOrganization?.render(list, rowFor, { query })) {
+  if (allProjects || !threadOrganization?.render(list, rowFor, { query })) {
     if (!list.length) { const p = document.createElement('p'); p.className = 'list-empty'; p.textContent = query ? '没有匹配的对话' : '还没有对话，点击右上角 ＋ 开始。'; $('threadList').append(p); }
     let lastGroup = '';
     const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -458,7 +477,7 @@ function renderHistory() {
   $('loadMore').hidden = !state.cursor;
   if (focusedId && $('mainPanel').dataset.chatView === 'history') {
     const button = [...$('threadList').querySelectorAll('[data-thread-id]')].find(button => button.dataset.threadId === focusedId);
-    (focusedSelection ? button?.parentElement.querySelector('.thread-select') : focusedMenu ? button?.parentElement.querySelector('.thread-menu') : focusedPin ? button?.parentElement.querySelector('.thread-pin') : button)?.focus({ preventScroll: true });
+    (focusedSelection ? button?.parentElement.querySelector('.thread-select') : focusedMenu ? button?.parentElement.querySelector('.thread-menu') : focusedPin ? button?.parentElement.querySelector('.thread-pin') : focusedRead ? button?.parentElement.querySelector('.thread-read-toggle') : button)?.focus({ preventScroll: true });
   }
   if (focusedGroup || focusedFolder) [...$('threadList').querySelectorAll('[data-group-toggle], [data-folder-edit]')].find(button => focusedGroup ? button.dataset.groupToggle === focusedGroup : button.dataset.folderEdit === focusedFolder)?.focus({ preventScroll: true });
   $('threadList').scrollTop = historyTop;
@@ -496,21 +515,22 @@ function renderActiveThreads() {
 
 async function loadHistory(append = false) {
   const generation = ++state.loadSequence;
-  const cwd = state.cwd;
+  const cwd = state.cwd, allProjects = $('allProjects').checked;
   $('historyError').hidden = true;
   let result;
-  try { result = await api(`/api/threads?cwd=${encodeURIComponent(cwd)}&search=${encodeURIComponent($('search').value.trim())}&archived=${state.archived ? 1 : 0}${$('threadSearchScope')?.value === 'content' ? '&scope=content' : ''}${append && state.cursor ? `&cursor=${encodeURIComponent(state.cursor)}` : ''}`); }
+  try { result = await api(`/api/threads?cwd=${encodeURIComponent(cwd)}&search=${encodeURIComponent($('search').value.trim())}&archived=${state.archived ? 1 : 0}${allProjects ? '&allProjects=1' : ''}${$('threadSearchScope')?.value === 'content' ? '&scope=content' : ''}${append && state.cursor ? `&cursor=${encodeURIComponent(state.cursor)}` : ''}`); }
   catch (error) { if (generation === state.loadSequence && cwd === state.cwd) { $('historyError').textContent = error.message; $('historyError').hidden = false; } throw error; }
   if (generation !== state.loadSequence || cwd !== state.cwd) return;
+  if (allProjects && result.allProjects !== true) throw new Error('后台尚未支持跨项目搜索，请稍后重试。');
   if (result.cwd !== state.cwd) { state.cwd = result.cwd; storage.set('cwd', state.cwd); workspaceLabel(); }
   threadOrganization?.accept(result.organization);
   state.history = [...new Map((append ? [...state.history, ...result.threads] : result.threads).map(thread => [thread.id, thread])).values()];
   state.cursor = result.nextCursor;
-  if ($('threadSearchInfo')) $('threadSearchInfo').textContent = $('threadSearchScope').value === 'content' && $('search').value.trim() ? `搜索当前项目会话内容${result.nextCursor ? ' · 可加载更多继续搜索' : ''}${result.partial ? ' · 部分会话未能读取，可重试' : ''}` : '';
+  if ($('threadSearchInfo')) $('threadSearchInfo').textContent = [allProjects ? '全部项目' : '', $('threadSearchScope').value === 'content' && $('search').value.trim() ? '按会话内容搜索' : '', $('unreadOnly').checked ? '只筛选已加载会话' : '', result.nextCursor ? '可加载更多继续搜索' : '', result.partial ? '部分会话未能读取，可重试' : ''].filter(Boolean).join(' · ');
   if (result.organizationPartial) $('threadSearchInfo').textContent += ' · 部分分组会话尚未读取，可刷新或加载更多';
   if (result.organizationError) { $('historyError').textContent = result.organizationError; $('historyError').hidden = false; }
   renderHistory();
-  void threadOrganization?.migrate(result.threads);
+  if (!allProjects) void threadOrganization?.migrate(result.threads);
 }
 
 function hideSidebar() { $('sidebar').classList.remove('open'); $('scrim').hidden = true; }
@@ -534,7 +554,7 @@ async function selectThread(id, fromWorkbench = false, { preserveLayout = false,
   if (gitSubmit.busy) return false;
   if (state.sending || state.switchingProject || attachingVersion || (workbench.busy && !(fromWorkbench && workbench.pending === 1)) || composerTools.uploading || fileEditor.locked) return false;
   productUI?.showConversation({ preserveLayout });
-  if (id === state.active && selected() && !state.selecting && renderedThread === id) { hideSidebar(); chatNavigation.write(id); return true; }
+  if (id === state.active && selected() && !state.selecting && renderedThread === id) { hideSidebar(); chatNavigation.write(id); threadReads?.selected(selected()); return true; }
   if (!initial) saveDraft(); projectThreads.set(state.cwd, state.active);
   const previous = { id: state.active === id && !selected() ? null : state.active, cwd: state.cwd };
   const sequence = ++selectionSequence;
@@ -548,7 +568,7 @@ async function selectThread(id, fromWorkbench = false, { preserveLayout = false,
     if (state.active === id && sequence === selectionSequence) {
       if (thread.cwd !== state.cwd) { state.cwd = thread.cwd; storage.set('cwd', state.cwd); workspaceLabel(); await loadHistory(); }
       if (sequence !== selectionSequence) return;
-      workbench.contextChanged(); setThreadOptions(thread); restoreDraft(); render(true); renderHistory();
+      workbench.contextChanged(); setThreadOptions(thread); restoreDraft(); render(true); renderHistory(); threadReads?.selected(thread);
       syncThreadNotice(thread, null, true); chatNavigation.write(id); return true;
     }
     return false;
@@ -667,7 +687,7 @@ function render(forceScroll = false) {
   workbench.refreshResults();
   const usage = t?.tokenUsage; $('tokenUsage').textContent = usage ? `${Number(usage.total?.totalTokens || 0).toLocaleString()} tokens${usage.modelContextWindow ? ` · 上下文 ${Math.min(100, Math.round((usage.last?.inputTokens || 0) / usage.modelContextWindow * 100))}%` : ''}` : '';
   $('tokenUsage').title = $('tokenUsage').textContent || '运行时报告的 token 用量';
-  updateControls();
+  chatFind?.update(); updateControls();
   if ((forceScroll || changedThread || nearBottom) && document.getSelection?.()?.isCollapsed !== false) requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; updateScrollButton(); });
   else updateScrollButton();
 }
@@ -851,6 +871,7 @@ function startStream() {
     // Includes state missed while this browser's SSE connection was down.
     if (data.connected && state.active && (!state.threads.has(state.active) || selected()?.runtimeStale)) void syncActiveThread(state.active, source);
   });
+  listen('thread-reads', event => threadReads?.accept(JSON.parse(event.data)));
   listen('connection', async event => {
     const data = JSON.parse(event.data); setConnection(data.connected);
     if (data.error) notice(data.error);
@@ -867,6 +888,7 @@ function startStream() {
     if (summary(previous) !== summary(thread)) renderHistory();
     if (state.active === thread.id) {
       render();
+      requestAnimationFrame(() => threadReads?.observe(selected()));
       syncThreadNotice(thread, previous);
     }
     if (!previous && thread.cwd === state.cwd || previous?.busy && !thread.busy) loadHistory().catch(() => {});
@@ -899,6 +921,9 @@ async function bootstrap(first = false, options) {
   state.workbenchFeatures = !!data.workbenchFeatures;
   state.threadOrganization = !!data.threadOrganization;
   state.threadOrganizationBatch = !!data.threadOrganizationBatch;
+  state.threadReads = data.threadReads === true; state.allProjectChatSearch = data.allProjectChatSearch === true; state.browserAnnotations = data.browserAnnotations === true;
+  $('allProjectsLabel').hidden = !state.allProjectChatSearch; $('unreadOnlyLabel').hidden = !state.threadReads; $('markAllRead').hidden = !state.threadReads;
+  if (state.threadReads) void threadReads?.refresh().catch(error => notice(error.message));
   threadOrganization?.sync();
   state.computerUseAppApprovals = !!data.computerUseAppApprovals;
   state.questionInputs = data.questionInputs === true;
@@ -1014,6 +1039,9 @@ $('model').addEventListener('change', () => storage.set('model', $('model').valu
 $('newThread').addEventListener('click', () => newThread());
 let historySearchTimer;
 $('threadSearchScope').addEventListener('change', () => loadHistory().catch(error => notice(error.message)));
+$('allProjects').addEventListener('change', () => { threadOrganization?.sync(); void loadHistory().catch(error => notice(error.message)); });
+$('unreadOnly').addEventListener('change', () => { threadOrganization?.sync(); renderHistory(); });
+$('markAllRead').addEventListener('click', () => { void threadReads?.allRead(); });
 $('search').addEventListener('input', () => { renderHistory(); clearTimeout(historySearchTimer); historySearchTimer = setTimeout(() => loadHistory().catch(error => notice(error.message)), 300); });
 $('archivedThreads').addEventListener('change', () => { state.archived = $('archivedThreads').checked; loadHistory().catch(error => notice(error.message)); });
 $('refreshThreads').addEventListener('click', () => loadHistory().catch(e => notice(e.message)));
@@ -1045,7 +1073,7 @@ $('shortcutsButton').addEventListener('click', () => $('shortcutsDialog').showMo
 let toastTimer;
 function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false; toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2200); }
 function updateScrollButton() { const area = $('scrollArea'); $('scrollBottom').hidden = !state.active || area.scrollHeight - area.scrollTop - area.clientHeight < 150; }
-$('scrollArea').addEventListener('scroll', updateScrollButton, { passive: true });
+$('scrollArea').addEventListener('scroll', () => { updateScrollButton(); threadReads?.observe(selected()); }, { passive: true });
 $('loadEarlierMessages').addEventListener('click', () => { const area = $('scrollArea'), top = area.scrollTop, height = area.scrollHeight; visibleHistory += 120; render(); requestAnimationFrame(() => { area.scrollTop = top + area.scrollHeight - height; }); });
 $('scrollBottom').addEventListener('click', () => { $('scrollArea').scrollTop = $('scrollArea').scrollHeight; updateScrollButton(); });
 window.addEventListener('resize', () => {
@@ -1155,3 +1183,6 @@ try {
   } else { render(); restoreDraft(); }
   updateDraftStatus();
 } catch (error) { notice(error.message); }
+
+window.addEventListener('focus', () => threadReads?.observe(selected()));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) threadReads?.observe(selected()); });

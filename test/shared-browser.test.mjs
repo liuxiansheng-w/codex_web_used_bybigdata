@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
 import { mkdtemp, mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,6 +17,10 @@ class Cdp extends EventEmitter {
     if (method === 'Target.attachToTarget') return { sessionId: 'session-' + this.index };
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'frame-' + this.index } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 42 };
+    if (method === 'Runtime.evaluate' && params.expression.includes('document.elementFromPoint')) {
+      const node = this.element || { tagName: 'BUTTON', id: 'save', isContentEditable: false, innerText: 'Save', getBoundingClientRect: () => ({ left: 20, top: 30, right: 120, bottom: 70 }), getAttribute: () => '' };
+      return { result: { value: runInNewContext(params.expression, { document: { elementFromPoint: () => node }, CSS: { escape: text => text } }) } };
+    }
     if (method === 'Runtime.evaluate') return { result: { value: params.expression.includes('__lemonBrowserRefs = refs') ? { title: 'Fixture', url: 'https://example.test/', text: 'Untrusted page text', controls: [{ ref: 'e1', label: 'Fixture button' }] } : { x: 30, y: 40, password: false, file: false } } };
     if (method === 'Page.captureScreenshot') return { data: Buffer.from('fixture-image').toString('base64') };
     return {};
@@ -49,6 +54,22 @@ test('human and model share one tab, enforce project/mode/identity and reject st
   thread.mode = 'workspace-write'; thread.plan = true; await assert.rejects(browser.modelCall({ action: 'reload', tabId: tab.id }, thread.id), /计划/);
   thread.plan = false; const fresh = await browser.action({ cwd, action: 'snapshot', tabId: tab.id }); await assert.rejects(browser.modelCall({ action: 'navigate', tabId: tab.id, snapshotId: fresh.snapshotId, url: 'https://other.test/' }, thread.id), /先在共享浏览器/);
   await browser.share({ cwd, threadId: thread.id, enabled: false }); await assert.rejects(browser.modelCall({ action: 'list' }, thread.id), /允许 AI/);
+});
+
+test('element annotations inspect only the selected target without clicking or exposing input contents', async () => {
+  const { browser, cwd, cdp, thread } = await fixture();
+  const tab = await browser.action({ cwd, action: 'new', url: 'https://example.test/' });
+  const result = await browser.action({ cwd, tabId: tab.id, action: 'inspect-element', revision: tab.revision, x: 25, y: 35 });
+  assert.equal(result.element.selector, 'button#save'); assert.equal(result.element.text, 'Save');
+  assert.equal(cdp.calls.some(call => call.method === 'Input.dispatchMouseEvent'), false);
+  cdp.element = { tagName: 'INPUT', id: 'password', isContentEditable: false, innerText: 'sensitive', value: 'secret', getBoundingClientRect: () => ({ left: 1, top: 1, right: 80, bottom: 20 }), getAttribute: () => '' };
+  const sensitive = await browser.action({ cwd, tabId: tab.id, action: 'inspect-element', revision: tab.revision, x: 3, y: 3 });
+  assert.equal(sensitive.element.text, ''); assert.equal('value' in sensitive.element, false);
+  await assert.rejects(browser.action({ cwd, tabId: tab.id, action: 'inspect-element', revision: tab.revision - 1, x: 3, y: 3 }), /页面已变化/);
+  await assert.rejects(browser.action({ cwd, tabId: tab.id, action: 'inspect-element', revision: tab.revision, x: 'bad', y: 3 }), /位置无效/);
+  await browser.share({ cwd, threadId: thread.id, enabled: true });
+  const snapshot = await browser.action({ cwd, tabId: tab.id, action: 'snapshot' });
+  await assert.rejects(browser.modelCall({ action: 'inspect-element', tabId: tab.id, snapshotId: snapshot.snapshotId, x: 3, y: 3 }, thread.id), /只能由用户/);
 });
 
 test('workbench origins and file requests are blocked in the real Chrome request interception path', async () => {

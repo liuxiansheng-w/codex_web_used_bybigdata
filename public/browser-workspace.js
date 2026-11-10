@@ -1,4 +1,6 @@
-export function createBrowserWorkspace({ root, api, getContext, notify = () => {} }) {
+const createBrowserAnnotations = (await import('./browser-annotations.js').catch(() => null))?.createBrowserAnnotations;
+
+export function createBrowserWorkspace({ root, api, getContext, onAnnotations, notify = () => {} }) {
   const doc = root.ownerDocument, win = doc.defaultView;
   root.className = 'browser-workspace';
   root.innerHTML = `<div class="browser-tabs" role="tablist" aria-label="浏览器标签页"></div>
@@ -9,7 +11,7 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
     <div class="browser-viewport" tabindex="0" role="group" aria-label="共享网页画面，点击后可输入，Esc 返回地址栏"><img alt="共享浏览器实时画面" draggable="false" hidden><div class="browser-empty"><strong>本机共享浏览器</strong><p>在地址栏打开网页。你和 AI 使用同一组标签页。</p><p>使用独立 Chrome 登录状态，首次访问需要在这里登录。</p><button type="button" data-open class="primary-button">打开新标签页</button></div><textarea class="browser-keyboard" aria-label="网页键盘输入" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea></div>
     <p class="browser-caption field-hint">实时画面约每秒更新 · Esc 返回地址栏 · 只读和计划模式的 AI 只能查看</p><div class="browser-downloads" aria-label="浏览器下载记录"></div>`;
   const tabs = root.querySelector('.browser-tabs'), nav = root.querySelector('.browser-navigation'), address = nav.elements.url, image = root.querySelector('img'), viewport = root.querySelector('.browser-viewport'), keyboard = root.querySelector('textarea'), empty = root.querySelector('.browser-empty'), status = root.querySelector('[role=status]'), sharing = root.querySelector('[data-share]'), settingsPanel = root.querySelector('.browser-settings'), settingsForm = root.querySelector('[data-download-settings]'), picker = root.querySelector('.browser-directory-picker'), downloads = root.querySelector('.browser-downloads');
-  const states = new Map(); let visible = false, timer, generation = 0, contextKey = '', sequence = Promise.resolve(), busy = 0, frameUrl, settings, settingBusy = false, downloading = new Set(), frameRead = 0;
+  const states = new Map(); let visible = false, timer, generation = 0, contextKey = '', sequence = Promise.resolve(), busy = 0, frameUrl, settings, settingBusy = false, downloading = new Set(), frameRead = 0, displayedFrame = null, annotations = null;
   const scope = () => ({ cwd: getContext().cwd, threadId: getContext().thread?.id });
   const scoped = route => `${route}?cwd=${encodeURIComponent(scope().cwd)}${scope().threadId ? `&threadId=${encodeURIComponent(scope().threadId)}` : ''}`;
   const hint = text => { status.textContent = text || ''; };
@@ -20,18 +22,18 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
     const value = state(), active = tab(); tabs.replaceChildren();
     for (const item of value.tabs) {
       const row = doc.createElement('div'); row.className = 'browser-tab';
-      const select = button(item.title || item.url || '新标签页', () => { value.active = item.id; frameRead++; render(); void refreshFrame(); }); select.setAttribute('role', 'tab'); select.setAttribute('aria-selected', String(item.id === value.active)); select.title = item.url; select.tabIndex = item.id === value.active ? 0 : -1;
-      const close = button('×', () => act({ action: 'close', tabId: item.id })); close.setAttribute('aria-label', `关闭浏览器标签 ${item.title || '新标签页'}`); row.append(select, close); tabs.append(row);
+      const select = button(item.title || item.url || '新标签页', () => { value.active = item.id; frameRead++; displayedFrame = null; render(); void refreshFrame(); }); select.setAttribute('role', 'tab'); select.setAttribute('aria-selected', String(item.id === value.active)); select.title = item.url; select.tabIndex = item.id === value.active ? 0 : -1;
+      const close = button('×', () => { if (annotations?.hasTabDraft(scope().cwd, item.id)) { hint('请先将此网页的批注加入聊天或移除后再关闭。'); return; } void act({ action: 'close', tabId: item.id }); }); close.setAttribute('aria-label', `关闭浏览器标签 ${item.title || '新标签页'}`); row.append(select, close); tabs.append(row);
     }
     for (const control of nav.querySelectorAll('[data-action]')) control.disabled = !active || busy > 0;
     if (doc.activeElement !== address) address.value = active?.url === 'about:blank' ? '' : active?.url || '';
     sharing.disabled = !scope().threadId; sharing.checked = value.shared; sharing.title = scope().threadId ? '仅当前服务连接期间生效；关闭后 AI 无法操作这些网页' : '请先打开或创建聊天';
     empty.hidden = !!active; if (!active) image.hidden = true;
-    renderDownloads();
+    renderDownloads(); annotations?.sync();
   }
   function refreshContext() {
     const key = JSON.stringify(scope()); if (key === contextKey) return;
-    contextKey = key; generation++; frameRead++; settingsPanel.hidden = true; picker.hidden = true; settings = null;
+    contextKey = key; generation++; frameRead++; displayedFrame = null; settingsPanel.hidden = true; picker.hidden = true; settings = null;
     image.hidden = true; if (frameUrl) { URL.revokeObjectURL(frameUrl); frameUrl = null; }
     render(); hint(''); if (visible) void poll();
   }
@@ -48,7 +50,7 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
     finally { if (at === generation && visible) timer = setTimeout(poll, 800); }
   }
   async function refreshFrame() {
-    const active = tab(); if (!visible || !active || busy || doc.hidden) return;
+    const active = tab(); if (!visible || !active || busy || doc.hidden || annotations?.frozen) return;
     const at = generation, read = ++frameRead, id = active.id;
     try {
       const response = await win.fetch(`/api/browser/frame?cwd=${encodeURIComponent(scope().cwd)}&tabId=${encodeURIComponent(id)}`, { cache: 'no-store', credentials: 'same-origin' });
@@ -56,6 +58,7 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
       const blob = await response.blob();
       if (at !== generation || read !== frameRead || !visible || tab()?.id !== id || busy) return;
       const revision = Number(response.headers.get('X-Browser-Revision')); if (Number.isSafeInteger(revision)) active.revision = Math.max(active.revision, revision);
+      displayedFrame = { blob, revision: Number.isSafeInteger(revision) ? revision : active.revision, tabId: id, url: active.url };
       const next = URL.createObjectURL(blob); image.src = next; image.hidden = false; if (frameUrl) URL.revokeObjectURL(frameUrl); frameUrl = next;
     } catch (error) { if (at === generation && read === frameRead) hint(error.message); }
   }
@@ -65,7 +68,7 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
     const operation = sequence.catch(() => {}).then(async () => {
       if (expected !== generation || !visible) return;
       const active = state().tabs.find(item => item.id === id);
-      const result = await api('/api/browser/action', { ...body, cwd: project, ...(id ? { tabId: id } : {}), ...(active ? { revision: active.revision } : {}) });
+      const result = await api('/api/browser/action', { ...body, cwd: project, ...(id ? { tabId: id } : {}), ...(active ? { revision: body.revision ?? active.revision } : {}) });
       if (expected !== generation) return;
       if (body.action === 'new') { state().tabs.push(result); state().active = result.id; }
       else if (body.action === 'close') { state().tabs = state().tabs.filter(item => item.id !== id); state().active = state().tabs.at(-1)?.id || null; }
@@ -157,6 +160,9 @@ export function createBrowserWorkspace({ root, api, getContext, notify = () => {
       }
     }
   }
+  annotations = createBrowserAnnotations?.({ root, image, viewport, getContext, getTab: tab,
+    getFrame: () => displayedFrame?.tabId === tab()?.id ? displayedFrame : null,
+    inspect: body => act({ action: 'inspect-element', ...body }), onAnnotations, notify: hint });
   doc.addEventListener('visibilitychange', () => { if (visible && !doc.hidden) void poll(); });
-  return { setVisible(value) { visible = value; generation++; frameRead++; clearTimeout(timer); if (visible) { refreshContext(); void poll(); } else keyboard.blur(); }, sync() { refreshContext(); }, showSettings() { settingsPanel.hidden = false; void loadSettings(); }, get pending() { return busy > 0 || settingBusy || downloading.size > 0; } };
+  return { setVisible(value) { visible = value; generation++; frameRead++; clearTimeout(timer); if (visible) { refreshContext(); void poll(); } else keyboard.blur(); }, sync() { refreshContext(); }, showSettings() { settingsPanel.hidden = false; void loadSettings(); }, get hasDraft() { return !!annotations?.hasDraft; }, get pending() { return busy > 0 || settingBusy || downloading.size > 0 || !!annotations?.pending; } };
 }

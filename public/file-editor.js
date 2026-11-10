@@ -687,7 +687,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
     for (const doc of documents) {
       const tab = views.get(doc.id), changed = dirty(doc), selected = active === doc;
       const duplicateName = documents.some(other => other !== doc && filename(other) === filename(doc));
-      const label = filename(doc) + (doc.diff ? ' · 差异' : '');
+      const label = filename(doc) + (doc.diff ? doc.diffScope === 'remote' ? ' · 远程对比' : ' · 差异' : '');
       if (tab.label.textContent !== label) tab.label.textContent = label;
       tab.parent.textContent = external(doc) ? `${doc.cwd.split('/').filter(Boolean).at(-1) || '外部文件'} · 只读` : duplicateName ? doc.path.split('/').slice(0, -1).join('/') || doc.cwd : '';
       tab.parent.hidden = !duplicateName && !external(doc);
@@ -697,7 +697,7 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
       tab.row.classList.toggle('has-error', !!doc.error);
       tab.row.hidden = !sameProject(doc);
       tab.button.setAttribute('aria-selected', String(selected)); tab.button.tabIndex = selected ? 0 : -1;
-      tab.button.setAttribute('aria-label', `${doc.path}${doc.diff ? '，Git 差异' : ''}${changed ? '，未保存' : ''}${doc.error ? '，需要处理' : ''}`);
+      tab.button.setAttribute('aria-label', `${doc.path}${doc.diff ? doc.diffScope === 'remote' ? '，Git 远程对比' : '，Git 差异' : ''}${changed ? '，未保存' : ''}${doc.error ? '，需要处理' : ''}`);
       tab.button.title = fullPath(doc);
       tab.button.disabled = uiLocked();
       tab.close.disabled = doc.saving || doc.closing || uiLocked() || savingAll;
@@ -950,11 +950,58 @@ export function createFileEditor({ api, onAttach, onChange = () => {}, onSession
   function openDiff(entry) {
     if (uiLocked() || !validRoot(entry.cwd) || !validFile(entry.path) || typeof entry.diff !== 'string') return false;
     const viewCwd = project && project !== entry.cwd ? project : undefined;
-    let doc = documents.find(item => item.diff && item.cwd === entry.cwd && item.path === entry.path && item.viewCwd === viewCwd);
+    const scope = entry.comparison === 'remote' ? 'remote' : 'local';
+    let doc = documents.find(item => item.diff && (item.diffScope || 'local') === scope && item.cwd === entry.cwd && item.path === entry.path && item.viewCwd === viewCwd);
     if (!doc) doc = makeDocument({ ...entry, kind: 'git-diff', viewCwd });
+    doc.diffScope = scope;
     doc.file = { cwd: entry.cwd, path: entry.path, version: entry.version, writable: false, readOnlyReason: 'Git 差异快照', content: '' };
     doc.previewHost.replaceChildren(); doc.previewHost.tabIndex = 0; doc.previewHost.setAttribute('aria-label', `${entry.path} 的 Git 差异`); doc.previewHost.classList.add('git-diff-document');
-    const heading = document.createElement('div'); heading.className = 'git-diff-heading'; heading.textContent = `${entry.path} · 当前磁盘与 Git 的差异，不包含未保存草稿`;
+    const heading = document.createElement('div'); heading.className = 'git-diff-heading';
+    heading.textContent = scope === 'remote' ? `${entry.path} · 远程 ${entry.tracking || '上游'} 与本地磁盘的只读差异（不包含未保存草稿）` : `${entry.path} · 当前磁盘与 Git 的差异，不包含未保存草稿`;
+    if (scope === 'remote') {
+      const columns = document.createElement('div'); columns.className = 'git-split-titles';
+      for (const title of [`远程 · ${entry.tracking || '上游'}`, '本地 · 当前磁盘']) { const cell = document.createElement('strong'); cell.textContent = title; columns.append(cell); }
+      const body = document.createElement('div'); body.className = 'git-split-lines';
+      const rows = []; let old = 0, next = 0, inHunk = false, sawHunk = false;
+      const lines = entry.diff.split('\n');
+      for (let i = 0; i < lines.length;) {
+        const line = lines[i], match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (match) { old = Number(match[1]); next = Number(match[2]); inHunk = sawHunk = true; rows.push({ label: line }); i++; continue; }
+        if (inHunk && (line.startsWith('-') || line.startsWith('+'))) {
+          const removed = [], added = [], notes = [];
+          while (i < lines.length && (lines[i].startsWith('-') || lines[i].startsWith('+') || lines[i].startsWith('\\'))) {
+            const value = lines[i++];
+            if (value.startsWith('-')) removed.push({ number: old++, text: value.slice(1), type: 'delete' });
+            else if (value.startsWith('+')) added.push({ number: next++, text: value.slice(1), type: 'add' });
+            else notes.push(value);
+          }
+          for (let j = 0; j < Math.max(removed.length, added.length); j++) rows.push({ left: removed[j], right: added[j] });
+          for (const note of notes) rows.push({ label: note });
+          continue;
+        }
+        if (inHunk && line.startsWith(' ')) rows.push({ left: { number: old++, text: line.slice(1) }, right: { number: next++, text: line.slice(1) } });
+        else if (inHunk && line.startsWith('\\')) rows.push({ label: line });
+        else if (!sawHunk && line && !/^(?:diff --git |index |--- |\+\+\+ |new file mode |deleted file mode )/.test(line)) rows.push({ label: line });
+        i++;
+      }
+      if (!rows.length) rows.push({ label: '没有可显示的文本差异。' });
+      let at = 0; const more = document.createElement('button'); more.type = 'button'; more.className = 'secondary-button';
+      function appendRemote() {
+        const end = Math.min(rows.length, at + 300);
+        for (; at < end; at++) {
+          const value = rows[at], row = document.createElement('div'); row.className = 'git-split-row';
+          if (value.label != null) { row.classList.add('git-split-note'); row.textContent = value.label; }
+          else for (const part of [value.left, value.right]) {
+            const cell = document.createElement('div'); cell.className = 'git-split-cell' + (part?.type ? ` git-line-${part.type}` : '');
+            const number = document.createElement('span'); number.className = 'git-diff-number'; number.setAttribute('aria-hidden', 'true'); number.textContent = part ? String(part.number) : '';
+            const code = document.createElement('span'); code.className = 'git-split-code'; code.textContent = part?.text || ' '; cell.append(number, code); row.append(cell);
+          }
+          body.append(row);
+        }
+        more.hidden = at >= rows.length; more.textContent = `继续显示差异 · 已显示 ${at} / ${rows.length} 行`;
+      }
+      more.addEventListener('click', appendRemote); doc.previewHost.append(heading, columns, body, more); appendRemote(); return activate(doc);
+    }
     const body = document.createElement('div'); body.className = 'git-diff-lines';
     const lines = entry.diff.split('\n'); let at = 0, old = 0, next = 0, hunk = false;
     const more = document.createElement('button'); more.type = 'button'; more.className = 'secondary-button';

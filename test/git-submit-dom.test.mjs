@@ -88,3 +88,20 @@ test('pull shortcut confirms the chosen upstream, deduplicates clicks and preser
   assert.equal($('message').value, 'keep commit note'); assert.equal(document.getElementById('chat').value, 'unsent chat');
   state.pullAvailable = false; await control.show('/other'); assert.equal($('pull').disabled, true); assert.match($('pull-hint').textContent, /尚未加载/);
 });
+
+test('large remote and local lists are paged and remote names can be filtered without fetching', async t => {
+  const dom = new JSDOM('<div class="breadcrumb"></div><div id="sidebarGitHost"></div>', { url: 'http://localhost' });
+  const old = { window: globalThis.window, document: globalThis.document }; Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+  t.after(() => { Object.assign(globalThis, old); dom.window.close(); });
+  const files = Array.from({ length: 225 }, (_, i) => ({ path: `folder/file-${String(i).padStart(3, '0')}.txt`, status: 'M' })); let posts = 0;
+  const state = { cwd: '/fixture', head: 'head', version: 'v', branch: 'main', ahead: 0, files, remoteComparisonAvailable: true };
+  const comparison = { available: true, canFetch: true, tracking: 'origin/main', target: 'target', stateVersion: 'v', version: 'compare', files, ahead: 0, behind: 0 };
+  const control = createGitSubmit({ getContext: () => ({ cwd: '/fixture' }), api: async (route, body) => { if (body) { posts++; return {}; } return route.startsWith('/api/git/compare?') ? comparison : state; } });
+  const field = name => document.querySelector(`[data-ui="${name}"]`);
+  await control.show(); assert.equal(field('files').querySelectorAll('.git-submit-file').length, 150);
+  field('files').querySelector('.git-file-more').click(); assert.equal(field('files').querySelectorAll('.git-submit-file').length, 225);
+  field('compare-view').click(); await wait(); assert.equal(field('remote-files').querySelectorAll('.git-submit-file').length, 150);
+  field('remote-files').querySelector('.git-file-more').click(); assert.equal(field('remote-files').querySelectorAll('.git-submit-file').length, 225);
+  field('remote-filter').value = 'file-224'; field('remote-filter').dispatchEvent(new window.Event('input'));
+  assert.equal(field('remote-files').querySelectorAll('.git-submit-file').length, 1); assert.match(field('remote-files').textContent, /file-224/); assert.equal(posts, 0);
+});

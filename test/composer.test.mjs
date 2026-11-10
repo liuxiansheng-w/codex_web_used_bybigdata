@@ -30,6 +30,7 @@ function setup(t, withController = true) {
   const elements = [];
   class Element {
     get ownerDocument() { return globalThis.document; }
+    get parentElement() { return this.parent || null; }
     constructor(id = '') { elements.push(this); this.id = id; this.value = ''; this.textContent = ''; this.children = []; this.handlers = {}; this.dataset = {}; this.attributes = {}; this.hidden = true; this.disabled = false; this.selectors = new Map(); const classes = new Set(); this.classList = { contains: value => classes.has(value), add: (...values) => values.forEach(value => classes.add(value)), remove: (...values) => values.forEach(value => classes.delete(value)), toggle(value, force = !classes.has(value)) { if (force) classes.add(value); else classes.delete(value); return force; } }; this.style = { setProperty() {} }; this.scrollHeight = 300; this.scrollTop = 0; this.scrollLeft = 0; this.clientHeight = 400; }
     addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }
     async fire(name, extra = {}) { for (const fn of this.handlers[name] || []) await fn({ preventDefault() {}, stopPropagation() {}, submitter: this, target: this, currentTarget: this, ...extra }); }
@@ -41,6 +42,8 @@ function setup(t, withController = true) {
     setAttribute(key, value) { this.attributes[key] = value; }
     removeAttribute(key) { delete this.attributes[key]; if (key === 'id') this.id = ''; }
     closest() { return null; }
+    contains(item) { return this === item || this.children.some(child => child.contains?.(item)); }
+    getClientRects() { return []; }
     setPointerCapture(id) { this.captured = id; }
     hasPointerCapture(id) { return this.captured === id; }
     releasePointerCapture() { this.captured = null; }
@@ -58,11 +61,12 @@ function setup(t, withController = true) {
   }
   const nodes = new Map([...ids, ...workbenchIds, ...sqlIds].map(id => [id, new Element(id)]));
   nodes.get = id => elements.find(element => element.id === id);
+  nodes.get('projectFileTree').parent = new Element();
   for (const edge of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) nodes.get('editorResize' + edge).dataset.edge = edge;
   nodes.get('mode').value = 'workspace-write';
   const previous = { document: globalThis.document, Option: globalThis.Option, window: globalThis.window };
   const events = () => ({ handlers: {}, addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); }, async fire(name, event) { for (const handler of this.handlers[name] || []) await handler(event); } });
-  globalThis.window = { ...events(), innerWidth: 1440, innerHeight: 900, matchMedia: () => ({ matches: false }), getComputedStyle: () => ({ getPropertyValue: () => '' }) };
+  globalThis.window = { ...events(), innerWidth: 1440, innerHeight: 900, setInterval: () => 1, clearInterval() {}, matchMedia: () => ({ matches: false }), getComputedStyle: () => ({ getPropertyValue: () => '' }) };
   globalThis.Option = class { constructor(text, value) { this.textContent = text; this.value = value; } };
   globalThis.document = { ...events(), defaultView: globalThis.window, documentElement: new Element(), body: new Element(), getElementById: id => nodes.get(id), createElement: () => new Element(), querySelectorAll: () => [], querySelector: () => null };
   t.after(() => { globalThis.document = previous.document; globalThis.Option = previous.Option; globalThis.window = previous.window; });

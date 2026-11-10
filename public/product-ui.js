@@ -187,6 +187,13 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     <footer><label>提交说明<textarea data-ui="message" rows="2" maxlength="1000" placeholder="简要说明这次修改…"></textarea></label><p data-ui="hint" class="field-hint"></p><p data-ui="status" role="status" aria-live="polite"></p><div class="git-submit-buttons"><span data-ui="count">已选 0 个文件</span><button data-ui="retry" class="secondary-button" hidden>核对 / 重试上次请求</button><button data-ui="push" class="secondary-button">仅推送已有提交…</button><button data-ui="commit" class="secondary-button">仅提交…</button><button data-ui="commit-push" class="primary-button">提交并推送…</button></div></footer>`;
   if (docked) { dialog.hidden = true; dialog.setAttribute('role', 'region'); host.append(dialog); }
   else document.body.append(dialog);
+  // Remote comparison is a separate view: commit selection and editor drafts stay untouched.
+  const views = el('nav', null, 'git-view-switch'); views.setAttribute('aria-label', 'Git 视图');
+  views.innerHTML = `<button type="button" data-ui="local-view">本地修改</button><button type="button" data-ui="compare-view">与远程对比</button>`;
+  dialog.querySelector('.git-submit-meta').after(views);
+  const remoteView = el('section', null, 'git-remote-view'); remoteView.hidden = true;
+  remoteView.innerHTML = `<div class="git-remote-actions"><button type="button" data-ui="remote-fetch" class="secondary-button">获取远程</button><button type="button" data-ui="remote-reload" class="text-button">刷新比较</button></div><p data-ui="remote-scope" class="field-hint"></p><p data-ui="remote-freshness" class="field-hint"></p><p data-ui="remote-status" role="status" aria-live="polite"></p><input data-ui="remote-filter" class="git-remote-filter" type="search" maxlength="200" aria-label="筛选差异文件" placeholder="筛选差异文件…"><div data-ui="remote-files" class="git-remote-files"></div><pre data-ui="remote-preview" class="git-remote-preview" tabindex="0"></pre>`;
+  dialog.querySelector('.git-submit-body').before(remoteView);
   const $ = name => dialog.querySelector(`[data-ui="${name}"]`), drafts = new Map();
   let current, busy = false, loading = false, generation = 0, diffGeneration = 0;
   if (docked) {
@@ -204,7 +211,7 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     if (onOpenDiff) { dialog.querySelector('.git-submit-preview').hidden = true; dialog.querySelector('.git-submit-list').prepend(el('p', '点击文件在中央查看差异', 'field-hint')); }
   }
   const scoped = (route, params = {}) => `${route}?${new URLSearchParams({ cwd: current.cwd, ...params })}`;
-  function status(text, error = false, transient = false) { if (current) { current.status = text; current.statusError = error; current.statusTransient = transient; } $('status').textContent = text; $('status').className = error ? 'field-error' : ''; }
+  function status(text, error = false, transient = false) { if (current) { current.status = text; current.statusError = error; current.statusTransient = transient; } for (const node of [$('status'), $('remote-status')]) { node.textContent = text; node.className = error ? 'field-error' : ''; } }
   function pullBlocked() {
     if (!current?.snapshot?.pullAvailable) return '当前服务尚未加载拉取功能，请稍后刷新。';
     const prefix = current.cwd.replace(/\/+$/, '') + '/';
@@ -215,16 +222,20 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     const locked = busy || loading, snapshot = current?.snapshot;
     for (const button of dialog.querySelectorAll('button')) button.disabled = locked;
     $('close').disabled = busy;
-    $('message').disabled = locked;
+    $('message').disabled = locked; $('remote-filter').disabled = locked;
     $('all').disabled = $('none').disabled = locked || !snapshot;
     for (const box of dialog.querySelectorAll('input[type="checkbox"]')) box.disabled = locked;
-    $('commit').disabled = locked || !snapshot || !!snapshot.blocked || !current.selected.size || !current.message.trim() || !!current.uncertain;
+    $('commit').disabled = locked || !snapshot || !!snapshot.blocked || !current.selected.size || current.selected.size > 200 || !current.message.trim() || !!current.uncertain;
     $('commit-push').disabled = $('commit').disabled || !!snapshot?.pushBlocked;
     $('push').disabled = locked || !snapshot?.head || !!snapshot?.pushBlocked || snapshot?.ahead === 0 || !!current.uncertain;
     const pullReason = pullBlocked(); $('pull').disabled = locked || !!pullReason || !!current?.uncertain;
     $('pull').title = pullReason || '从当前上游下载并快进更新本地分支'; $('pull-hint').textContent = snapshot ? pullReason : '';
     $('retry').hidden = !current?.uncertain;
-    $('count').textContent = `已选 ${current?.selected.size || 0} 个文件`;
+    $('count').textContent = `已选 ${current?.selected.size || 0} 个文件${current?.selected.size > 200 ? '（单次最多 200 个）' : ''}`;
+    const comparison = current?.mode === 'remote';
+    $('local-view').setAttribute('aria-pressed', String(!comparison)); $('compare-view').setAttribute('aria-pressed', String(comparison));
+    $('remote-fetch').disabled = locked || !snapshot?.remoteComparisonAvailable || !current?.remote?.canFetch || !!current?.uncertain;
+    $('remote-reload').disabled = locked || !snapshot?.remoteComparisonAvailable;
     dialog.setAttribute('aria-busy', String(locked));
   }
   function render() {
@@ -235,7 +246,7 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
     $('hint').textContent = [state.blocked || state.pushBlocked, state.excluded ? `${state.excluded} 项因隐藏、排除目录或特殊文件限制未列出。` : '', '未勾选的暂存内容不会纳入本次提交；重命名按删除＋新增列出，请同时勾选。'].filter(Boolean).join(' ');
     onSnapshot(state);
     if (!state.files.length) $('files').append(el('p', '没有可提交的变更文件。', 'field-hint'));
-    for (const file of state.files) {
+    for (const file of state.files.slice(0, current.localLimit || 150)) {
       const row = el('div', null, 'git-submit-file'), box = el('input'); box.type = 'checkbox'; box.checked = current.selected.has(file.path); box.setAttribute('aria-label', `提交 ${file.path}`);
       box.onchange = () => { if (box.checked) current.selected.add(file.path); else current.selected.delete(file.path); controls(); };
       const name = el('button', null, 'git-submit-name'); name.title = file.path;
@@ -244,6 +255,10 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
       name.onclick = () => void preview(file.path);
       const badge = el('code', file.status === '??' ? '新增' : file.status); badge.title = 'Git 状态：第一列暂存区，第二列工作区';
       row.append(box, name, badge); $('files').append(row);
+    }
+    if (state.files.length > (current.localLimit || 150)) {
+      const more = el('button', `继续显示 · 已显示 ${current.localLimit || 150} / ${state.files.length}`, 'text-button git-file-more'); more.type = 'button';
+      more.onclick = () => { current.localLimit = (current.localLimit || 150) + 150; render(); }; $('files').append(more);
     }
     controls();
   }
@@ -258,6 +273,81 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
       if (!preserveStatus) status('状态已更新。');
     } catch (error) { if (id === generation) { current.snapshot = null; status(error.status === 404 ? '当前服务尚未加载 Git 提交接口。请等全部运行任务结束后，通过现有服务管理器重启，再点击刷新。' : error.message, true); } }
     finally { if (id === generation) { loading = false; controls(); } }
+  }
+  function switchView(mode) {
+    if (!current || busy || loading) return;
+    current.mode = mode;
+    remoteView.hidden = mode !== 'remote'; dialog.querySelector('.git-submit-body').hidden = mode === 'remote'; dialog.querySelector('footer').hidden = mode === 'remote';
+    controls();
+    if (mode === 'remote') void loadRemote();
+  }
+  function renderRemote() {
+    const result = current.remote, files = $('remote-files'); files.replaceChildren();
+    $('remote-scope').textContent = result?.tracking ? `远程 ${result.tracking} ↔ 本地磁盘（不含编辑器未保存草稿）` : '比较当前分支配置的远程上游与本地磁盘。';
+    const fresh = current.remoteFresh;
+    $('remote-freshness').textContent = fresh && result?.target === fresh.target ? `本窗口 ${fresh.time} 已获取；远程可能继续变化。` : '基于本地缓存的远程分支；点击“获取远程”更新，不会改动本地文件。';
+    if (!result?.available) { files.append(el('p', result?.reason || '尚未读取比较结果。', 'field-hint')); controls(); return; }
+    files.append(el('p', `本地领先 ${result.ahead ?? '未知'} · 远程领先 ${result.behind ?? '未知'} · ${result.files.length} 个文件${result.excluded ? ` · ${result.excluded} 项远程差异受限` : ''}${result.excludedLocal ? ` · ${result.excludedLocal} 项本地变更受限` : ''}`, 'git-remote-summary'));
+    const needle = (current.remoteFilter || '').trim().toLocaleLowerCase();
+    const matching = needle ? result.files.filter(file => file.path.toLocaleLowerCase().includes(needle)) : result.files;
+    if (!matching.length) files.append(el('p', needle ? '没有匹配的差异文件。' : '所允许的文件中没有发现磁盘差异。', 'field-hint'));
+    if (needle) files.append(el('p', `筛选出 ${matching.length} 个文件`, 'git-remote-summary'));
+    for (const file of matching.slice(0, current.remoteLimit || 150)) {
+      const row = el('div', null, 'git-submit-file'), name = el('button', null, 'git-submit-name'); name.type = 'button'; name.title = file.path;
+      if (docked) name.append(el('span', file.path.split('/').at(-1)), el('small', file.path.split('/').slice(0, -1).join('/'))); else name.textContent = file.path;
+      name.onclick = () => void remotePreview(file.path);
+      const labels = { A: '本地新增', D: '本地缺失', M: '修改', T: '类型变化', U: '冲突', '?': '未跟踪' };
+      const badge = el('code', labels[file.status] || file.status); badge.title = file.sameNameUntracked ? '本地未跟踪文件与远程同名，需要单独核对。' : '比较远程缓存与当前磁盘';
+      row.append(name, badge); files.append(row);
+    }
+    if (matching.length > (current.remoteLimit || 150)) {
+      const more = el('button', `继续显示 · 已显示 ${current.remoteLimit || 150} / ${matching.length}`, 'text-button git-file-more'); more.type = 'button';
+      more.onclick = () => { current.remoteLimit = (current.remoteLimit || 150) + 150; renderRemote(); }; files.append(more);
+    }
+    controls();
+  }
+  async function loadRemote({ preserveStatus = false } = {}) {
+    if (!current || busy || loading) return;
+    const draft = current, id = ++generation; ++diffGeneration;
+    if (!draft.snapshot?.remoteComparisonAvailable) {
+      draft.remote = { available: false, reason: '当前服务尚未加载远程比较功能，请在任务空闲时更新并重启服务。' };
+      renderRemote(); return;
+    }
+    loading = true; controls(); if (!preserveStatus) status('正在读取本地和远程缓存…', false, true);
+    try {
+      const result = await api(scoped('/api/git/compare'));
+      if (id !== generation || current !== draft) return;
+      draft.remote = result; renderRemote(); if (!preserveStatus) status('比较已更新。');
+    } catch (error) {
+      if (id === generation && current === draft) { draft.remote = null; renderRemote(); status(error.message, true); }
+    } finally { if (id === generation) { loading = false; controls(); } }
+  }
+  async function remotePreview(name) {
+    const draft = current, comparison = draft?.remote, id = ++diffGeneration;
+    if (!comparison?.available) return;
+    status('正在读取文件差异…', false, true);
+    try {
+      const result = await api(scoped('/api/git/compare/diff', { path: name, version: comparison.version }));
+      if (id !== diffGeneration || current !== draft || draft.mode !== 'remote' || docked && dialog.hidden) return;
+      if (onOpenDiff) await onOpenDiff({ cwd: draft.cwd, path: name, diff: result.diff, version: comparison.version, comparison: 'remote', tracking: result.tracking });
+      else { $('remote-preview').textContent = result.diff; }
+      status('已打开只读差异。');
+    } catch (error) { if (id === diffGeneration && current === draft) status(error.message, true); }
+  }
+  async function fetchRemote() {
+    const draft = current, comparison = draft?.remote;
+    if (busy || loading || !comparison?.canFetch || draft.uncertain) return;
+    busy = true; draft.remoteFresh = null; controls(); status('正在获取远程分支，不会更新本地文件…');
+    try {
+      const result = await api('/api/git/submit', { cwd: draft.cwd, version: comparison.stateVersion || comparison.version, action: 'fetch', confirmed: true, operationId: window.crypto.randomUUID() });
+      if (result.fetched) { draft.remoteFresh = { target: result.target, time: new Date().toLocaleTimeString() }; status('已获取远程分支。'); }
+      else status(result.fetchError || '获取远程未确认成功，仍显示本地缓存。', true);
+    } catch (error) { status(`获取远程未确认成功，仍显示本地缓存。${error.message}`, true); }
+    finally {
+      busy = false;
+      if (current === draft) { await refresh({ preserveStatus: true }); if (current === draft && draft.mode === 'remote') await loadRemote({ preserveStatus: true }); }
+      controls();
+    }
   }
   async function preview(name) {
     const id = ++diffGeneration, draft = current; $('filename').textContent = name; $('diff').textContent = '正在读取差异…';
@@ -300,7 +390,7 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
   async function show(cwd = getContext().cwd, { action } = {}) {
     if (busy) { if (docked && current?.cwd === cwd) { dialog.hidden = false; onShow(cwd); } return; } menu.open = false; if (!cwd) return;
     if (!drafts.has(cwd)) drafts.set(cwd, { cwd, selected: new Set(), message: '', snapshot: null, uncertain: null });
-    current = drafts.get(cwd); $('project').textContent = cwd; $('project').title = cwd; $('message').value = current.message;
+    current = drafts.get(cwd); $('remote-filter').value = current.remoteFilter || ''; current.mode = 'local'; remoteView.hidden = true; dialog.querySelector('.git-submit-body').hidden = false; dialog.querySelector('footer').hidden = false; $('project').textContent = cwd; $('project').title = cwd; $('message').value = current.message;
     $('files').replaceChildren(); $('diff').replaceChildren(); $('filename').textContent = '选择文件查看差异';
     for (const name of ['branch', 'remote', 'ahead', 'hint']) $(name).textContent = '';
     if (docked) { dialog.hidden = false; onShow(cwd); } else dialog.showModal();
@@ -316,7 +406,10 @@ export function createGitSubmit({ api, getContext, getTabs = () => [], onPulled 
   document.addEventListener('click', event => { if (!menu.contains(event.target)) menu.open = false; });
   menu.addEventListener('keydown', event => { if (event.key === 'Escape') { menu.open = false; trigger.focus(); } });
   $('message').oninput = () => { current.message = $('message').value; controls(); };
-  $('refresh').onclick = () => void refresh();
+  $('refresh').onclick = () => void (async () => { await refresh(); if (current?.mode === 'remote') await loadRemote(); })();
+  $('local-view').onclick = () => switchView('local'); $('compare-view').onclick = () => switchView('remote');
+  $('remote-reload').onclick = () => void loadRemote(); $('remote-fetch').onclick = () => void fetchRemote();
+  $('remote-filter').oninput = () => { current.remoteFilter = $('remote-filter').value; current.remoteLimit = 150; if (current.remote) renderRemote(); };
   $('all').onclick = () => { current.selected = new Set(current.snapshot.files.map(file => file.path)); render(); };
   $('none').onclick = () => { current.selected.clear(); render(); };
   for (const action of ['commit', 'commit-push', 'push', 'pull']) $(action).onclick = () => void submit(action);
